@@ -108,6 +108,8 @@ jobs:
           echo "发布版本 / release version: ${VERSION} (tag ${TAG})"
 
       - name: Package universal DMG · 打包拖拽安装镜像
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
           bash Scripts/build_dmg.sh --output dist --version "${TAG}"
