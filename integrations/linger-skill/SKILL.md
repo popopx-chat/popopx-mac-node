@@ -218,10 +218,10 @@ code 同时出现在返回值和日志行里。
 | service aliases, canonicalised before validation | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2151-2170` |
 | `invoke()` locks before the engine switch | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2118-2123` |
 | real side effects: pasteboard, unmount, display sleep, screen lock | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:5568-5576,5600-5615,5741-5780` |
-| executable route and its `{ kind, action, payload }` body | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3635-3642,3875-3879` |
-| diagnostic-only `/api/command` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3644-3651` |
-| loopback bind, fixed port, no WebSocket | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3241,3253,3289-3295` |
-| token: 24 random bytes, never persisted, `X-PPX-Token` or `?t=` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3221-3223,3701-3708` |
+| executable route and its `{ kind, action, payload }` body | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3638-3645,3878-3882` |
+| diagnostic-only `/api/command` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3647-3654` |
+| loopback bind, fixed port, no WebSocket | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3244,3256,3292-3298` |
+| token: 24 random bytes, never persisted, `X-PPX-Token` or `?t=` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3224-3226,3704-3711` |
 | body truncated at 1 800 characters | `Sources/PopopxMacNode/Models/MacNodeModels.swift:1196-1200` |
 | lock triggers compared lowercased | `Sources/PopopxMacNode/Models/MacNodeModels.swift:98` |
 | the paired-device refusal wording | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2097-2108` |

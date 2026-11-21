@@ -193,7 +193,7 @@ final class MacNodeContractTests: XCTestCase {
 
     func testPortsAndHostsMatchTheDocumentedValues() {
         XCTAssertEqual(NodeWire.consolePort, 18920)
-        XCTAssertEqual(NodeWire.simplexControlPort, 5225)
+        XCTAssertEqual(NodeWire.popopxControlPort, 5225)
         XCTAssertEqual(NodeWire.ollamaPort, 11434)
         XCTAssertEqual(NodeWire.consoleHost, "127.0.0.1")
         XCTAssertEqual(NodeWire.consoleTokenHeader, "X-PPX-Token")
@@ -1037,7 +1037,7 @@ final class MacNodeContractTests: XCTestCase {
             used: true
         )
         /* `oneTime` is a label for the QR card; retirement is unconditional.
-           `MacNodeSimplexBridge` sets `used` the moment the daemon reports the
+           `MacNodePopopxBridge` sets `used` the moment the daemon reports the
            connection was consumed, so an offer that carries `used` is spent
            whatever its `oneTime` flag says. */
         XCTAssertFalse(nonOneTime.isValid, "a retired offer is spent even when it was issued as reusable")
@@ -1073,7 +1073,7 @@ final class MacNodeContractTests: XCTestCase {
         XCTAssertTrue(root.hasSuffix("/Library/Application Support/PopopxMacNode"), root)
         let directories = [
             AppPaths.engines, AppPaths.ltxWorkspace, AppPaths.weights, AppPaths.logs, AppPaths.config,
-            AppPaths.vault, AppPaths.sealed, AppPaths.pairing, AppPaths.simplex, AppPaths.outbox,
+            AppPaths.vault, AppPaths.sealed, AppPaths.pairing, AppPaths.popopx, AppPaths.outbox,
             AppPaths.sandboxes, AppPaths.ledger, AppPaths.output, AppPaths.quarantine
         ]
         for url in directories {
@@ -1115,7 +1115,7 @@ final class MacNodeContractTests: XCTestCase {
 
         XCTAssertEqual(english.levelTwoCount, 11, "the document has eleven top-level sections")
         XCTAssertEqual(english.levelTwoCount, chinese.levelTwoCount, "one README gained or lost a section")
-        XCTAssertEqual(english.levelThreeCount, 9, "one build guide plus eight self-audit checks")
+        XCTAssertEqual(english.levelThreeCount, 10, "one build guide, the daemon install guide, plus eight self-audit checks")
         XCTAssertEqual(english.levelThreeCount, chinese.levelThreeCount, "the audit guide no longer mirrors")
         XCTAssertEqual(english.fenceCount, chinese.fenceCount, "the two documents no longer show the same commands")
         XCTAssertEqual(english.tableRowCount, chinese.tableRowCount, "the tables must keep the same rows")
@@ -1143,6 +1143,131 @@ final class MacNodeContractTests: XCTestCase {
         XCTAssertGreaterThan(chinese.hanziCount, 1_000, "README.zh-CN.md is not Chinese")
         XCTAssertTrue(english.text.contains("[简体中文](./README.zh-CN.md)"), "no way from English to Chinese")
         XCTAssertTrue(chinese.text.contains("[English](./README.md)"), "no way from Chinese to English")
+    }
+
+    /// Wizard step 2 and the SMP bridge need the daemon, so how a reader obtains it is part of the
+    /// contract, not a footnote. Two READMEs and the console must name the *same* endpoint, must
+    /// name it in checksum-first order (download, verify, then run), and must never tell the reader
+    /// to pipe a download into a shell. The bare apex host is rejected too: drop `raw.` from the
+    /// endpoint and that is what you get, it resolves to nothing, and piping a download from it
+    /// straight into bash feeds an empty body to a shell and reports success. The digest is a dated
+    /// measurement that the READMEs present as such — a test cannot fetch it, and a test that
+    /// asserted a fetched value would be a network call.
+    func testTheChatDaemonInstallGuideIsChecksumFirst() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        // Both needles are derived, not hand-typed: an absence assertion with a misspelled needle
+        // passes forever without noticing, and this file has already been bitten by `popupx`.
+        let endpoint = "https://raw.githubusercontent.com/popopx-chat/popopx-chat/master/install.sh"
+        let deadApex = endpoint.replacingOccurrences(of: "raw.", with: "")
+        let digest = "5a8d7c4572efed20fc545ea4ce256fd61cd5becee7cb82d0e86be9973d7d07f1"
+        XCTAssertTrue(endpoint.contains("raw.githubusercontent.com"), endpoint)
+        XCTAssertFalse(deadApex.contains("raw."), deadApex)
+        XCTAssertTrue(endpoint.hasSuffix("/popopx-chat/popopx-chat/master/install.sh"), endpoint)
+
+        var texts: [String: String] = [:]
+        for name in ["README.md", "README.zh-CN.md"] {
+            let text = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
+            texts[name] = text
+            XCTAssertTrue(text.contains(endpoint), "\(name) does not name the install endpoint")
+            XCTAssertEqual(text.components(separatedBy: digest).count - 1, 1, "\(name) states the digest other than once")
+            XCTAssertNil(text.range(of: deadApex), "\(name) tells the reader to download from a host that does not resolve")
+            XCTAssertEqual(text.components(separatedBy: "curl -o-").count - 1, 1, "\(name) has more than one download command")
+            for pipeToShell in ["| bash", "| sh ", "|sh", "| zsh"] {
+                XCTAssertNil(text.range(of: pipeToShell), "\(name) pipes a download straight into a shell")
+            }
+            guard let verify = text.range(of: "shasum -a 256 -c"), let run = text.range(of: "bash popopx-install.sh") else {
+                return XCTFail("\(name) is missing either the verification step or the run step")
+            }
+            XCTAssertLessThan(verify.lowerBound, run.lowerBound, "\(name) runs the script before it checks it")
+        }
+        // Inside the install section there is exactly one 64-hex string per document, it is the same
+        // one in both languages, and it is the value the prose attributes to `master/install.sh`.
+        // Elsewhere the READMEs publish other digests (the DMG, the sibling licences) and that is fine.
+        var installHexes: [String: Set<String>] = [:]
+        for (name, text) in texts {
+            let heading = name == "README.md" ? "### The chat daemon" : "### 聊天守护进程"
+            guard let from = text.range(of: heading) else { return XCTFail("\(name) has no \(heading) section") }
+            let tail = text[from.upperBound...]
+            let end = tail.range(of: "\n### ")?.lowerBound ?? tail.endIndex
+            let section = String(tail[..<end])
+            XCTAssertTrue(section.contains(endpoint), "\(name): the install section lost the endpoint")
+            installHexes[name] = jsIdentifierGroups(in: section, pattern: "([0-9a-f]{64})")
+        }
+        for (name, hexes) in installHexes {
+            XCTAssertEqual(hexes, [digest], "\(name) publishes a digest that is not the measured one: \(hexes)")
+        }
+
+        // The console copy is the third place the same command has to appear, once per language.
+        let console = try String(
+            contentsOf: root.appendingPathComponent("Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift"),
+            encoding: .utf8
+        )
+        let lines = console.split(separator: "\n", omittingEmptySubsequences: false)
+        let install = lines.filter { $0.hasPrefix("  daemonInstall: { zh:") }
+        XCTAssertEqual(install.count, 1, "the daemon-missing copy must exist exactly once")
+        guard let copy = install.first else { return }
+        XCTAssertTrue(copy.contains(endpoint), "the console names a different endpoint than the READMEs")
+        XCTAssertTrue(copy.contains("shasum"), "the console tells the reader to run the script without checking it")
+        for pipeToShell in ["| bash", "| sh ", "|sh"] {
+            XCTAssertNil(copy.range(of: pipeToShell), "the console copy pipes into a shell")
+        }
+        let halves = copy.components(separatedBy: "en: ")
+        XCTAssertEqual(halves.count, 2, "the copy is one zh string and one en string")
+        for half in halves {
+            XCTAssertTrue(half.contains(endpoint), "one language of the console copy lost the endpoint")
+            XCTAssertTrue(half.contains("popopx-chat"), "one language of the console copy does not name the daemon")
+        }
+        XCTAssertTrue(
+            console.contains("setText(\"bridge-install\", bridge.binaryPath ? \"\" : t(\"daemonInstall\"));"),
+            "the console computes the install copy but never shows it"
+        )
+    }
+
+    /// `config/engines.json` outlives a rename: a node that was configured before
+    /// `simplexChatBinaryPath` became `popopxChatBinaryPath` must still find its daemon, and the
+    /// file it writes back must contain only the new key, so the old spelling stops spreading.
+    /// Both directions are asserted against the production coders, not a hand-rolled decoder.
+    func testEnginesJSONReadsTheLegacyKeyAndWritesOnlyTheNewOne() throws {
+        func config(_ json: String) throws -> HWEngineConfig {
+            guard let decoded = NodeJSON.decode(HWEngineConfig.self, from: Data(json.utf8)) else {
+                XCTFail("the production decoder rejected \(json)")
+                return .empty
+            }
+            return decoded
+        }
+
+        let legacy = try config(
+            #"{"weightSources":[],"simplexChatBinaryPath":"/legacy/bin/popopx-chat","allowHomebrewBootstrap":true}"#
+        )
+        XCTAssertEqual(legacy.popopxChatBinaryPath, "/legacy/bin/popopx-chat", "an old engines.json lost its daemon path")
+        XCTAssertEqual(legacy.allowHomebrewBootstrap, true)
+
+        let current = try config(
+            #"{"weightSources":[],"popopxChatBinaryPath":"/new/bin/popopx-chat","allowHomebrewBootstrap":false}"#
+        )
+        XCTAssertEqual(current.popopxChatBinaryPath, "/new/bin/popopx-chat")
+
+        let both = try config(
+            #"{"weightSources":[],"popopxChatBinaryPath":"/new/bin/popopx-chat","simplexChatBinaryPath":"/legacy/bin/popopx-chat","allowHomebrewBootstrap":false}"#
+        )
+        XCTAssertEqual(both.popopxChatBinaryPath, "/new/bin/popopx-chat", "the deprecated key outranked the current one")
+
+        let absent = try config(#"{"weightSources":[],"allowHomebrewBootstrap":false}"#)
+        XCTAssertNil(absent.popopxChatBinaryPath)
+
+        // Round-tripping the value read from the legacy spelling must not write the legacy spelling.
+        guard let data = NodeJSON.encodePretty(legacy), let written = String(data: data, encoding: .utf8) else {
+            return XCTFail("the config could not be encoded")
+        }
+        XCTAssertTrue(written.contains("popopxChatBinaryPath"), written)
+        XCTAssertFalse(written.contains("simplexChatBinaryPath"), "the encoder revived the deprecated key")
+
+        // The strict fields keep their synthesized semantics: a missing or malformed one is an
+        // error, and a decode error is what makes `load()` fall back to `.empty`.
+        XCTAssertNil(NodeJSON.decode(HWEngineConfig.self, from: Data(#"{"weightSources":[]}"#.utf8)))
+        XCTAssertNil(NodeJSON.decode(HWEngineConfig.self, from: Data(#"{"weightSources":[],"allowHomebrewBootstrap":"yes"}"#.utf8)))
+        XCTAssertEqual(HWEngineConfig.load(), HWEngineConfig.load(), "loading the config twice must be deterministic")
     }
 
     /// The licence boundary is a claim about three repositories, and two of them are not in this

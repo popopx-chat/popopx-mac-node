@@ -838,6 +838,7 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
         <div class="panel__head"><h3 data-i18n="bridgeTitle"></h3><span class="tag" id="daemon-tag">—</span></div>
         <div class="grid grid--stats" id="bridge"></div>
         <p class="field__note mono" id="bridge-binary" style="margin-top:8px"></p>
+        <p class="field__note mono" id="bridge-install" style="margin-top:6px"></p>
       </section>
     </div>
   </div>
@@ -1112,6 +1113,7 @@ var I18N = {
   wsOff: { zh: "WebSocket 未连", en: "WebSocket down" },
   daemonPath: { zh: "守护进程路径", en: "Daemon path" },
   bridgeErr: { zh: "最近错误", en: "Last error" },
+  daemonInstall: { zh: "未安装 popopx-chat —— 先下载并校验再执行：curl -o- https://raw.githubusercontent.com/popopx-chat/popopx-chat/master/install.sh > popopx-install.sh；shasum -a 256 popopx-install.sh（摘要须与 README 安装说明里那条一致，不符就不要运行）；bash popopx-install.sh 会把可执行文件装进 ~/.local/bin/popopx-chat", en: "popopx-chat is not installed —— download it, check it, then run it: curl -o- https://raw.githubusercontent.com/popopx-chat/popopx-chat/master/install.sh > popopx-install.sh; shasum -a 256 popopx-install.sh (the digest must equal the one in the README install section — if it does not, do not run the script); bash popopx-install.sh installs the executable as ~/.local/bin/popopx-chat" },
   enginesTitle: { zh: "10 大业务引擎", en: "Ten business engines" },
   enginesBadge: { zh: "已启用", en: "enabled" },
   enginesLoading: { zh: "等待引擎描述符…", en: "Waiting for engine descriptors…" },
@@ -2228,6 +2230,7 @@ function renderBridge() {
   setText("bridge-binary", bridge.binaryPath
     ? t("daemonPath") + " · " + anon(String(bridge.binaryPath)) + (bridge.lastError ? " · " + t("bridgeErr") + " · " + String(bridge.lastError) : "")
     : bridge.lastError ? t("bridgeErr") + " · " + String(bridge.lastError) : "");
+  setText("bridge-install", bridge.binaryPath ? "" : t("daemonInstall"));
 }
 
 /* ------------------------------------------------------------- step three */

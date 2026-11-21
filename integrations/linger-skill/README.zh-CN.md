@@ -72,7 +72,7 @@ npm test
 ## 配置交接
 
 控制台 token 是 24 字节随机值，每次启动生成一次，并且刻意永不落盘
-（`Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3221-3223`）。它可以放在 `X-PPX-Token`
+（`Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3224-3226`）。它可以放在 `X-PPX-Token`
 请求头或 `t` 查询参数里（`:3701-3708`）。请从 `--headless` 打印的内容或菜单栏"复制配对地址"取它；技能不把
 token 写盘、不出现在日志行里，只记录 `tokenFingerprint`（长度加末四位）。
 
@@ -114,7 +114,7 @@ emoji 都算 1，而不是 JavaScript 会报出的 2 或 4 个 UTF-16 单元（`
 
 这一行只是内部表示。真正执行只走那条确实能驱动引擎的路由：`POST /api/engine/invoke`，请求体
 `{ kind, action, payload }`，其中 `payload` 必须是 JSON 对象，因为节点按字典解码
-（`LocalWebConsoleServer.swift:3635-3642,3875-3879`）。`POST /api/command` 只用于诊断，本包从不用它：
+（`LocalWebConsoleServer.swift:3638-3645,3878-3882`）。`POST /api/command` 只用于诊断，本包从不用它：
 它的引擎调用会被节点的配对白名单门禁拒绝（`TenBusinessEngines.swift:2097-2108`），原文是
 `Refused: the sender key is not on the paired-device whitelist.`
 
@@ -231,7 +231,7 @@ node --input-type=module -e 'const {NodeBridge}=await import("@popopx/node-bridg
 * 不模拟物理动作：节点不会执行的事，本适配器就不提供
 * 不排队。同一节点一条在途，因为已经有一个 actor 在串行化这些引擎
 * 不声称静默送达：`NODE_CMD` 在 iOS 上还不是 signal kind，所以节点指令会渲染成可见气泡，节点会在控制台事件上
-  记录 `iosSignalGap`（`MacNodeSimplexBridge.swift:2200-2214`）
+  记录 `iosSignalGap`（`MacNodePopopxBridge.swift:2200-2214`）
 * 不拿渲染队列当"锁定被延迟"的借口：那道闸门从不出现在锁定路径上（`TenBusinessEngines.swift:63-69`）
 
 ---
@@ -274,10 +274,10 @@ node --input-type=module -e 'const {NodeBridge}=await import("@popopx/node-bridg
 | service aliases, canonicalised before validation | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2151-2170` |
 | `invoke()` locks before the engine switch | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2118-2123` |
 | real side effects: pasteboard, unmount, display sleep, screen lock | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:5568-5576,5600-5615,5741-5780` |
-| executable route and its `{ kind, action, payload }` body | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3635-3642,3875-3879` |
-| diagnostic-only `/api/command` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3644-3651` |
-| loopback bind, fixed port, no WebSocket | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3241,3253,3289-3295` |
-| token: 24 random bytes, never persisted, `X-PPX-Token` or `?t=` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3221-3223,3701-3708` |
+| executable route and its `{ kind, action, payload }` body | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3638-3645,3878-3882` |
+| diagnostic-only `/api/command` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3647-3654` |
+| loopback bind, fixed port, no WebSocket | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3244,3256,3292-3298` |
+| token: 24 random bytes, never persisted, `X-PPX-Token` or `?t=` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3224-3226,3704-3711` |
 | body truncated at 1 800 characters | `Sources/PopopxMacNode/Models/MacNodeModels.swift:1196-1200` |
 | lock triggers compared lowercased | `Sources/PopopxMacNode/Models/MacNodeModels.swift:98` |
 | the paired-device refusal wording | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2097-2108` |

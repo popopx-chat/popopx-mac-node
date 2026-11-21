@@ -1,5 +1,5 @@
 //
-//  MacNodeSimplexBridge.swift
+//  MacNodePopopxBridge.swift
 //  PopopxMacNode — module 2: the end-to-end encrypted signalling gateway.
 //
 //  This actor owns everything that talks to the local chat daemon:
@@ -17,11 +17,11 @@
 //  ── Wire facts this file is written against ────────────────────────────────
 //
 //  These come from the `popopx-chat` / `popopxmq` sources, not from upstream
-//  SimpleX folklore:
+//  folklore:
 //
 //  * The binary is `popopx-chat` started with
 //    `--chat-server-port <N>`. There is **no default port** — without the flag
-//    nothing binds, so we always pass `NodeWire.simplexControlPort`.
+//    nothing binds, so we always pass `NodeWire.popopxControlPort`.
 //  * We never pass `-e/--execute` (it runs one command and exits) and never pass
 //    `--maintenance` (the chat core auto-starts before the server binds).
 //  * `runLocalTCPServer` in `popopxmq/src/Popopx/Messaging/Transport/Server.hs`
@@ -910,7 +910,7 @@ public func SBPlaceholderIdentity() -> NodeIdentity {
 /// * no `DispatchQueue.main` and no `DispatchSemaphore.wait` anywhere — parking a
 ///   cooperative thread would stall the whole pool, and in particular the receive
 ///   loop that has to deliver the reply an event handler is waiting for.
-public actor MacNodeSimplexBridge: NodeSignaling {
+public actor MacNodePopopxBridge: NodeSignaling {
     // MARK: Collaborators
 
     private let settings: SettingsStore
@@ -926,7 +926,7 @@ public actor MacNodeSimplexBridge: NodeSignaling {
     private var daemonState: DaemonState = .stopped
     private var binaryPath: String?
     private let stderrRing = SBLineRing(capacity: 200)
-    private var controlPort: UInt16 = NodeWire.simplexControlPort
+    private var controlPort: UInt16 = NodeWire.popopxControlPort
     private var restarts = 0
     private var daemonGeneration = 0
     private var daemonStartedAt: Date?
@@ -1534,7 +1534,7 @@ public actor MacNodeSimplexBridge: NodeSignaling {
         process.environment = Shell.augmentedEnvironment
         // The daemon keeps its own profile directory; running from the node's tree
         // only makes a stray relative write easy to find.
-        process.currentDirectoryURL = AppPaths.simplex
+        process.currentDirectoryURL = AppPaths.popopx
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
 

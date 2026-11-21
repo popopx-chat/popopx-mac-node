@@ -53,6 +53,26 @@ Commands for the 10 Discover businesses arrive from the iOS client over **your o
 8. **iOS funnel**: open the POPOPX app → bottom **“Discover”** tab → **“Mac Node pairing”** → scan. The web page flips to “✅ encrypted tunnel to your iPhone established”.
 9. Wizard step 3: per-engine switches, idle compute sharing, physical-sentinel volumes/webhooks, Chrono Ark heartbeat period — turn on what you actually use. This is the screen where Discover stops being a demo and starts being your hardware.
 
+### The chat daemon (`popopx-chat`)
+
+Wizard step 2 and the SMP bridge need the chat daemon on `PATH`; the ten engines themselves do not. The
+node probes one executable, `popopx-chat`, and has no fallback: an upstream build would answer a version
+line here and then fail every command afterwards, so it is not probed at all. Install it yourself, and
+check the download before you run it:
+
+```sh
+curl -o- https://raw.githubusercontent.com/popopx-chat/popopx-chat/master/install.sh > popopx-install.sh
+echo "5a8d7c4572efed20fc545ea4ce256fd61cd5becee7cb82d0e86be9973d7d07f1  popopx-install.sh" | shasum -a 256 -c
+# expected: popopx-install.sh: OK
+bash popopx-install.sh
+```
+
+The digest is the one this repository measured for `master/install.sh` on 2026-11-21. `master` is a
+mutable branch, so a mismatch means upstream edited the script: take it again from a release you can
+attribute, or compile it from source, instead of running the difference. The installer uses no sudo and
+writes `~/.local/bin/popopx-chat`; if that directory is not on your `PATH`, wizard step 1 keeps reporting
+the daemon as missing.
+
 ### Build from source
 
 ```sh
@@ -105,7 +125,7 @@ The rule at the top of the diagram is the whole point of this project: **there i
         v                                ^
    +----------------------------------------+            +--------------------------------+
    |[ MAC NODE GATEWAY - Core/ ]            |            |[ LOCAL WEB CONSOLE ]           |
-   |MacNodeSimplexBridge.swift              |+---------->|WebConsole/LocalWebConsoleServer|
+   |MacNodePopopxBridge.swift               |+---------->|WebConsole/LocalWebConsoleServer|
    |  popopx-chat daemon :5225              |            |.swift   (NWListener, no web fw)|
    |  ::popopx_sys::NODE_CMD::              |            |                                |
    |    {serviceId}::{action}::{payload}    |            |http://127.0.0.1:18920          |

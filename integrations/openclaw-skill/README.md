@@ -181,7 +181,7 @@ PPX_CONSOLE_TOKEN=<token> node --input-type=module -e 'import { TenServicesRoute
 Step 1 answers `lockdownDenied` and `emptyAction` with the node stopped, which is the point: those answers
 did not come from the network. The console only exists while the app is up, so a refused connection in step
 0 means the node is not running rather than that the plugin failed. Every `/api/` route needs the bearer,
-the health check included (`Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3556-3563`).
+the health check included (`Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3559-3566`).
 
 ## Layout, scripts and gates
 

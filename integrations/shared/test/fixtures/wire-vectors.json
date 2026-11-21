@@ -142,7 +142,7 @@
       "name": "prefix mid-line",
       "line": "please run ::popopx_sys::NODE_CMD::shadow_cos::briefing::{\"a\":1}",
       "nodeParse": "reject",
-      "note": "the SMP inbound parser (SBCommandCodec.parse, MacNodeSimplexBridge.swift:656-658) searches the whole line, so a chat message can carry the marker mid-sentence. That leniency is deliberately not copied here.",
+      "note": "the SMP inbound parser (SBCommandCodec.parse, MacNodePopopxBridge.swift:656-658) searches the whole line, so a chat message can carry the marker mid-sentence. That leniency is deliberately not copied here.",
       "bridge": {
         "ok": false,
         "code": "malformedCommand"
@@ -163,7 +163,7 @@
       "name": "payload that is not JSON",
       "line": "::popopx_sys::NODE_CMD::health_sentinel::read::today felt fine",
       "nodeParse": "accept",
-      "note": "the node keeps a non-JSON payload as a string (MacNodeSimplexBridge.swift:375-380), but /api/engine/invoke decodes payload as a dictionary, so a plugin must send an object.",
+      "note": "the node keeps a non-JSON payload as a string (MacNodePopopxBridge.swift:375-380), but /api/engine/invoke decodes payload as a dictionary, so a plugin must send an object.",
       "bridge": {
         "ok": false,
         "code": "malformedCommand"

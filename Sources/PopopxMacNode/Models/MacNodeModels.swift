@@ -61,7 +61,7 @@ public enum NodeWire {
     /// it only listens when `--chat-server-port` is passed, and it binds
     /// `127.0.0.1` with plain `ws://` and no authentication. 5225 is the value the
     /// client libraries use, so we pass it explicitly.
-    public static let simplexControlPort: UInt16 = 5225
+    public static let popopxControlPort: UInt16 = 5225
 
     /// Flag that turns the daemon into a WebSocket server (`short 'p'`).
     public static let chatServerPortFlag = "--chat-server-port"
@@ -1050,7 +1050,7 @@ public struct BridgeStatus: Codable, Sendable, Equatable {
     public init(
         daemon: DaemonState,
         binaryPath: String? = nil,
-        controlPort: UInt16 = NodeWire.simplexControlPort,
+        controlPort: UInt16 = NodeWire.popopxControlPort,
         websocketConnected: Bool = false,
         pairedDevices: Int = 0,
         acceptedCommands: Int = 0,
@@ -2330,7 +2330,7 @@ public enum AppPaths {
     public static var vault: URL { root.appendingPathComponent("vault", isDirectory: true) }
     public static var sealed: URL { vault.appendingPathComponent("sealed", isDirectory: true) }
     public static var pairing: URL { root.appendingPathComponent("pairing", isDirectory: true) }
-    public static var simplex: URL { root.appendingPathComponent("simplex", isDirectory: true) }
+    public static var popopx: URL { root.appendingPathComponent("popopx", isDirectory: true) }
     public static var outbox: URL { root.appendingPathComponent("outbox", isDirectory: true) }
     public static var sandboxes: URL { root.appendingPathComponent("sandboxes", isDirectory: true) }
     public static var ledger: URL { root.appendingPathComponent("ledger", isDirectory: true) }
@@ -2356,7 +2356,7 @@ public enum AppPaths {
     public static func ensureLayout() throws -> [URL] {
         let directories = [
             root, engines, ltxWorkspace, weights, logs, config, vault, sealed,
-            pairing, simplex, outbox, sandboxes, ledger, output, quarantine
+            pairing, popopx, outbox, sandboxes, ledger, output, quarantine
         ]
         for url in directories {
             try fileManager.createDirectory(at: url, withIntermediateDirectories: true)

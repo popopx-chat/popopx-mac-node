@@ -58,23 +58,50 @@ public struct HWWeightSource: Codable, Sendable, Equatable, Identifiable {
 /// Contents of `config/engines.json`.
 public struct HWEngineConfig: Codable, Sendable, Equatable {
     public var weightSources: [HWWeightSource]
-    public var simplexChatBinaryPath: String?
+    public var popopxChatBinaryPath: String?
     public var ollamaBaseURL: String?
     public var allowHomebrewBootstrap: Bool
 
     public init(
         weightSources: [HWWeightSource] = [],
-        simplexChatBinaryPath: String? = nil,
+        popopxChatBinaryPath: String? = nil,
         ollamaBaseURL: String? = nil,
         allowHomebrewBootstrap: Bool = false
     ) {
         self.weightSources = weightSources
-        self.simplexChatBinaryPath = simplexChatBinaryPath
+        self.popopxChatBinaryPath = popopxChatBinaryPath
         self.ollamaBaseURL = ollamaBaseURL
         self.allowHomebrewBootstrap = allowHomebrewBootstrap
     }
 
     public static let empty = HWEngineConfig()
+
+    private enum CodingKeys: String, CodingKey {
+        case weightSources
+        case popopxChatBinaryPath
+        /// The pre-rename spelling of the same value, read so an `engines.json` written before the
+        /// rename keeps its configured path. `encode(to:)` never writes this key.
+        case simplexChatBinaryPath
+        case ollamaBaseURL
+        case allowHomebrewBootstrap
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        weightSources = try container.decode([HWWeightSource].self, forKey: .weightSources)
+        popopxChatBinaryPath = try container.decodeIfPresent(String.self, forKey: .popopxChatBinaryPath)
+            ?? container.decodeIfPresent(String.self, forKey: .simplexChatBinaryPath)
+        ollamaBaseURL = try container.decodeIfPresent(String.self, forKey: .ollamaBaseURL)
+        allowHomebrewBootstrap = try container.decode(Bool.self, forKey: .allowHomebrewBootstrap)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(weightSources, forKey: .weightSources)
+        try container.encodeIfPresent(popopxChatBinaryPath, forKey: .popopxChatBinaryPath)
+        try container.encodeIfPresent(ollamaBaseURL, forKey: .ollamaBaseURL)
+        try container.encode(allowHomebrewBootstrap, forKey: .allowHomebrewBootstrap)
+    }
 
     public static var configFile: URL {
         AppPaths.config.appendingPathComponent("engines.json")
@@ -309,7 +336,7 @@ public actor HardwareProfiler {
         // and the only candidate probed: an upstream install would answer a version
         // line here and then fail every command later, which is worse than an
         // honest "missing dependency".
-        let configured = config.simplexChatBinaryPath
+        let configured = config.popopxChatBinaryPath
         let resolved = Self.resolveChatBinary(configured: configured)
         var chatVersion: String?
         if let resolved {

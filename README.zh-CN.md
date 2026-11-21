@@ -53,6 +53,19 @@ iOS 客户端「发现」里 10 个业务的指令，通过 **你自己的 popop
 8. **iOS 端漏斗**：打开 POPOPX App → 底部 **「发现」** Tab → **「Mac Node 配对」** → 扫一扫。网页端会立刻跳到 “✅ 已成功与 iPhone 建立加密隧道”。
 9. 向导第 3 步：10 大业务独立开关、空闲算力共享、物理哨兵挂载卷 / Webhook、时光方舟心跳周期 —— 按需开启。配完这一屏，iPhone 上的「发现」页就从“演示态”变成“你家的算力真的在跑”。
 
+### 聊天守护进程（`popopx-chat`）
+
+向导第 2 步与 SMP 桥接需要聊天守护进程在 `PATH` 上；十个引擎本身不需要它。节点只探测一个可执行文件 `popopx-chat`，没有任何回退：上游构建会先答出一行版本号，然后把之后每一条指令都跑失败，所以我们根本不探测它。请自己安装，并在执行之前先校验下载内容：
+
+```sh
+curl -o- https://raw.githubusercontent.com/popopx-chat/popopx-chat/master/install.sh > popopx-install.sh
+echo "5a8d7c4572efed20fc545ea4ce256fd61cd5becee7cb82d0e86be9973d7d07f1  popopx-install.sh" | shasum -a 256 -c
+# 期望：popopx-install.sh: OK
+bash popopx-install.sh
+```
+
+这条摘要值来自本仓库在 2026-11-21 对 `master/install.sh` 的实测。`master` 是可变分支，摘要不符说明上游改过脚本：请重新取自一个可以归属的发布版本，或者自行编译，而不是把这份差异直接喂给 shell。安装脚本不使用 sudo，写入 `~/.local/bin/popopx-chat`；若该目录不在你的 `PATH` 上，向导第 1 步会持续报告守护进程缺失。
+
 ### 从源码构建
 
 ```sh
@@ -105,7 +118,7 @@ bash Scripts/build_dmg.sh --skip-build --output dist --version 1.0.0
         v                                ^
    +----------------------------------------+            +--------------------------------+
    |[ MAC NODE GATEWAY - Core/ ]            |            |[ LOCAL WEB CONSOLE ]           |
-   |MacNodeSimplexBridge.swift              |+---------->|WebConsole/LocalWebConsoleServer|
+   |MacNodePopopxBridge.swift               |+---------->|WebConsole/LocalWebConsoleServer|
    |  popopx-chat daemon :5225              |            |.swift   (NWListener, no web fw)|
    |  ::popopx_sys::NODE_CMD::              |            |                                |
    |    {serviceId}::{action}::{payload}    |            |http://127.0.0.1:18920          |

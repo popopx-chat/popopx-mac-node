@@ -77,7 +77,7 @@ npm test
 ## Configure the handoff
 
 The console token is 24 random bytes minted once per launch and deliberately never persisted
-(`Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3221-3223`). It is accepted as the
+(`Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3224-3226`). It is accepted as the
 `X-PPX-Token` header or the `t` query parameter (`:3701-3708`). Copy it from what `--headless` prints or
 from the menu bar's copy-console-URL action; the skill never writes it to disk and never puts it in a
 log line, only `tokenFingerprint` (length plus last four characters).
@@ -127,7 +127,7 @@ validates (`TenBusinessEngines.swift:2151-2170`).
 The line is only an internal representation. Execution goes to the one route that can actually run an
 engine, `POST /api/engine/invoke` with the body `{ kind, action, payload }`, where `payload` must be a
 JSON object because the node decodes it as a dictionary
-(`LocalWebConsoleServer.swift:3635-3642,3875-3879`). `POST /api/command` is kept for diagnostics only
+(`LocalWebConsoleServer.swift:3638-3645,3878-3882`). `POST /api/command` is kept for diagnostics only
 and is never used here: its engine calls are refused by the node's whitelist gate
 (`TenBusinessEngines.swift:2097-2108`) with the literal wording
 `Refused: the sender key is not on the paired-device whitelist.`
@@ -254,7 +254,7 @@ not a bug.
 * it does not queue. One in-flight command per node, because one actor already serialises the engines
 * it does not claim silent delivery: `NODE_CMD` is not yet a signal kind on iOS, so a node command
   renders as a visible bubble and the node records `iosSignalGap` on the console event
-  (`MacNodeSimplexBridge.swift:2200-2214`)
+  (`MacNodePopopxBridge.swift:2200-2214`)
 * it does not read the render queue as an excuse for a delayed lock: that gate is never on the lockdown
   path (`TenBusinessEngines.swift:63-69`)
 
@@ -298,10 +298,10 @@ not a bug.
 | service aliases, canonicalised before validation | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2151-2170` |
 | `invoke()` locks before the engine switch | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2118-2123` |
 | real side effects: pasteboard, unmount, display sleep, screen lock | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:5568-5576,5600-5615,5741-5780` |
-| executable route and its `{ kind, action, payload }` body | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3635-3642,3875-3879` |
-| diagnostic-only `/api/command` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3644-3651` |
-| loopback bind, fixed port, no WebSocket | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3241,3253,3289-3295` |
-| token: 24 random bytes, never persisted, `X-PPX-Token` or `?t=` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3221-3223,3701-3708` |
+| executable route and its `{ kind, action, payload }` body | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3638-3645,3878-3882` |
+| diagnostic-only `/api/command` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3647-3654` |
+| loopback bind, fixed port, no WebSocket | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3244,3256,3292-3298` |
+| token: 24 random bytes, never persisted, `X-PPX-Token` or `?t=` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3224-3226,3704-3711` |
 | body truncated at 1 800 characters | `Sources/PopopxMacNode/Models/MacNodeModels.swift:1196-1200` |
 | lock triggers compared lowercased | `Sources/PopopxMacNode/Models/MacNodeModels.swift:98` |
 | the paired-device refusal wording | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2097-2108` |

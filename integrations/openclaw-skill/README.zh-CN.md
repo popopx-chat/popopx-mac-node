@@ -172,7 +172,7 @@ PPX_CONSOLE_TOKEN=<token> node --input-type=module -e 'import { TenServicesRoute
 
 第 1 步在节点停机时仍然回答 `lockdownDenied` 与 `emptyAction`，这正是重点：这两个答复不是网络上来的。控制台只在
 App 运行期间存在，所以第 0 步里一次被拒绝的连接意味着节点没在跑，而不是插件出了问题。所有 `/api/` 路由都要
-bearer，健康检查也不例外（`Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3556-3563`）。
+bearer，健康检查也不例外（`Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3559-3566`）。
 
 ## 目录结构、脚本与门禁
 

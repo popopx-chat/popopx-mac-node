@@ -601,7 +601,7 @@ final class NodeModel: ObservableObject {
         let settings = SettingsStore.shared
         let console = NodeConsole(
             environment: NodeEnvironment(),
-            signaling: MacNodeSimplexBridge(settings: settings, hub: hub),
+            signaling: MacNodePopopxBridge(settings: settings, hub: hub),
             engines: TenBusinessEngines(settings: settings, hub: hub),
             settings: settings,
             hub: hub

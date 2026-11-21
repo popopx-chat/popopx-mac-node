@@ -15,30 +15,30 @@ producer: if this file and `Sources/` disagree, `Sources/` is right and this fil
 
 | Direction | Mechanism | Real endpoint | Source |
 | --- | --- | --- | --- |
-| bridge → node | HTTP `POST`, JSON, identity encoding | `http://127.0.0.1:18920/api/engine/invoke` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3635-3642` |
-| bridge → node | HTTP `POST` (diagnostics only, see §6) | `http://127.0.0.1:18920/api/command` | `LocalWebConsoleServer.swift:3644-3651` |
-| node → bridge | Server-Sent Events, one long-lived response | `GET /api/events?t=<token>` | `LocalWebConsoleServer.swift:3683-3697` |
+| bridge → node | HTTP `POST`, JSON, identity encoding | `http://127.0.0.1:18920/api/engine/invoke` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3638-3645` |
+| bridge → node | HTTP `POST` (diagnostics only, see §6) | `http://127.0.0.1:18920/api/command` | `LocalWebConsoleServer.swift:3647-3654` |
+| node → bridge | Server-Sent Events, one long-lived response | `GET /api/events?t=<token>` | `LocalWebConsoleServer.swift:3686-3700` |
 | node → anyone | Outbound webhook with HMAC signature, **off by default** | whatever `sentinel.webhookURL` is set to | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:5795-5831` |
 
 The listener binds loopback only and refuses to serve otherwise
-(`LocalWebConsoleServer.swift:3241,3264-3273,3407-3415,3425-3432`; `NodeWire.consoleHost`,
+(`LocalWebConsoleServer.swift:3244,3267-3276,3410-3418,3428-3435`; `NodeWire.consoleHost`,
 `NodeWire.consolePort` at `Sources/PopopxMacNode/Models/MacNodeModels.swift:58,89`). The port is
 fixed with no fallback: a bind failure is an error, never a different port
-(`LocalWebConsoleServer.swift:3253,3289-3295`).
+(`LocalWebConsoleServer.swift:3256,3292-3298`).
 
 **There is no WebSocket endpoint on `18920`.** The only `ws://` in this system is the chat
 daemon's control socket on `127.0.0.1:5225`, which is unauthenticated by design and to which the
 node itself is the client (`MacNodeModels.swift:60-67`;
-`Sources/PopopxMacNode/Core/MacNodeSimplexBridge.swift:323,940,1712-1741`). A bridge plugin must
+`Sources/PopopxMacNode/Core/MacNodePopopxBridge.swift:323,940,1712-1741`). A bridge plugin must
 not connect there: it would be an unauthenticated second session that cannot reach the paired
 conversation. Request/response plus SSE is the pair this contract uses.
 
 ## 2 · Authentication
 
 The console token is 24 `SecRandomCopyBytes` bytes, base64url without padding, generated once per
-launch and **deliberately never persisted** — `LocalWebConsoleServer.swift:3221-3223,3246` and
+launch and **deliberately never persisted** — `LocalWebConsoleServer.swift:3224-3226,3249` and
 `MacNodeModels.swift:3064-3071`. It is accepted in the `X-PPX-Token` header or the `t` query
-parameter, compared in a timing-safe way (`LocalWebConsoleServer.swift:3701-3708`;
+parameter, compared in a timing-safe way (`LocalWebConsoleServer.swift:3704-3711`;
 `MacNodeModels.swift:92,95,3098-3103`), and a missing or wrong value is `401` with a plain-language
 body (`LocalWebConsoleServer.swift:83`).
 
@@ -64,14 +64,14 @@ Canonical form, one space-separated line, no wrapping:
   where the ceiling is `1_024` and the two leading segments are charged against it
   (`MacNodeModels.swift:52,129-131`)
 * payload is raw JSON text. No base64, no percent-encoding. A payload that is not valid JSON is not
-  an error: the node keeps it as a string (`MacNodeSimplexBridge.swift:375-380`, `MacNodeModels.swift:1136`)
+  an error: the node keeps it as a string (`MacNodePopopxBridge.swift:375-380`, `MacNodeModels.swift:1136`)
 
 The node has **two** parsers and they do not agree, which is why this contract names one:
 
 | Parser | Where it runs | Marker position | Empty payload | Unknown serviceId |
 | --- | --- | --- | --- | --- |
 | `NodeWire.parseCommand` — "the one and only parser" (`MacNodeModels.swift:106`) | local console injection | prefix | rejected | rejected |
-| `SBCommandCodec.parse` | inbound SMP chat | anywhere in the line (`MacNodeSimplexBridge.swift:656-658`) | accepted (`:667`) | accepted, then refused downstream (`TenBusinessEngines.swift:2077-2091`) |
+| `SBCommandCodec.parse` | inbound SMP chat | anywhere in the line (`MacNodePopopxBridge.swift:656-658`) | accepted (`:667`) | accepted, then refused downstream (`TenBusinessEngines.swift:2077-2091`) |
 
 Bridges implement the strict column. Aliases from `engine(for:)` (`TenBusinessEngines.swift:2151-2170`)
 are canonicalised **before** validation, so `warroom` reaches `zero_trust_warroom` while remaining
@@ -125,7 +125,7 @@ Every engine's `default:` arm returns `unsupported(kind, action, allowed)` with 
 
 ## 6 · What the console cannot do — and the refusal wording
 
-`POST /api/command` wraps bare text into the canonical prefix (`LocalWebConsoleServer.swift:3650-3651`)
+`POST /api/command` wraps bare text into the canonical prefix (`LocalWebConsoleServer.swift:3653-3654`)
 and submits it as a **local** command with `senderPublicKey: "local-console"` and
 `authenticated: false` (`MacNodeModels.swift:115-116`; `PopopxMacNodeApp.swift:361-375,402-404`).
 `execute` then refuses it at its second gate (`TenBusinessEngines.swift:2097-2108`):
@@ -136,7 +136,7 @@ Refused: the sender key is not on the paired-device whitelist.
 
 So the literal `NODE_CMD` string is **not** an HTTP-triggerable execution path, even though the
 grammar is real. Execution for a bridge goes through `POST /api/engine/invoke`, whose body is
-`{ kind, action, payload }` (`LocalWebConsoleServer.swift:3875-3879`) and which is synchronous JSON,
+`{ kind, action, payload }` (`LocalWebConsoleServer.swift:3878-3882`) and which is synchronous JSON,
 not a stream. The bridge parses the canonical line (§3), then maps it onto `invoke`; `/api/command`
 stays available only for reading the node's own parse verdicts, and is disabled by default.
 
@@ -146,7 +146,7 @@ Other refusals worth matching in a plugin:
 | --- | --- | --- |
 | unknown engine id | `Unknown service identifier “…”. Known ids: …` | `TenBusinessEngines.swift:2086-2090` |
 | engine switched off | `引擎已关闭 · … is switched off.` / `Nothing was executed.` | `:2177-2186` |
-| malformed line (SMP path) | `NODE_CMD 段数不足或 serviceId/action 为空` — logged locally, **nothing is replied on the wire** | `MacNodeSimplexBridge.swift:2165-2174` |
+| malformed line (SMP path) | `NODE_CMD 段数不足或 serviceId/action 为空` — logged locally, **nothing is replied on the wire** | `MacNodePopopxBridge.swift:2165-2174` |
 | bad token | `401` + `Missing or wrong console token. …` | `LocalWebConsoleServer.swift:83` |
 | wrong method | `405` + `Allow` | `:3661-3671,3742-3744` |
 | body > 8 MiB | `413`; missing `Content-Length` → `411` | `:3163,4083-4088` |
@@ -177,7 +177,7 @@ silently fixing the node:
    (`MacNodeModels.swift:98`), compared lowercased.
 
 Empty actions are *not* a hole over HTTP: the route rejects an empty action before `invoke` sees it
-(`LocalWebConsoleServer.swift:3641`), even though `invoke` itself treats `""` as a lock.
+(`LocalWebConsoleServer.swift:3644`), even though `invoke` itself treats `""` as a lock.
 
 Bridge-side policy, enforced in `shared/src/wireCommand.ts` and both plugins:
 
@@ -195,7 +195,7 @@ Do not build a second lock. One actor owns all ten engines so that the SMP entry
 console button path share a single scheduler (`TenBusinessEngines.swift:7-9,1917`), and the app
 routes commands through one task (`PopopxMacNodeApp.swift:165-171`). Commands fan out to subscribers
 through `AsyncStream(bufferingPolicy: .bufferingNewest(64))`
-(`MacNodeSimplexBridge.swift:1309-1324`). A plugin therefore keeps at most one in-flight
+(`MacNodePopopxBridge.swift:1309-1324`). A plugin therefore keeps at most one in-flight
 `engine/invoke` per node, with one retry, and lets the actor do the rest. The heavy/light render gate
 (`TenBusinessEngines.swift:63-69`) is never on the lockdown path, so a bridge must not present
 render-queue depth as a reason a lock was delayed.
@@ -204,11 +204,11 @@ render-queue depth as a reason a lock was delayed.
 
 There is no acknowledgement kind. The node's reply to a remote command is an ordinary chat card:
 `✅`/`⚠️` + engine name + headline, body truncated to 1 800 characters
-(`MacNodeModels.swift:1196-1200`; `MacNodeSimplexBridge.swift:2476-2512`), with at-least-once
+(`MacNodeModels.swift:1196-1200`; `MacNodePopopxBridge.swift:2476-2512`), with at-least-once
 re-queue on failure (`:2471-2475,2518-2541`). `NodeWire.signalMarker` is declared but never used
 outbound. `NODE_CMD` is not yet a `PopopxCommerceSignalKind` on iOS, so a node command renders as a
 visible bubble; the node records that per command as a **console event** field
-`iosSignalGap` (`MacNodeSimplexBridge.swift:2200-2214`, notice text at `:982-985`) — it is not part
+`iosSignalGap` (`MacNodePopopxBridge.swift:2200-2214`, notice text at `:982-985`) — it is not part
 of a `POST /api/engine/invoke` response, and the event carries `payloadHash` rather than the payload
 (`:2205`). A bridge must not claim silent delivery.
 

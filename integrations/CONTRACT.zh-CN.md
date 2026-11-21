@@ -14,26 +14,26 @@
 
 | 方向 | 机制 | 真实端点 | 出处 |
 | --- | --- | --- | --- |
-| 桥 → 节点 | HTTP `POST`，JSON，identity 编码 | `http://127.0.0.1:18920/api/engine/invoke` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3635-3642` |
-| 桥 → 节点 | HTTP `POST`（仅诊断，见 §6） | `http://127.0.0.1:18920/api/command` | `LocalWebConsoleServer.swift:3644-3651` |
-| 节点 → 桥 | Server-Sent Events，单条长连接响应 | `GET /api/events?t=<token>` | `LocalWebConsoleServer.swift:3683-3697` |
+| 桥 → 节点 | HTTP `POST`，JSON，identity 编码 | `http://127.0.0.1:18920/api/engine/invoke` | `Sources/PopopxMacNode/WebConsole/LocalWebConsoleServer.swift:3638-3645` |
+| 桥 → 节点 | HTTP `POST`（仅诊断，见 §6） | `http://127.0.0.1:18920/api/command` | `LocalWebConsoleServer.swift:3647-3654` |
+| 节点 → 桥 | Server-Sent Events，单条长连接响应 | `GET /api/events?t=<token>` | `LocalWebConsoleServer.swift:3686-3700` |
 | 节点 → 任意方 | 带 HMAC 签名的出站 webhook，**默认关闭** | 取决于 `sentinel.webhookURL` 的配置值 | `Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:5795-5831` |
 
-监听器只绑回环，否则拒绝服务（`LocalWebConsoleServer.swift:3241,3264-3273,3407-3415,3425-3432`；
+监听器只绑回环，否则拒绝服务（`LocalWebConsoleServer.swift:3244,3267-3276,3410-3418,3428-3435`；
 `NodeWire.consoleHost`、`NodeWire.consolePort` 见 `Sources/PopopxMacNode/Models/MacNodeModels.swift:58,89`）。
-端口固定且无回退：绑定失败就是错误，绝不会换成另一个端口（`LocalWebConsoleServer.swift:3253,3289-3295`）。
+端口固定且无回退：绑定失败就是错误，绝不会换成另一个端口（`LocalWebConsoleServer.swift:3256,3292-3298`）。
 
 **`18920` 上没有 WebSocket 端点。** 本系统里唯一的 `ws://` 是聊天守护进程的控制套接字
 `127.0.0.1:5225`，它按设计不做鉴权，而且节点自己是它的客户端（`MacNodeModels.swift:60-67`；
-`Sources/PopopxMacNode/Core/MacNodeSimplexBridge.swift:323,940,1712-1741`）。桥接插件不得去连它：
+`Sources/PopopxMacNode/Core/MacNodePopopxBridge.swift:323,940,1712-1741`）。桥接插件不得去连它：
 那等于插入一个无鉴权的第二会话，且拿不到已配对的会话。本契约采用的是一对组合：请求/响应 + SSE。
 
 ## 2 · 鉴权
 
 控制台 token 是 24 字节 `SecRandomCopyBytes`，base64url 无填充，每次启动生成一次，
-并且**刻意永不落盘**——见 `LocalWebConsoleServer.swift:3221-3223,3246` 与
+并且**刻意永不落盘**——见 `LocalWebConsoleServer.swift:3224-3226,3249` 与
 `MacNodeModels.swift:3064-3071`。它可放在 `X-PPX-Token` 请求头或 `t` 查询参数里，比较方式为
-时序安全比较（`LocalWebConsoleServer.swift:3701-3708`；`MacNodeModels.swift:92,95,3098-3103`），
+时序安全比较（`LocalWebConsoleServer.swift:3704-3711`；`MacNodeModels.swift:92,95,3098-3103`），
 缺失或错误一律 `401` 并附带一句人话说明（`LocalWebConsoleServer.swift:83`）。
 
 本套插件使用的交接方式（方案甲）：操作者粘贴带 token 的控制台 URL，或设置
@@ -57,14 +57,14 @@
 * payload 预算：`payload.count <= NodeWire.maxSignalPayloadCharacters - (serviceId.count + action.count + 2)`，
   上限常量为 `1_024`，前两段也计入（`MacNodeModels.swift:52,129-131`）
 * payload 是原始 JSON 文本。不做 base64，不做百分号编码。JSON 解析失败不算错误：节点把它当字符串保留
-  （`MacNodeSimplexBridge.swift:375-380`、`MacNodeModels.swift:1136`）
+  （`MacNodePopopxBridge.swift:375-380`、`MacNodeModels.swift:1136`）
 
 节点里存在**两个**解析器，而且它们不一致，所以本契约只认定其中一个：
 
 | 解析器 | 运行位置 | marker 位置 | 空 payload | 未知 serviceId |
 | --- | --- | --- | --- | --- |
 | `NodeWire.parseCommand` — "the one and only parser"（`MacNodeModels.swift:106`） | 本地控制台注入 | 必须是前缀 | 拒绝 | 拒绝 |
-| `SBCommandCodec.parse` | 入站 SMP 聊天 | 行内任意位置（`MacNodeSimplexBridge.swift:656-658`） | 允许（`:667`） | 放行，下游再拒（`TenBusinessEngines.swift:2077-2091`） |
+| `SBCommandCodec.parse` | 入站 SMP 聊天 | 行内任意位置（`MacNodePopopxBridge.swift:656-658`） | 允许（`:667`） | 放行，下游再拒（`TenBusinessEngines.swift:2077-2091`） |
 
 桥接实现"严格"那一列。`engine(for:)`（`TenBusinessEngines.swift:2151-2170`）里的别名在**校验之前**
 先规范名化，因此 `warroom` 会归到 `zero_trust_warroom`，但作为原始 wire id 仍然非法。动作匹配
@@ -116,7 +116,7 @@
 
 ## 6 · 控制台做不到什么——以及拒绝时的原文
 
-`POST /api/command` 会把裸文本自动补上规范前缀（`LocalWebConsoleServer.swift:3650-3651`），
+`POST /api/command` 会把裸文本自动补上规范前缀（`LocalWebConsoleServer.swift:3653-3654`），
 再以**本地**命令提交，`senderPublicKey: "local-console"`、`authenticated: false`
 （`MacNodeModels.swift:115-116`；`PopopxMacNodeApp.swift:361-375,402-404`）。`execute` 随后在
 第二道门禁处拒绝它（`TenBusinessEngines.swift:2097-2108`）：
@@ -127,7 +127,7 @@ Refused: the sender key is not on the paired-device whitelist.
 
 也就是说，尽管语法是真的，字面的 `NODE_CMD` 串**并不是一条可由 HTTP 触发的执行路径**。
 桥接的执行走 `POST /api/engine/invoke`，请求体为 `{ kind, action, payload }`
-（`LocalWebConsoleServer.swift:3875-3879`），是同步 JSON 而非流。桥接先按 §3 解析规范行，
+（`LocalWebConsoleServer.swift:3878-3882`），是同步 JSON 而非流。桥接先按 §3 解析规范行，
 再映射到 `invoke`；`/api/command` 仅保留用于读取节点自己的解析判定，默认关闭。
 
 其他值得在插件里对齐的拒绝：
@@ -136,7 +136,7 @@ Refused: the sender key is not on the paired-device whitelist.
 | --- | --- | --- |
 | 未知引擎 id | `Unknown service identifier “…”. Known ids: …` | `TenBusinessEngines.swift:2086-2090` |
 | 引擎已关闭 | `引擎已关闭 · … is switched off.` / `Nothing was executed.` | `:2177-2186` |
-| 语法非法（SMP 路径） | `NODE_CMD 段数不足或 serviceId/action 为空` — 只记本地日志，**线上不回复任何东西** | `MacNodeSimplexBridge.swift:2165-2174` |
+| 语法非法（SMP 路径） | `NODE_CMD 段数不足或 serviceId/action 为空` — 只记本地日志，**线上不回复任何东西** | `MacNodePopopxBridge.swift:2165-2174` |
 | token 错误 | `401` + `Missing or wrong console token. …` | `LocalWebConsoleServer.swift:83` |
 | 方法不对 | `405` + `Allow` | `:3661-3671,3742-3744` |
 | 请求体 > 8 MiB | `413`；缺 `Content-Length` → `411` | `:3163,4083-4088` |
@@ -163,7 +163,7 @@ Refused: the sender key is not on the paired-device whitelist.
    触发词为 `["🔒","LOCK_ALL","lock_all"]`（`MacNodeModels.swift:98`），按小写比较。
 
 空动作在 HTTP 侧不是缺口：路由在 `invoke` 看到它之前就把空动作拒了
-（`LocalWebConsoleServer.swift:3641`），尽管 `invoke` 自己把 `""` 当作锁定。
+（`LocalWebConsoleServer.swift:3644`），尽管 `invoke` 自己把 `""` 当作锁定。
 
 桥接侧策略，落地在 `shared/src/wireCommand.ts` 与两个插件中：
 
@@ -180,7 +180,7 @@ Refused: the sender key is not on the paired-device whitelist.
 （`TenBusinessEngines.swift:7-9,1917`），App 用一个任务串行路由命令
 （`PopopxMacNodeApp.swift:165-171`）。命令通过
 `AsyncStream(bufferingPolicy: .bufferingNewest(64))` 分发给订阅者
-（`MacNodeSimplexBridge.swift:1309-1324`）。因此插件对同一节点最多保持一个 in-flight
+（`MacNodePopopxBridge.swift:1309-1324`）。因此插件对同一节点最多保持一个 in-flight
 `engine/invoke`，只重试一次，其余交给 actor。重量/轻量渲染闸门
 （`TenBusinessEngines.swift:63-69`）从不出现在锁定路径上，所以桥接不得拿渲染队列深度当作
 锁定被延迟的理由。
@@ -188,10 +188,10 @@ Refused: the sender key is not on the paired-device whitelist.
 ## 9 · 回执，以及已知的 iOS 缺口
 
 没有专门的 ack 消息类型。节点对远端命令的回复就是一张普通聊天卡片：`✅`/`⚠️` + 引擎名 + 标题，
-正文截断到 1 800 字符（`MacNodeModels.swift:1196-1200`；`MacNodeSimplexBridge.swift:2476-2512`），
+正文截断到 1 800 字符（`MacNodeModels.swift:1196-1200`；`MacNodePopopxBridge.swift:2476-2512`），
 失败时以 at-least-once 语义重新入队（`:2471-2475,2518-2541`）。`NodeWire.signalMarker` 有声明但
 从未用于出站。`NODE_CMD` 尚不是 iOS 的 `PopopxCommerceSignalKind`，所以节点指令会渲染成可见气泡；
-节点把这件事作为**控制台事件**字段 `iosSignalGap` 记录（`MacNodeSimplexBridge.swift:2200-2214`，
+节点把这件事作为**控制台事件**字段 `iosSignalGap` 记录（`MacNodePopopxBridge.swift:2200-2214`，
 提示文本在 `:982-985`）——它不在 `POST /api/engine/invoke` 的响应里，且事件携带的是 `payloadHash`
 而不是 payload 本身（`:2205`）。桥接不得声称静默送达。
 
