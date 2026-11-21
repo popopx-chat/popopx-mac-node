@@ -15,7 +15,7 @@
 # developer machine paths.
 #
 # Copyright (C) 2026 POPOPX Chat
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-only
 #
 set -euo pipefail
 IFS=$'\n\t'
@@ -495,7 +495,7 @@ ${icon_plist_key}
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSHumanReadableCopyright</key>
-	<string>Copyright © 2026 POPOPX Chat. 以 GNU Affero General Public License v3.0 (AGPL-3.0) 发布，商业闭源授权见 LICENSE-COMMERCIAL.md。 / Released under the GNU AGPL-3.0; see LICENSE and LICENSE-COMMERCIAL.md for commercial licensing.</string>
+	<string>Copyright © 2026 POPOPX Chat. 源码以 GNU AGPL-3.0-only 开源发布，与 popopxmq、popopx-chat 共用同一份许可原文；官方托管中继网络、官方发行通道与 POPOPX 品牌条款见 LICENSE-COMMERCIAL.md。 / Source released under GNU AGPL-3.0-only on the same licence text as popopxmq and popopx-chat; the hosted relay network, the official release channel and the POPOPX brand are covered by LICENSE-COMMERCIAL.md.</string>
 </dict>
 </plist>
 PLIST

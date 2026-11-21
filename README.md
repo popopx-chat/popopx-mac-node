@@ -324,7 +324,7 @@ shasum -a 256 LICENSE ../popopxmq/LICENSE ../popopx-chat/LICENSE
 
 | Scope | License | What that means |
 | --- | --- | --- |
-| every source file here — the 10 engines, the SMP gateway, the web console, the GOP/frequency-domain watermark (`ENGGopWatermark`), the compute-point ledger, `Scripts/build_dmg.sh` | **[AGPL-3.0](LICENSE)** | run, study, modify and redistribute freely — with the network-service copyleft of §13, which also binds anyone hosting a modified node for other people |
+| every source file here — the 10 engines, the SMP gateway, the web console, the GOP/frequency-domain watermark (`ENGGopWatermark`), the compute-point ledger, `Scripts/build_dmg.sh` | **[AGPL-3.0-only](LICENSE)** | run, study, modify and redistribute freely — with the network-service copyleft of §13, which also binds anyone hosting a modified node for other people |
 | the SMP/XFTP **relay server** source and the BBS+ (BLS12-381) blind-signature credential code | **AGPL-3.0-only** | [popopxmq](https://github.com/popopx-chat/popopxmq) · its [NOTICE](https://github.com/popopx-chat/popopxmq/blob/master/NOTICE) states: “No further restrictions are imposed on recipients of this work (AGPL-3.0 sections 10 and 12)”. Self-host the fleet, and self-host the credential issuer, if you want |
 | the companion iOS client source | **AGPL-3.0-only** | [popopx-chat](https://github.com/popopx-chat/popopx-chat) |
 | the artwork this fork drew | AGPL-3.0-only, **or CC0-1.0 at your option** | [ASSETS_LICENSE-POPOPX.md](https://github.com/popopx-chat/popopx-chat/blob/master/ASSETS_LICENSE-POPOPX.md) — files byte-identical to upstream’s stay SimpleX Chat Ltd’s, and we cannot release them |

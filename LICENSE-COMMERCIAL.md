@@ -3,8 +3,8 @@
 > **本文件不是法律建议，也不是合同。 / This document is not legal advice, and it is not a contract.**
 >
 > 版权 / Copyright © 2026 POPOPX Chat.
-> 本仓库的代码授权是 [`LICENSE`](LICENSE)（GNU AGPL-3.0，FSF 原文未改动）。本文件只做一件事：说清**哪些东西不在那份著作权许可里** —— 服务与商标。
-> The code licence for this repository is [`LICENSE`](LICENSE) (GNU AGPL-3.0, the unmodified FSF text). This document does one job: stating **what is not inside that copyright grant** — services and trade marks.
+> 本仓库的代码授权是 [`LICENSE`](LICENSE)（GNU AGPL-3.0-only，FSF 原文未改动）。本文件只做一件事：说清**哪些东西不在那份著作权许可里** —— 服务与商标。
+> The code licence for this repository is [`LICENSE`](LICENSE) (GNU AGPL-3.0-only, the unmodified FSF text). This document does one job: stating **what is not inside that copyright grant** — services and trade marks.
 > 本文件**不削减** `LICENSE` 授予你的任何一项权利；任何一处读起来像削减的措辞，以 `LICENSE` 为准。
 > Nothing here narrows a single right `LICENSE` gives you; where the two appear to disagree, `LICENSE` wins.
 
@@ -12,7 +12,7 @@
 
 ## 0 · 全栈同许可 / The whole stack is under one licence
 
-POPOPX 不是单仓库项目。这条链上的三个仓库 —— 节点宿主（本仓库）、中继服务端、iOS 客户端 —— **都是 AGPL-3.0，而且是同一份未经改动的 FSF 许可原文**：
+POPOPX 不是单仓库项目。这条链上的三个仓库 —— 节点宿主（本仓库）、中继服务端、iOS 客户端 —— **都是 AGPL-3.0-only，而且是同一份未经改动的 FSF 许可原文**：
 
 ```sh
 # 三个仓库并排 checkout 时执行 / with the three repositories checked out side by side
@@ -23,7 +23,7 @@ shasum -a 256 LICENSE ../popopxmq/LICENSE ../popopx-chat/LICENSE
 
 | 仓库 | 上游 | 授权 | 本文件此前被误称为"闭源"的东西 |
 | --- | --- | --- | --- |
-| [popopx-chat/popopx-mac-node](https://github.com/popopx-chat/popopx-mac-node)（本仓库） | 原创 | AGPL-3.0 | 隐形水印与逆向溯源：`ENGGopWatermark`（`Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:987-1198`，纯数学段自 :957 起）+ FFmpeg 频域/DCT 流水线，全在源码里 |
+| [popopx-chat/popopx-mac-node](https://github.com/popopx-chat/popopx-mac-node)（本仓库） | 原创 | AGPL-3.0-only | 隐形水印与逆向溯源：`ENGGopWatermark`（`Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:987-1198`，纯数学段自 :957 起）+ FFmpeg 频域/DCT 流水线，全在源码里 |
 | [popopx-chat/popopxmq](https://github.com/popopx-chat/popopxmq) | fork of [simplexmq](https://github.com/simplex-chat/simplexmq) | AGPL-3.0-only | SMP/XFTP 中继服务端源码：`src/Popopx/Messaging/Server*`（SMP）、`src/Popopx/FileTransfer/Server*`（XFTP），对应可执行目标 `smp-server` / `xftp-server` / `ntf-server`；盲签凭证：`src/Popopx/Messaging/Crypto/BBS.hs`、`Crypto/Entitlement.hs`，其下是两个 **Apache-2.0** 的 vendored submodule（`cbits/libbbs` → `simplex-chat/libbbs`、`cbits/blst` → `supranational/blst`），经 FFI 调用 |
 | [popopx-chat/popopx-chat](https://github.com/popopx-chat/popopx-chat) | fork of [simplex-chat](https://github.com/simplex-chat/simplex-chat) | AGPL-3.0-only | 伴生 iOS 客户端源码与协议层 |
 

@@ -324,7 +324,7 @@ shasum -a 256 LICENSE ../popopxmq/LICENSE ../popopx-chat/LICENSE
 
 | 范围 | 授权 | 这意味着什么 |
 | --- | --- | --- |
-| 本仓库全部源码 —— 10 大引擎、SMP 网关、Web 控制台、GOP/频域隐形水印（`ENGGopWatermark`）、算力点记账、`Scripts/build_dmg.sh` | **[AGPL-3.0](LICENSE)** | 自由运行、研究、修改、再分发；§13 的网络服务同源义务一并生效 —— 把改动过的节点提供给别人用，就要提供你那份对应源码 |
+| 本仓库全部源码 —— 10 大引擎、SMP 网关、Web 控制台、GOP/频域隐形水印（`ENGGopWatermark`）、算力点记账、`Scripts/build_dmg.sh` | **[AGPL-3.0-only](LICENSE)** | 自由运行、研究、修改、再分发；§13 的网络服务同源义务一并生效 —— 把改动过的节点提供给别人用，就要提供你那份对应源码 |
 | SMP/XFTP **中继服务端源码**，以及 BBS+（BLS12-381）盲签凭证代码 | **AGPL-3.0-only** | [popopxmq](https://github.com/popopx-chat/popopxmq)，其 [NOTICE](https://github.com/popopx-chat/popopxmq/blob/master/NOTICE) 原文：“No further restrictions are imposed on recipients of this work (AGPL-3.0 sections 10 and 12)”。中继网络与凭证签发方，你都可以自建 |
 | 伴生 iOS 客户端源码 | **AGPL-3.0-only** | [popopx-chat](https://github.com/popopx-chat/popopx-chat) |
 | 本 fork 自己绘制的图形资产 | AGPL-3.0-only，**或由你选择 CC0-1.0** | [ASSETS_LICENSE-POPOPX.md](https://github.com/popopx-chat/popopx-chat/blob/master/ASSETS_LICENSE-POPOPX.md) —— 与上游逐字节相同的文件仍属 SimpleX Chat Ltd，我们无权放行 |
