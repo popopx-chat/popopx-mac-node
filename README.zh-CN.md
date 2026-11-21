@@ -218,6 +218,27 @@ bash Scripts/build_dmg.sh --skip-build --output dist --version 1.0.0
 
 ---
 
+## 生态桥接
+
+`integrations/` 是从控制台以外的地方调用这十个引擎的受支持路径：一个 TypeScript 桥接内核，加上两个接入 Agent 宿主的适配器。它不新增端口、不额外起守护进程、不引入任何第三方运行时依赖 —— 它复用的就是本仓库已经在跑的东西：绑定 `127.0.0.1:18920` 的控制台与它的每进程一次性 Token，以及节点本来就会解析的 `::popopx_sys::NODE_CMD::{service}::{action}::{payload}` 信令。两条入口路径对同一个事实都很诚实：控制台从不广播、也从不向外连接，所以 Token 由操作者手动交接一次。
+
+| 包 | 角色 | 通过什么访问节点 |
+| --- | --- | --- |
+| `integrations/shared` | 桥接内核：信令解析、控制台客户端、事件读取、策略闸门 | `POST /api/engine/invoke` |
+| `integrations/linger-skill` | 接入 Linger 一类 Agent 宿主的适配器 | 只经内核，不碰 socket |
+| `integrations/openclaw-skill` | 接入 OpenClaw 一类插件宿主的适配器 | 只经内核，不碰 socket |
+
+内核会在打开 socket 之前拒绝一个动作：`phantom_sentinel` / `lockdown`。节点上这一条是真实执行的 —— 清空剪贴板、卸载外挂卷、熄屏并锁定会话 —— 没有确认、没有冷却、没有撤销，而且它绕在引擎自身开关之前就会被命中。所以发送它是双重选择加入：`allowLockdown: true` **且** `PPX_BRIDGE_SECRET` 至少 16 个字符；被拒绝这件事会写进插件日志，让操作者看得见它发生过。同一条规则也管重试：只有当节点确实没收到请求时才重发，因为 `chrono_ark` 的 `seal` 与 `creator_paywall_hub` 的 `grant` 不幂等。
+
+```sh
+cd integrations/shared && npm install && npm test
+swift test --filter IntegrationsContractTests
+```
+
+[桥接契约](integrations/CONTRACT.zh-CN.md)（以及 [English contract](integrations/CONTRACT.md)）把上面每一句都钉到本仓库的某个 `file:line`，写明桥接在哪些地方故意比节点更严，也写明插件永远不该假设什么。`MacNodeContractTests` 与 `IntegrationsContractTests` 用同一份语料分别给 TypeScript 解析器和 Swift 解析器打分，所以两端运行时的偏移会先让测试变红，而不是在跑着的节点上给你意外。
+
+---
+
 ## 安全自检指南
 
 下面每一条都可以直接复制粘贴运行 —— 你不需要相信我们说的任何一句话，**红线是机器可验证的**。

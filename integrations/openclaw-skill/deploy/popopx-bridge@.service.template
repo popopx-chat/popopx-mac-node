@@ -1,0 +1,52 @@
+# POPOPX Mac Node bridge - systemd user unit template, for the OpenClaw-shaped plugin.
+#
+# Rendered by deploy/install.sh, which substitutes these three with sed. They are sed placeholders,
+# not systemd specifiers: after rendering, this file contains absolute paths and literal values only.
+#
+#   ${BRIDGE_DIR}      absolute path of the built plugin package (from $PWD, or from an argument)
+#   ${OPENCLAW_BIN}    absolute path of the host executable that loads the plugin
+#   ${ALLOW_LOCKDOWN}  0 or 1; install.sh REFUSES to write this file when the value would be 1
+#
+# %i is a real specifier: the instance name, so one operator can run several bridges side by side.
+#
+# The console token is deliberately absent. It is generated per node launch and never persisted
+# (integrations/CONTRACT.md §2 · 第 2 节), so a copy in a unit file would be both a secret on disk
+# and wrong after the next restart. Hand it to the user manager instead, once per login:
+#
+#     systemctl --user set-environment PPX_CONSOLE_TOKEN='<token>'
+#
+# The same rule covers PPX_BRIDGE_SECRET.
+
+[Unit]
+Description=POPOPX Mac Node bridge, OpenClaw skill (instance %i)
+Documentation=https://github.com/popopx-chat/popopx-mac-node/tree/main/integrations
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=${BRIDGE_DIR}
+ExecStart=${OPENCLAW_BIN} --plugin ${BRIDGE_DIR}/dist/src/index.js
+
+Environment=PPX_BRIDGE_INSTANCE=%i
+Environment=PPX_CONSOLE_URL=http://127.0.0.1:18920
+Environment=PPX_ALLOW_LOCKDOWN=${ALLOW_LOCKDOWN}
+
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=20
+SuccessExitStatus=0 143
+
+# Modest, verified hardening. NoNewPrivileges matters because nothing in the bridge is supposed to
+# escalate: the node's own user-space actions run as the operator, without sudo or pkexec.
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# PrivateNetwork=true would delete the only peer this service has, so it stays off on purpose: the
+# bridge reaches 127.0.0.1:18920 and nothing else, and it binds no port of its own.
+PrivateNetwork=false
+ReadWritePaths=${BRIDGE_DIR}/logs
+
+[Install]
+# A user unit: enabled with `systemctl --user enable`, never as a system-wide default.
+WantedBy=default.target

@@ -1,0 +1,604 @@
+{
+  "manifestVersion": 1,
+  "id": "com.popopx.node-bridge.openclaw",
+  "name": "POPOPX Mac Node bridge",
+  "version": "1.0.1",
+  "description": "Ten POPOPX Mac Node services as host tools over the node's own loopback console. Report-only by default: the phantom_sentinel lockdown path is refused before any socket opens.",
+  "entry": "dist/src/index.js",
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "contract": {
+    "specification": "integrations/CONTRACT.md",
+    "specificationZh": "integrations/CONTRACT.zh-CN.md",
+    "kernel": "@popopx/node-bridge (integrations/shared)",
+    "authority": "Sources/ is the producer; this manifest is generated from the kernel routing table"
+  },
+  "runtime": {
+    "dependencies": [
+      "@popopx/node-bridge"
+    ],
+    "runtimeBuiltins": [
+      "fetch"
+    ],
+    "testBuiltins": [
+      "node:test",
+      "node:assert",
+      "node:fs",
+      "node:path",
+      "node:child_process"
+    ],
+    "thirdPartyRuntimeDependencies": [],
+    "websocket": false,
+    "note": "The only WebSocket in this system is the chat daemon's control socket at 127.0.0.1:5225, which the node dials and which is unauthenticated by design; a plugin must never connect there. This plugin uses HTTP request/response plus SSE and nothing else."
+  },
+  "console": {
+    "origin": "http://127.0.0.1:18920",
+    "host": "127.0.0.1",
+    "port": 18920,
+    "loopbackOnly": true,
+    "portFallback": false,
+    "routes": {
+      "invoke": "POST /api/engine/invoke",
+      "health": "GET /api/health",
+      "snapshot": "GET /api/snapshot",
+      "events": "GET /api/events",
+      "diagnostics": "POST /api/command"
+    },
+    "diagnosticsNote": "POST /api/command is read-only in practice: the node refuses engine calls injected from the local console at its whitelist gate, so it is used for parse verdicts only."
+  },
+  "credentials": [
+    {
+      "name": "consoleToken",
+      "env": "PPX_CONSOLE_TOKEN",
+      "required": true,
+      "secret": true,
+      "persisted": false,
+      "value": null,
+      "acceptedAs": [
+        "X-PPX-Token header",
+        "?t= query parameter",
+        "the tokenised console URL the node prints at launch"
+      ],
+      "lifetime": "Generated per node launch and deliberately never persisted, so a node restart invalidates this value and every plugin configuration that holds it.",
+      "failureCode": "tokenRejected",
+      "neverWrittenTo": [
+        "this manifest",
+        "a log line",
+        "a rendered launchd or systemd unit",
+        "a credential file"
+      ]
+    },
+    {
+      "name": "pluginSharedSecret",
+      "env": "PPX_BRIDGE_SECRET",
+      "required": false,
+      "secret": true,
+      "value": null,
+      "minimumCharacters": 16,
+      "neededFor": "Only the phantom_sentinel lockdown opt-in below. No other call uses it.",
+      "failureCode": "secretRequired"
+    }
+  ],
+  "tools": [
+    {
+      "name": "popopx_shadow_cos",
+      "service": "shadow_cos",
+      "title": "Chief of Staff briefing",
+      "description": "Chief of Staff briefing. Builds the daily briefing and the negotiation prompt from what the node already knows. Every listed name is routed by the node; the first of each group is the canonical spelling this bridge sends.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "briefing",
+              "negotiation_prompt",
+              "brief",
+              "daily",
+              "daily_brief",
+              "generate",
+              "negotiation",
+              "prompt",
+              "run",
+              "tactics"
+            ],
+            "description": "Canonical action, or any spelling the node also accepts. One of: briefing, negotiation_prompt, brief, daily, daily_brief, generate, negotiation, prompt, run, tactics."
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "JSON object sent verbatim to POST /api/engine/invoke as `payload`. Defaults to an empty object; the whole wire line is budgeted at 1 024 grapheme clusters."
+          }
+        }
+      },
+      "canonicalActions": [
+        "briefing",
+        "negotiation_prompt"
+      ],
+      "refusedActions": [],
+      "timeoutMs": 15000
+    },
+    {
+      "name": "popopx_zero_trust_warroom",
+      "service": "zero_trust_warroom",
+      "title": "War room attribution",
+      "description": "War room attribution. Assigns a document, embeds the watermark, traces a copy back, and reads the registry. Every listed name is routed by the node; the first of each group is the canonical spelling this bridge sends.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "assign",
+              "embed",
+              "trace",
+              "registry",
+              "decode",
+              "distribute",
+              "extract",
+              "identify",
+              "mark",
+              "queue_assign",
+              "register",
+              "status"
+            ],
+            "description": "Canonical action, or any spelling the node also accepts. One of: assign, embed, trace, registry, decode, distribute, extract, identify, mark, queue_assign, register, status."
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "JSON object sent verbatim to POST /api/engine/invoke as `payload`. Defaults to an empty object; the whole wire line is budgeted at 1 024 grapheme clusters."
+          }
+        }
+      },
+      "canonicalActions": [
+        "assign",
+        "embed",
+        "trace",
+        "registry"
+      ],
+      "refusedActions": [],
+      "timeoutMs": 15000
+    },
+    {
+      "name": "popopx_zerotrace_studio",
+      "service": "zerotrace_studio",
+      "title": "Metadata sanitising studio",
+      "description": "Metadata sanitising studio. Sanitises a file, strips metadata on its own, anchors a clip, or shreds what was made. Every listed name is routed by the node; the first of each group is the canonical spelling this bridge sends.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "process",
+              "strip",
+              "anchor",
+              "shred",
+              "briefing_clip",
+              "broadcast",
+              "clean",
+              "destroy",
+              "ingest",
+              "metadata",
+              "run",
+              "sanitise",
+              "sanitize"
+            ],
+            "description": "Canonical action, or any spelling the node also accepts. One of: process, strip, anchor, shred, briefing_clip, broadcast, clean, destroy, ingest, metadata, run, sanitise, sanitize."
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "JSON object sent verbatim to POST /api/engine/invoke as `payload`. Defaults to an empty object; the whole wire line is budgeted at 1 024 grapheme clusters."
+          }
+        }
+      },
+      "canonicalActions": [
+        "process",
+        "strip",
+        "anchor",
+        "shred"
+      ],
+      "refusedActions": [],
+      "timeoutMs": 15000
+    },
+    {
+      "name": "popopx_solo_autopilot",
+      "service": "solo_autopilot",
+      "title": "Solo video pipeline",
+      "description": "Solo video pipeline. Runs the one-person video pipeline and writes the script it needs first. Every listed name is routed by the node; the first of each group is the canonical spelling this bridge sends.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "run",
+              "script",
+              "clip",
+              "copy",
+              "generate",
+              "video"
+            ],
+            "description": "Canonical action, or any spelling the node also accepts. One of: run, script, clip, copy, generate, video."
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "JSON object sent verbatim to POST /api/engine/invoke as `payload`. Defaults to an empty object; the whole wire line is budgeted at 1 024 grapheme clusters."
+          }
+        }
+      },
+      "canonicalActions": [
+        "run",
+        "script"
+      ],
+      "refusedActions": [],
+      "timeoutMs": 15000
+    },
+    {
+      "name": "popopx_edge_compute_mesh",
+      "service": "edge_compute_mesh",
+      "title": "Edge compute sharing",
+      "description": "Edge compute sharing. Reports mesh status, offers and executes work, drains the queue, toggles sharing, settles. Every listed name is routed by the node; the first of each group is the canonical spelling this bridge sends.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "offer",
+              "poll",
+              "enable",
+              "settle",
+              "accept",
+              "drain",
+              "execute",
+              "run",
+              "sharing",
+              "summary"
+            ],
+            "description": "Canonical action, or any spelling the node also accepts. One of: status, offer, poll, enable, settle, accept, drain, execute, run, sharing, summary."
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "JSON object sent verbatim to POST /api/engine/invoke as `payload`. Defaults to an empty object; the whole wire line is budgeted at 1 024 grapheme clusters."
+          }
+        }
+      },
+      "canonicalActions": [
+        "status",
+        "offer",
+        "poll",
+        "enable",
+        "settle"
+      ],
+      "refusedActions": [],
+      "timeoutMs": 15000
+    },
+    {
+      "name": "popopx_morning_tv",
+      "service": "morning_tv",
+      "title": "Morning broadcast",
+      "description": "Morning broadcast. Broadcasts the morning reel, digests the feeds, fires a scheduled slot, reads the schedule. Every listed name is routed by the node; the first of each group is the canonical spelling this bridge sends.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "broadcast",
+              "digest",
+              "scheduled",
+              "schedule",
+              "feeds",
+              "fire",
+              "headlines",
+              "next",
+              "on_time",
+              "run",
+              "tv"
+            ],
+            "description": "Canonical action, or any spelling the node also accepts. One of: broadcast, digest, scheduled, schedule, feeds, fire, headlines, next, on_time, run, tv."
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "JSON object sent verbatim to POST /api/engine/invoke as `payload`. Defaults to an empty object; the whole wire line is budgeted at 1 024 grapheme clusters."
+          }
+        }
+      },
+      "canonicalActions": [
+        "broadcast",
+        "digest",
+        "scheduled",
+        "schedule"
+      ],
+      "refusedActions": [],
+      "timeoutMs": 15000
+    },
+    {
+      "name": "popopx_phantom_sentinel",
+      "service": "phantom_sentinel",
+      "title": "Sentinel report (lockdown refused)",
+      "description": "Sentinel report. Reads the sentinel status only. The lockdown action is refused by this plugin, not hidden. Refused by this plugin, whatever the node would do: \"lockdown\" - see CONTRACT.md section 7.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "status",
+              "probe"
+            ],
+            "description": "Canonical action, or any spelling the node also accepts. One of: status, probe."
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "JSON object sent verbatim to POST /api/engine/invoke as `payload`. Defaults to an empty object; the whole wire line is budgeted at 1 024 grapheme clusters."
+          }
+        }
+      },
+      "canonicalActions": [
+        "status"
+      ],
+      "refusedActions": [
+        "phantom_sentinel:lockdown"
+      ],
+      "timeoutMs": 15000
+    },
+    {
+      "name": "popopx_chrono_ark",
+      "service": "chrono_ark",
+      "title": "Time-locked vault",
+      "description": "Time-locked vault. Seals a vault, lists them, unseals one, answers heartbeat and release checks, reveals a folder. Every listed name is routed by the node; the first of each group is the canonical spelling this bridge sends.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "seal",
+              "list",
+              "unseal",
+              "heartbeat",
+              "check",
+              "reveal",
+              "alive",
+              "dir",
+              "folder",
+              "lock",
+              "open",
+              "ping",
+              "recover",
+              "release_check",
+              "status",
+              "store",
+              "vaults",
+              "watch"
+            ],
+            "description": "Canonical action, or any spelling the node also accepts. One of: seal, list, unseal, heartbeat, check, reveal, alive, dir, folder, lock, open, ping, recover, release_check, status, store, vaults, watch."
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "JSON object sent verbatim to POST /api/engine/invoke as `payload`. Defaults to an empty object; the whole wire line is budgeted at 1 024 grapheme clusters."
+          }
+        }
+      },
+      "canonicalActions": [
+        "seal",
+        "list",
+        "unseal",
+        "heartbeat",
+        "check",
+        "reveal"
+      ],
+      "refusedActions": [],
+      "timeoutMs": 15000
+    },
+    {
+      "name": "popopx_health_sentinel",
+      "service": "health_sentinel",
+      "title": "Health read and audio",
+      "description": "Health read and audio. Interprets an exported health record and generates the binaural track. Every listed name is routed by the node; the first of each group is the canonical spelling this bridge sends.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "read",
+              "binaural",
+              "interpret",
+              "parse",
+              "report",
+              "sleep",
+              "tone",
+              "wav"
+            ],
+            "description": "Canonical action, or any spelling the node also accepts. One of: read, binaural, interpret, parse, report, sleep, tone, wav."
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "JSON object sent verbatim to POST /api/engine/invoke as `payload`. Defaults to an empty object; the whole wire line is budgeted at 1 024 grapheme clusters."
+          }
+        }
+      },
+      "canonicalActions": [
+        "read",
+        "binaural"
+      ],
+      "refusedActions": [],
+      "timeoutMs": 15000
+    },
+    {
+      "name": "popopx_creator_paywall_hub",
+      "service": "creator_paywall_hub",
+      "title": "Entitlement verification",
+      "description": "Entitlement verification. Verifies a ticket, grants and delivers it, claims a red packet, reads the ledger. Every listed name is routed by the node; the first of each group is the canonical spelling this bridge sends.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "verify",
+              "grant",
+              "claim",
+              "status",
+              "admit",
+              "deliver",
+              "distribute",
+              "drop",
+              "ledger",
+              "red_packet",
+              "redpacket",
+              "ticket"
+            ],
+            "description": "Canonical action, or any spelling the node also accepts. One of: verify, grant, claim, status, admit, deliver, distribute, drop, ledger, red_packet, redpacket, ticket."
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "JSON object sent verbatim to POST /api/engine/invoke as `payload`. Defaults to an empty object; the whole wire line is budgeted at 1 024 grapheme clusters."
+          }
+        }
+      },
+      "canonicalActions": [
+        "verify",
+        "grant",
+        "claim",
+        "status"
+      ],
+      "refusedActions": [],
+      "timeoutMs": 15000
+    }
+  ],
+  "deniedTools": [
+    {
+      "name": "phantom_sentinel.lockdown",
+      "tool": "popopx_phantom_sentinel",
+      "service": "phantom_sentinel",
+      "action": "lockdown",
+      "spellings": [
+        "lockdown",
+        "lock",
+        "lock_all",
+        "sentinel",
+        "🔒"
+      ],
+      "effect": [
+        "NSPasteboard.general.clearContents()",
+        "diskutil unmount / diskutil unmountDisk (boot volume refused, never --force)",
+        "/usr/bin/pmset displaysleepnow",
+        "CGSession -suspend"
+      ],
+      "why": "The node acts physically with no confirmation, no cooldown, no dry-run and no undo, and invoke() reaches the lock trigger before it checks whether the engine is switched off and never consults authenticated. A plugin has to refuse that line before any socket opens.",
+      "source": [
+        "Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2199-2328",
+        "Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:5568-5576",
+        "Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:5605-5615",
+        "Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:5741-5780",
+        "integrations/CONTRACT.md §7"
+      ],
+      "refusedBeforeNetworkCall": true,
+      "optIn": {
+        "flag": "allowLockdown",
+        "environmentVariable": "PPX_ALLOW_LOCKDOWN",
+        "alsoRequires": "PPX_BRIDGE_SECRET, at least 16 characters",
+        "enforcedBy": "@popopx/node-bridge assertSendable",
+        "deployInstaller": "deploy/install.sh refuses to render a unit that grants this path"
+      },
+      "reportedAs": [
+        "lockdownDenied",
+        "secretRequired"
+      ],
+      "loggedAs": "refused_lockdownDenied / refused_secretRequired on stderr, one JSON line per refusal"
+    }
+  ],
+  "policy": {
+    "allowLockdown": false,
+    "lockdownEnvironmentVariable": "PPX_ALLOW_LOCKDOWN",
+    "secretEnvironmentVariable": "PPX_BRIDGE_SECRET",
+    "minimumSecretCharacters": 16,
+    "enforcedBy": "@popopx/node-bridge assertSendable, called before the bridge is constructed",
+    "grammar": "::popopx_sys::NODE_CMD::{serviceId}::{action}::{payload}",
+    "grammarSource": "Sources/PopopxMacNode/Models/MacNodeModels.swift:106-139",
+    "payloadBudgetGraphemes": 1024,
+    "payloadMustBeJsonObject": true,
+    "emptyActionAllowed": false,
+    "unknownActionHandling": "refused locally, with the canonical action list; never forwarded to the node"
+  },
+  "serialisation": {
+    "maxInFlightCommandsPerNode": 1,
+    "concurrentCallBehaviour": "report inFlightLimit, never queue",
+    "retries": 1,
+    "retryOnlyWhen": "isRetryable(code) && !error.outcomeUnknown",
+    "neverRetried": [
+      "tokenRejected",
+      "lockdownDenied",
+      "secretRequired",
+      "payloadBudget",
+      "nodeBusy"
+    ],
+    "reason": "The node owns one actor for all ten engines, so a second queue here would only add a place for commands to be reordered."
+  },
+  "logging": {
+    "format": "one JSON object per line",
+    "stream": "stderr",
+    "tokenRedaction": "client.tokenFingerprint only; the token itself is scrubbed from every field",
+    "refusalEvents": [
+      "refused_lockdownDenied",
+      "refused_secretRequired",
+      "lockdownOptInGranted"
+    ]
+  }
+}

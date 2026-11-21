@@ -1,0 +1,389 @@
+{
+  "source": "GENERATED — do not hand-edit. Run `npm run build && npm run export:table` in integrations/shared. Mirrors the dispatch switch in Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2151-2328.",
+  "commandPrefix": "::popopx_sys::NODE_CMD::",
+  "maxSignalPayloadCharacters": 1024,
+  "services": {
+    "shadow_cos": {
+      "canonical": [
+        "briefing",
+        "negotiation_prompt"
+      ],
+      "denied": [],
+      "actions": {
+        "briefing": [
+          "brief",
+          "briefing",
+          "daily",
+          "daily_brief",
+          "generate",
+          "run"
+        ],
+        "negotiation_prompt": [
+          "negotiation",
+          "negotiation_prompt",
+          "prompt",
+          "tactics"
+        ]
+      }
+    },
+    "zero_trust_warroom": {
+      "canonical": [
+        "assign",
+        "embed",
+        "registry",
+        "trace"
+      ],
+      "denied": [],
+      "actions": {
+        "assign": [
+          "assign",
+          "queue_assign",
+          "register"
+        ],
+        "embed": [
+          "distribute",
+          "embed",
+          "mark"
+        ],
+        "registry": [
+          "registry",
+          "status"
+        ],
+        "trace": [
+          "decode",
+          "extract",
+          "identify",
+          "trace"
+        ]
+      }
+    },
+    "zerotrace_studio": {
+      "canonical": [
+        "anchor",
+        "process",
+        "shred",
+        "strip"
+      ],
+      "denied": [],
+      "actions": {
+        "anchor": [
+          "anchor",
+          "briefing_clip",
+          "broadcast"
+        ],
+        "process": [
+          "ingest",
+          "process",
+          "run",
+          "sanitise",
+          "sanitize"
+        ],
+        "shred": [
+          "destroy",
+          "shred"
+        ],
+        "strip": [
+          "clean",
+          "metadata",
+          "strip"
+        ]
+      }
+    },
+    "solo_autopilot": {
+      "canonical": [
+        "run",
+        "script"
+      ],
+      "denied": [],
+      "actions": {
+        "run": [
+          "clip",
+          "generate",
+          "run",
+          "video"
+        ],
+        "script": [
+          "copy",
+          "script"
+        ]
+      }
+    },
+    "edge_compute_mesh": {
+      "canonical": [
+        "enable",
+        "offer",
+        "poll",
+        "settle",
+        "status"
+      ],
+      "denied": [],
+      "actions": {
+        "enable": [
+          "enable",
+          "sharing"
+        ],
+        "offer": [
+          "accept",
+          "execute",
+          "offer",
+          "run"
+        ],
+        "poll": [
+          "drain",
+          "poll"
+        ],
+        "settle": [
+          "settle"
+        ],
+        "status": [
+          "status",
+          "summary"
+        ]
+      }
+    },
+    "morning_tv": {
+      "canonical": [
+        "broadcast",
+        "digest",
+        "schedule",
+        "scheduled"
+      ],
+      "denied": [],
+      "actions": {
+        "broadcast": [
+          "broadcast",
+          "run",
+          "tv"
+        ],
+        "digest": [
+          "digest",
+          "feeds",
+          "headlines"
+        ],
+        "schedule": [
+          "next",
+          "schedule"
+        ],
+        "scheduled": [
+          "fire",
+          "on_time",
+          "scheduled"
+        ]
+      }
+    },
+    "phantom_sentinel": {
+      "canonical": [
+        "status"
+      ],
+      "denied": [
+        "lockdown"
+      ],
+      "actions": {
+        "lockdown": [
+          "lock",
+          "lock_all",
+          "lockdown",
+          "sentinel",
+          "🔒"
+        ],
+        "status": [
+          "probe",
+          "status"
+        ]
+      }
+    },
+    "chrono_ark": {
+      "canonical": [
+        "check",
+        "heartbeat",
+        "list",
+        "reveal",
+        "seal",
+        "unseal"
+      ],
+      "denied": [],
+      "actions": {
+        "check": [
+          "check",
+          "release_check",
+          "watch"
+        ],
+        "heartbeat": [
+          "alive",
+          "heartbeat",
+          "ping"
+        ],
+        "list": [
+          "list",
+          "status",
+          "vaults"
+        ],
+        "reveal": [
+          "dir",
+          "folder",
+          "reveal"
+        ],
+        "seal": [
+          "lock",
+          "seal",
+          "store"
+        ],
+        "unseal": [
+          "open",
+          "recover",
+          "unseal"
+        ]
+      }
+    },
+    "health_sentinel": {
+      "canonical": [
+        "binaural",
+        "read"
+      ],
+      "denied": [],
+      "actions": {
+        "binaural": [
+          "binaural",
+          "sleep",
+          "tone",
+          "wav"
+        ],
+        "read": [
+          "interpret",
+          "parse",
+          "read",
+          "report"
+        ]
+      }
+    },
+    "creator_paywall_hub": {
+      "canonical": [
+        "claim",
+        "grant",
+        "status",
+        "verify"
+      ],
+      "denied": [],
+      "actions": {
+        "claim": [
+          "claim",
+          "red_packet",
+          "redpacket"
+        ],
+        "grant": [
+          "deliver",
+          "distribute",
+          "drop",
+          "grant"
+        ],
+        "status": [
+          "ledger",
+          "status"
+        ],
+        "verify": [
+          "admit",
+          "ticket",
+          "verify"
+        ]
+      }
+    }
+  },
+  "offered": [
+    {
+      "id": "shadow_cos",
+      "actions": [
+        "briefing",
+        "negotiation_prompt"
+      ],
+      "denied": []
+    },
+    {
+      "id": "zero_trust_warroom",
+      "actions": [
+        "assign",
+        "embed",
+        "registry",
+        "trace"
+      ],
+      "denied": []
+    },
+    {
+      "id": "zerotrace_studio",
+      "actions": [
+        "anchor",
+        "process",
+        "shred",
+        "strip"
+      ],
+      "denied": []
+    },
+    {
+      "id": "solo_autopilot",
+      "actions": [
+        "run",
+        "script"
+      ],
+      "denied": []
+    },
+    {
+      "id": "edge_compute_mesh",
+      "actions": [
+        "enable",
+        "offer",
+        "poll",
+        "settle",
+        "status"
+      ],
+      "denied": []
+    },
+    {
+      "id": "morning_tv",
+      "actions": [
+        "broadcast",
+        "digest",
+        "schedule",
+        "scheduled"
+      ],
+      "denied": []
+    },
+    {
+      "id": "phantom_sentinel",
+      "actions": [
+        "status"
+      ],
+      "denied": [
+        "lockdown"
+      ]
+    },
+    {
+      "id": "chrono_ark",
+      "actions": [
+        "check",
+        "heartbeat",
+        "list",
+        "reveal",
+        "seal",
+        "unseal"
+      ],
+      "denied": []
+    },
+    {
+      "id": "health_sentinel",
+      "actions": [
+        "binaural",
+        "read"
+      ],
+      "denied": []
+    },
+    {
+      "id": "creator_paywall_hub",
+      "actions": [
+        "claim",
+        "grant",
+        "status",
+        "verify"
+      ],
+      "denied": []
+    }
+  ]
+}

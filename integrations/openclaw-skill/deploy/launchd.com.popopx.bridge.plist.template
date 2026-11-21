@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  POPOPX Mac Node bridge - launchd template for the OpenClaw-shaped plugin.
+
+  Rendered by deploy/install.sh, which substitutes every placeholder below with sed. Nothing else in
+  this file is expanded, so the rendered plist is exactly what launchd reads:
+
+    @BRIDGE_DIR@      absolute path of the built plugin package (from $PWD, or from an argument)
+    @OPENCLAW_BIN@    absolute path of the host executable that loads the plugin
+    @ALLOW_LOCKDOWN@  0 or 1; install.sh REFUSES to write this file when the value would be 1
+
+  The console token is deliberately absent. It is generated per node launch and never persisted
+  (integrations/CONTRACT.md §2 · 第 2 节), so a literal here would be a stale bearer secret in a
+  file that every process in the session can read. Hand it to the GUI domain instead, once per login
+  and after rendering:
+
+      launchctl setenv PPX_CONSOLE_TOKEN '<paste the token the node printed>'
+
+  The same rule covers PPX_BRIDGE_SECRET: session environment only, never this file.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.popopx.bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@OPENCLAW_BIN@</string>
+    <string>--plugin</string>
+    <string>@BRIDGE_DIR@/dist/src/index.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>@BRIDGE_DIR@</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- The node's one port. Loopback only, no fallback, never a second port (§1 · 第 1 节). -->
+    <key>PPX_CONSOLE_URL</key>
+    <string>http://127.0.0.1:18920</string>
+    <key>PPX_ALLOW_LOCKDOWN</key>
+    <string>@ALLOW_LOCKDOWN@</string>
+    <!-- PPX_CONSOLE_TOKEN and PPX_BRIDGE_SECRET come from `launchctl setenv`, not from here. -->
+  </dict>
+
+  <!-- The lockdown path needs the user's own GUI session, so the agent stays in the Aqua domain. -->
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <!-- The node serialises its engines in one actor and a bridge keeps one command in flight, so a
+       crash loop has to cost at least a full 15 seconds or it becomes the outage. -->
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+
+  <key>StandardOutPath</key>
+  <string>@BRIDGE_DIR@/logs/bridge.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>@BRIDGE_DIR@/logs/bridge.log</string>
+
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>256</integer>
+  </dict>
+</dict>
+</plist>

@@ -1,0 +1,6 @@
+{
+  "handoff": "",
+  "timeoutMs": 15000,
+  "allowLockdown": false,
+  "logRefusals": true
+}

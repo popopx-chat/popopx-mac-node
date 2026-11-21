@@ -5,4 +5,9 @@ dist/
 build/
 DerivedData/
 *.xcodeproj
+node_modules/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+.env
 prompt.md

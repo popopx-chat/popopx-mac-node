@@ -1112,7 +1112,7 @@ final class MacNodeContractTests: XCTestCase {
         let english = try ReadmeProbe(url: root.appendingPathComponent("README.md"))
         let chinese = try ReadmeProbe(url: root.appendingPathComponent("README.zh-CN.md"))
 
-        XCTAssertEqual(english.levelTwoCount, 10, "the document has ten top-level sections")
+        XCTAssertEqual(english.levelTwoCount, 11, "the document has eleven top-level sections")
         XCTAssertEqual(english.levelTwoCount, chinese.levelTwoCount, "one README gained or lost a section")
         XCTAssertEqual(english.levelThreeCount, 9, "one build guide plus eight self-audit checks")
         XCTAssertEqual(english.levelThreeCount, chinese.levelThreeCount, "the audit guide no longer mirrors")

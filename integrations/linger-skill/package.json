@@ -1,0 +1,40 @@
+{
+  "name": "@popopx/linger-skill",
+  "version": "1.0.1",
+  "description": "Linger skill adapter for POPOPX Mac Node: maps host arguments onto the canonical NODE_CMD line and executes it through @popopx/node-bridge. Loopback only, zero third-party runtime dependencies.",
+  "license": "AGPL-3.0-only",
+  "author": "POPOPX Chat",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./SKILL.md": "./SKILL.md",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/src",
+    "SKILL.md",
+    "config"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test --test-timeout=15000 dist"
+  },
+  "dependencies": {
+    "@popopx/node-bridge": "file:../shared"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "typescript": "^5.4.5"
+  }
+}

@@ -1,0 +1,331 @@
+{
+  "source": "integrations/CONTRACT.md §3 · 第 3 节, mirroring NodeWire.parseCommand at Sources/PopopxMacNode/Models/MacNodeModels.swift:106-139 and the dispatch table at Sources/PopopxMacNode/Engines/TenBusinessEngines.swift:2151-2328",
+  "comment": "The two columns disagree on purpose. `nodeParse` is the strict wire grammar the node itself applies; `bridge` is the canonicalising column the plugins apply before they send. A vector where they differ carries a `note` explaining which side wins and why.",
+  "columns": {
+    "nodeParse": "accept | reject — the verdict of NodeWire.parseCommand, which is what POST /api/command would store",
+    "bridge": "the verdict of parseWireLine in src/wireCommand.ts"
+  },
+  "maxSignalPayloadCharacters": 1024,
+  "vectors": [
+    {
+      "name": "canonical briefing",
+      "line": "::popopx_sys::NODE_CMD::shadow_cos::briefing::{\"tone\":\"terse\"}",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": true,
+        "serviceId": "shadow_cos",
+        "action": "briefing"
+      }
+    },
+    {
+      "name": "service alias warroom",
+      "line": "::popopx_sys::NODE_CMD::warroom::assign::{\"file\":\"report.pdf\"}",
+      "nodeParse": "reject",
+      "note": "parseCommand matches EngineKind(rawValue:) exactly, so the alias never parses; the bridge canonicalises first and sends zero_trust_warroom, which is the id the node's own router accepts.",
+      "bridge": {
+        "ok": true,
+        "serviceId": "zero_trust_warroom",
+        "action": "assign"
+      }
+    },
+    {
+      "name": "service alias cos with action alias daily",
+      "line": "::popopx_sys::NODE_CMD::cos::daily::{}",
+      "nodeParse": "reject",
+      "bridge": {
+        "ok": true,
+        "serviceId": "shadow_cos",
+        "action": "briefing"
+      },
+      "note": "Neither id is a rawValue, so the wire column refuses the whole line; the bridge resolves cos to shadow_cos and daily to briefing, which is what the router accepts."
+    },
+    {
+      "name": "dashed service id",
+      "line": "::popopx_sys::NODE_CMD::zero-trust-warroom::embed::{\"x\":1}",
+      "nodeParse": "reject",
+      "note": "engine(for:) folds '-' to '_' but parseCommand does not, so the dashed spelling is a router-only form. A plugin may use it; it must never paste it into a wire line.",
+      "bridge": {
+        "ok": true,
+        "serviceId": "zero_trust_warroom",
+        "action": "embed"
+      }
+    },
+    {
+      "name": "uppercase service id",
+      "line": "::popopx_sys::NODE_CMD::PHANTOM_SENTINEL::status::{}",
+      "nodeParse": "reject",
+      "bridge": {
+        "ok": true,
+        "serviceId": "phantom_sentinel",
+        "action": "status"
+      },
+      "note": "parseCommand compares EngineKind(rawValue:) exactly, so an uppercase id is refused on the wire; engine(for:) folds case, and the bridge folds first and sends the canonical id."
+    },
+    {
+      "name": "action alias daily_brief",
+      "line": "::popopx_sys::NODE_CMD::shadow_cos::daily_brief::{\"tone\":\"terse\"}",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": true,
+        "serviceId": "shadow_cos",
+        "action": "briefing"
+      }
+    },
+    {
+      "name": "spaced action alias",
+      "line": "::popopx_sys::NODE_CMD::shadow_cos::daily brief::{}",
+      "nodeParse": "accept",
+      "note": "parseCommand does not validate actions at all; the router folds spaces in normalisedAction, so the node accepts the line and answers 未知动作 only for a name it does not know.",
+      "bridge": {
+        "ok": true,
+        "serviceId": "shadow_cos",
+        "action": "briefing"
+      }
+    },
+    {
+      "name": "unknown action",
+      "line": "::popopx_sys::NODE_CMD::shadow_cos::bogus::{}",
+      "nodeParse": "accept",
+      "note": "the node parses it and refuses in the engine with unsupported(kind, action, allowed); the bridge refuses before the socket opens.",
+      "bridge": {
+        "ok": false,
+        "code": "malformedCommand"
+      }
+    },
+    {
+      "name": "empty action",
+      "line": "::popopx_sys::NODE_CMD::shadow_cos::::{}",
+      "nodeParse": "reject",
+      "bridge": {
+        "ok": false,
+        "code": "emptyAction"
+      }
+    },
+    {
+      "name": "empty service id",
+      "line": "::popopx_sys::NODE_CMD::::briefing::{}",
+      "nodeParse": "reject",
+      "bridge": {
+        "ok": false,
+        "code": "malformedCommand"
+      }
+    },
+    {
+      "name": "empty payload",
+      "line": "::popopx_sys::NODE_CMD::shadow_cos::briefing::",
+      "nodeParse": "reject",
+      "note": "the empty payload is also what makes the phantom_sentinel lockdown unreachable over HTTP: the route rejects it before invoke() can read \"\" as a trigger.",
+      "bridge": {
+        "ok": false,
+        "code": "malformedCommand"
+      }
+    },
+    {
+      "name": "missing separators",
+      "line": "::popopx_sys::NODE_CMD::shadow_cos::briefing",
+      "nodeParse": "reject",
+      "bridge": {
+        "ok": false,
+        "code": "malformedCommand"
+      }
+    },
+    {
+      "name": "no prefix",
+      "line": "shadow_cos::briefing::{\"a\":1}",
+      "nodeParse": "reject",
+      "bridge": {
+        "ok": false,
+        "code": "malformedCommand"
+      }
+    },
+    {
+      "name": "prefix mid-line",
+      "line": "please run ::popopx_sys::NODE_CMD::shadow_cos::briefing::{\"a\":1}",
+      "nodeParse": "reject",
+      "note": "the SMP inbound parser (SBCommandCodec.parse, MacNodeSimplexBridge.swift:656-658) searches the whole line, so a chat message can carry the marker mid-sentence. That leniency is deliberately not copied here.",
+      "bridge": {
+        "ok": false,
+        "code": "malformedCommand"
+      }
+    },
+    {
+      "name": "payload containing the separator",
+      "line": "::popopx_sys::NODE_CMD::chrono_ark::seal::{\"note\":\"a::b\",\"until\":\"2026-12-01T00:00:00Z\"}",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": true,
+        "serviceId": "chrono_ark",
+        "action": "seal",
+        "payload": "{\"note\":\"a::b\",\"until\":\"2026-12-01T00:00:00Z\"}"
+      }
+    },
+    {
+      "name": "payload that is not JSON",
+      "line": "::popopx_sys::NODE_CMD::health_sentinel::read::today felt fine",
+      "nodeParse": "accept",
+      "note": "the node keeps a non-JSON payload as a string (MacNodeSimplexBridge.swift:375-380), but /api/engine/invoke decodes payload as a dictionary, so a plugin must send an object.",
+      "bridge": {
+        "ok": false,
+        "code": "malformedCommand"
+      }
+    },
+    {
+      "name": "payload is an array",
+      "line": "::popopx_sys::NODE_CMD::health_sentinel::read::[1,2]",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": false,
+        "code": "malformedCommand"
+      },
+      "note": "the node's string payload accepts it; /api/engine/invoke decodes a dictionary, so the bridge refuses an array instead of shipping a body the node answers 400 to."
+    },
+    {
+      "name": "payload is a scalar",
+      "line": "::popopx_sys::NODE_CMD::health_sentinel::read::42",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": false,
+        "code": "malformedCommand"
+      },
+      "note": "same reason as the array: the invoke body's payload must be an object."
+    },
+    {
+      "name": "payload object with spaces",
+      "line": "::popopx_sys::NODE_CMD::health_sentinel::read::{ \"k\" : 1 }",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": true,
+        "serviceId": "health_sentinel",
+        "action": "read"
+      }
+    },
+    {
+      "name": "combining marks in payload",
+      "line": "::popopx_sys::NODE_CMD::morning_tv::digest::{\"d\":\"été\"}",
+      "nodeParse": "accept",
+      "note": "the payload is 8 UTF-16 units but 6 graphemes. Swift counts Characters, so a bridge counting .length disagrees with the node near the 1024 ceiling.",
+      "bridge": {
+        "ok": true,
+        "serviceId": "morning_tv",
+        "action": "digest"
+      }
+    },
+    {
+      "name": "whitespace padded",
+      "line": "   ::popopx_sys::NODE_CMD::  shadow_cos  ::  briefing  ::{}   ",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": true,
+        "serviceId": "shadow_cos",
+        "action": "briefing"
+      }
+    },
+    {
+      "name": "unknown service id",
+      "line": "::popopx_sys::NODE_CMD::not_an_engine::status::{}",
+      "nodeParse": "reject",
+      "bridge": {
+        "ok": false,
+        "code": "unknownService"
+      }
+    },
+    {
+      "name": "paywall claim via red_packet alias",
+      "line": "::popopx_sys::NODE_CMD::creator_paywall_hub::red_packet::{\"ticket\":\"t-1\"}",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": true,
+        "serviceId": "creator_paywall_hub",
+        "action": "claim"
+      }
+    },
+    {
+      "name": "health alias",
+      "line": "::popopx_sys::NODE_CMD::health::report::{}",
+      "nodeParse": "reject",
+      "bridge": {
+        "ok": true,
+        "serviceId": "health_sentinel",
+        "action": "read"
+      },
+      "note": "health is an engine(for:) alias, not a rawValue, so the wire column refuses it while the bridge canonicalises to health_sentinel and the action alias report to read."
+    },
+    {
+      "name": "sentinel status is report-only",
+      "line": "::popopx_sys::NODE_CMD::phantom_sentinel::status::{}",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": true,
+        "serviceId": "phantom_sentinel",
+        "action": "status",
+        "denied": false
+      }
+    },
+    {
+      "name": "sentinel lockdown alias, denied by the bridge",
+      "line": "::popopx_sys::NODE_CMD::phantom_sentinel::lockdown::{}",
+      "nodeParse": "accept",
+      "note": "CONTRACT §7. The node would run it; the plugin marks it denied and refuses before the socket opens.",
+      "bridge": {
+        "ok": true,
+        "serviceId": "phantom_sentinel",
+        "action": "lockdown",
+        "denied": true
+      }
+    },
+    {
+      "name": "sentinel lock_all trigger, denied by the bridge",
+      "line": "::popopx_sys::NODE_CMD::phantom_sentinel::lock_all::{}",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": true,
+        "serviceId": "phantom_sentinel",
+        "action": "lockdown",
+        "denied": true
+      }
+    },
+    {
+      "name": "sentinel lock alias, denied by the bridge",
+      "line": "::popopx_sys::NODE_CMD::phantom_sentinel::lock::{}",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": true,
+        "serviceId": "phantom_sentinel",
+        "action": "lockdown",
+        "denied": true
+      }
+    },
+    {
+      "name": "sentinel emoji trigger, denied by the bridge",
+      "line": "::popopx_sys::NODE_CMD::phantom_sentinel::🔒::{}",
+      "nodeParse": "accept",
+      "note": "the trigger list is [\"🔒\",\"LOCK_ALL\",\"lock_all\"] compared lowercased (MacNodeModels.swift:98), and the router also maps \"🔒\" to lockdown (TenBusinessEngines.swift:2282).",
+      "bridge": {
+        "ok": true,
+        "serviceId": "phantom_sentinel",
+        "action": "lockdown",
+        "denied": true
+      }
+    },
+    {
+      "name": "mesh settle, no aliases",
+      "line": "::popopx_sys::NODE_CMD::edge_compute_mesh::settle::{}",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": true,
+        "serviceId": "edge_compute_mesh",
+        "action": "settle"
+      }
+    },
+    {
+      "name": "solo autopilot bare run through video alias",
+      "line": "::popopx_sys::NODE_CMD::solo_autopilot::video::{\"take\":3}",
+      "nodeParse": "accept",
+      "bridge": {
+        "ok": true,
+        "serviceId": "solo_autopilot",
+        "action": "run"
+      }
+    }
+  ]
+}

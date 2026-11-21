@@ -1,0 +1,42 @@
+{
+  "name": "@popopx/openclaw-skill",
+  "version": "1.0.1",
+  "description": "OpenClaw-shaped plugin for the POPOPX Mac Node console: ten services as tools, one loopback port, the lockdown path refused before any socket. Zero runtime dependencies beyond @popopx/node-bridge.",
+  "license": "AGPL-3.0-only",
+  "author": "POPOPX Chat",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./openclaw.plugin.json": "./openclaw.plugin.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/src",
+    "openclaw.plugin.json",
+    "deploy",
+    "README.md",
+    "README.zh-CN.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test --test-timeout=15000 dist"
+  },
+  "dependencies": {
+    "@popopx/node-bridge": "file:../shared"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "typescript": "^5.4.5"
+  }
+}

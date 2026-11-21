@@ -1,0 +1,37 @@
+{
+  "name": "@popopx/node-bridge",
+  "version": "1.0.1",
+  "description": "Shared bridge kernel for POPOPX Mac Node: wire-grammar parser, console client and SSE stream. Loopback only, zero runtime dependencies.",
+  "license": "AGPL-3.0-only",
+  "author": "POPOPX Chat",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/src",
+    "test/fixtures"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "export:table": "node scripts/exportServiceTable.mjs",
+    "test": "npm run build && node --test --test-timeout=10000 dist/test"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "typescript": "^5.4.5"
+  }
+}

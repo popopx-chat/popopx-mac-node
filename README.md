@@ -218,6 +218,42 @@ Fallback is stated, not hidden: the console's `langFallback` notice says out lou
 
 ---
 
+## Ecosystem bridges
+
+`integrations/` is the supported way to drive these ten engines from somewhere other than the console: a
+TypeScript bridge kernel plus two adapters that plug it into an agent host. It adds no port, no daemon and no
+third-party runtime dependency — it reuses what this repository already runs, namely the loopback console on
+`127.0.0.1:18920` with its per-launch token, and the `::popopx_sys::NODE_CMD::{service}::{action}::{payload}`
+signal the node already parses. Both paths into the node are honest about the same fact: the console never
+broadcasts or connects out, so an operator hands the token over once.
+
+| Package | Role | Talks to the node through |
+| --- | --- | --- |
+| `integrations/shared` | the bridge kernel: wire parser, console client, event reader, policy gate | `POST /api/engine/invoke` |
+| `integrations/linger-skill` | adapter for a Linger-style agent host | the kernel, never a socket |
+| `integrations/openclaw-skill` | adapter for an OpenClaw-style plugin host | the kernel, never a socket |
+
+The kernel refuses one action before it opens a socket: `phantom_sentinel` / `lockdown`. On the node that call
+really happens — the pasteboard is cleared, external volumes are unmounted, the display sleeps and the session
+locks — with no confirmation, no cooldown and no undo, and it is reachable before the engine's own on/off
+switch is even consulted. Sending it is therefore opt-in twice over: `allowLockdown: true` **and** a
+`PPX_BRIDGE_SECRET` of at least 16 characters, and a refusal is written to the plugin log so an operator can
+see that it happened. The same rule covers retries: a command is resent only when the node demonstrably never
+received it, because `chrono_ark` `seal` and `creator_paywall_hub` `grant` are not idempotent.
+
+```sh
+cd integrations/shared && npm install && npm test
+swift test --filter IntegrationsContractTests
+```
+
+The [bridge contract](integrations/CONTRACT.md) (and its [Chinese counterpart](integrations/CONTRACT.zh-CN.md))
+pins every claim above to a `file:line` in this repository, records where the bridge is deliberately
+stricter than the node, and states what a plugin may never assume. `MacNodeContractTests` and
+`IntegrationsContractTests` grade the TypeScript parser and the Swift parser against the same corpus, so a
+drift between the two runtimes fails a test instead of surprising a running node.
+
+---
+
 ## Security self-audit guide
 
 Every check below is copy-pasteable. You do not have to believe a word we wrote — **the red lines are machine-verifiable.**
