@@ -1,0 +1,4585 @@
+//
+//  LocalWebConsoleServer.swift
+//  PopopxMacNode — module 2: the loopback web console.
+//
+//  A hand-rolled HTTP/1.1 + Server-Sent-Events server on `Network.framework`
+//  `NWListener`, bound to the loopback interface only, plus the complete
+//  single-page wizard (Dark OLED glass, 中文 / EN) inlined as one Swift string
+//  constant. Zero third-party dependencies, zero build steps, zero external
+//  assets: the browser talks to this file and nothing else.
+//
+//  Design rules that hold the whole file together:
+//
+//  * The server owns no business state. Everything readable or mutable goes
+//    through the frozen `NodeConsoleFacade` protocol, so the console can be
+//    unit-tested against a fake facade and swapped without touching a route.
+//  * The HTML is a static document. No Swift value is ever interpolated into it;
+//    every number, label, path and QR payload arrives over the API. That keeps
+//    the content-security-policy honest and keeps the template free of secrets.
+//  * Parsing is incremental. TCP hands us arbitrary segments, so the request
+//    parser is a state machine fed per `received` callback and never assumes one
+//    read equals one request.
+//  * Teardown is explicit. Every SSE connection owns a cancellable pump task and
+//    an `AsyncStream.Continuation` that is `finish()`ed on drop, close or stop,
+//    so the hub subscription (and its `onTermination` detach) can never leak.
+//
+
+import Foundation
+import Network
+#if canImport(AppKit)
+import AppKit
+#endif
+
+// MARK: - Console error surface
+
+/// Errors the console can produce on its own, and the HTTP status each one maps
+/// to. Facade errors are reported through the JSON `error` field instead,
+/// because the browser never sees a Swift `Error`.
+public enum WEBConsoleError: Error, Equatable, Sendable {
+    case unauthorized
+    case notFound(String)
+    case addressNotLoopback(String)
+    case portOutOfRange
+    case listenerFailed(String)
+    case notListening
+    case alreadyListening
+    case payloadTooLarge(limitBytes: Int, neededBytes: Int)
+    case missingContentLength
+    case malformedHeaders
+    case oversizedHead(limitBytes: Int)
+    case unsupportedEncoding(String)
+    case targetTooLong(limitBytes: Int)
+    case emptyBody
+    case undecodableBody(typeName: String)
+    case unsupportedMethod(String)
+    case noPairingOffer
+    case unknownEngine(String)
+    case badEngine(String)
+    case sendFailed(String)
+    case connectionClosed
+    case writerClosed
+
+    var httpStatus: Int {
+        switch self {
+        case .unauthorized: return 401
+        case .notFound: return 404
+        case .payloadTooLarge: return 413
+        case .missingContentLength: return 411
+        case .unsupportedEncoding: return 501
+        case .targetTooLong: return 414
+        case .oversizedHead: return 400
+        case .malformedHeaders, .emptyBody, .undecodableBody, .unknownEngine, .badEngine: return 400
+        case .unsupportedMethod: return 405
+        case .notListening: return 503
+        case .noPairingOffer, .alreadyListening: return 409
+        case .addressNotLoopback, .portOutOfRange, .listenerFailed, .sendFailed,
+             .connectionClosed, .writerClosed: return 500
+        }
+    }
+
+    var clientMessage: String {
+        switch self {
+        case .unauthorized:
+            return "Missing or wrong console token. Open the URL the app printed, or send the \(NodeWire.consoleTokenHeader) header."
+        case .notFound(let path):
+            return "No console route at \(path)"
+        case .addressNotLoopback(let detail):
+            return "Refusing to serve outside loopback: \(detail)"
+        case .portOutOfRange:
+            return "Console port must be non-zero"
+        case .listenerFailed(let detail):
+            return "Console listener failed: \(detail)"
+        case .notListening:
+            return "Console is not listening yet"
+        case .alreadyListening:
+            return "Console is already listening"
+        case .payloadTooLarge(let limit, let needed):
+            return "Request body exceeds the \(limit) byte cap (declared \(needed))"
+        case .missingContentLength:
+            return "This request must carry a Content-Length header"
+        case .malformedHeaders:
+            return "Malformed HTTP request head"
+        case .oversizedHead(let limit):
+            return "Request head exceeds the \(limit) byte cap"
+        case .unsupportedEncoding(let value):
+            return "Transfer encoding \(value) is not supported: the console speaks identity only"
+        case .targetTooLong(let limit):
+            return "Request target exceeds the \(limit) byte cap"
+        case .emptyBody:
+            return "Request body is empty"
+        case .undecodableBody(let typeName):
+            return "Request body is not valid \(typeName) JSON"
+        case .unsupportedMethod(let method):
+            return "Method \(method) is not allowed on this route"
+        case .noPairingOffer:
+            return "The node has no pairing offer to serve yet"
+        case .unknownEngine(let value):
+            return "Unknown engine identifier: \(value)"
+        case .badEngine(let detail):
+            return "Malformed engine request: \(detail)"
+        case .sendFailed(let detail):
+            return "Write failed: \(detail)"
+        case .connectionClosed, .writerClosed:
+            return "Connection closed"
+        }
+    }
+}
+
+// MARK: - HTTP request value
+
+/// One fully parsed request: head plus buffered body. Produced only by
+/// `LocalWebConsoleServer.WEBWireParser`.
+struct WEBHTTPRequest {
+    let method: String
+    let target: String
+    let path: String
+    let query: [URLQueryItem]
+    let version: String
+    let headers: [String: String]
+    let body: Data
+
+    /// `true` unless the client asked us to hang up, or is HTTP/1.0 without an
+    /// explicit `Connection: keep-alive`.
+    let keepAliveWanted: Bool
+
+    func header(_ name: String) -> String? {
+        headers[name.lowercased()]
+    }
+
+    func queryValue(_ name: String) -> String? {
+        query.first { $0.name == name }?.value
+    }
+
+    /// A request line longer than the cap cannot be echoed into a log, so this
+    /// summary is deliberately method + path only.
+    var summary: String {
+        "\(method) \(path)"
+    }
+}
+
+// MARK: - Response envelope
+
+/// A response as it will go on the wire. Security headers are stamped by
+/// `LocalWebConsoleServer.response(...)` so no route can forget one.
+struct WEBHTTPResponse {
+    let status: Int
+    let reason: String
+    let typeHeader: String?
+    let headers: [(String, String)]
+    let body: Data?
+
+    /// `true` when the body must not be written (HEAD, 204, 304).
+    var suppressBody: Bool {
+        status == 204 || status == 304
+    }
+
+    var contentLength: Int { body?.count ?? 0 }
+
+    static func empty(status: Int, reason: String, headers: [(String, String)] = []) -> WEBHTTPResponse {
+        WEBHTTPResponse(status: status, reason: reason, typeHeader: nil, headers: headers, body: nil)
+    }
+}
+
+// MARK: - Console SPA document
+
+/// The entire wizard: HTML, CSS and vanilla ES2020 in one static document.
+///
+/// The literal is a raw multiline string (`#"""`), so JavaScript `$` + `{`,
+/// regex backslashes and CSS escapes survive verbatim without a single Swift
+/// escape sequence. The one substitution made on it is `/*PPX_LANGS*/[]`, and
+/// its replacement is derived from `ConsoleLanguage.displayOrder` — a constant
+/// of the binary, not of the machine — so the page is still byte-identical on
+/// every launch, which is what makes the CSP below defensible.
+enum WEBConsoleHTML {
+    /// The console's language picker is generated rather than typed out again
+    /// in JavaScript: `ConsoleLanguage` mirrors the POPOPX iOS app's
+    /// `knownRegions`, and emitting it from Swift is what guarantees the phone
+    /// and the node can never offer two different lists.
+    /// `catalog` is computed by Swift rather than guessed in JavaScript, so the
+    /// page and the node cannot disagree about which language reads which table.
+    static let localeRegistryJavaScript: String = "[" + ConsoleLanguage.displayOrder.map { item in
+        "{code:\"\(jsLiteral(item.rawValue))\",name:\"\(jsLiteral(item.nativeName))\",catalog:\"\(jsLiteral(item.catalogKey))\"}"
+    }.joined(separator: ",") + "]"
+
+    /// The Traditional Chinese console is the page's own Simplified column, run
+    /// through Apple's `Hans-Hant` transform. One hand-written table per script
+    /// would drift the moment a key were added to only one of them; deriving it
+    /// here means a new `zh` row is Traditional automatically, and
+    /// `MacNodeContractTests` pins that both tables hold the same keys.
+    static let traditionalCatalogJavaScript: String =
+        "{" + traditionalRows.map { "\(jsLiteral($0.key)):\"\(jsLiteral($0.text))\"" }.joined(separator: ",") + "}"
+
+    static let traditionalRows: [(key: String, text: String)] = {
+        guard let pattern = try? NSRegularExpression(
+            pattern: "[ \\t]*([A-Za-z][A-Za-z0-9_]*): \\{ zh: \"([^\"]*)\", en: "
+        ) else { return [] }
+        let range = NSRange(rawDocument.startIndex..<rawDocument.endIndex, in: rawDocument)
+        return pattern.matches(in: rawDocument, range: range).compactMap { match in
+            guard match.numberOfRanges == 3,
+                  let keyRange = Range(match.range(at: 1), in: rawDocument),
+                  let textRange = Range(match.range(at: 2), in: rawDocument)
+            else { return nil }
+            let text = String(rawDocument[textRange])
+            guard text.rangeOfCharacter(from: TraditionalChinese.hanzi) != nil else { return nil }
+            return (String(rawDocument[keyRange]), TraditionalChinese.render(text))
+        }
+    }()
+
+    static let document: String = {
+        rawDocument
+            .replacingOccurrences(of: "/*PPX_LANGS*/[]", with: localeRegistryJavaScript)
+            .replacingOccurrences(of: "/*PPX_HANT*/{}", with: traditionalCatalogJavaScript)
+            // Last, so the generated Traditional rows carry the real scheme too.
+            .replacingOccurrences(of: "/*PPX_SCHEME*/", with: NodeWire.invitationScheme)
+    }()
+
+    private static func jsLiteral(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+    }
+
+    private static let rawDocument = #"""
+<!DOCTYPE html>
+<html lang="en" data-lang="system">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>POPOPX Mac Node</title>
+<style>
+/* ---- design tokens ---------------------------------------------------- */
+:root{
+  --bg:#000;
+  --panel:rgba(255,255,255,.035);
+  --panel-strong:rgba(255,255,255,.06);
+  --hair:rgba(255,255,255,.09);
+  --hair-strong:rgba(255,255,255,.17);
+  --ink:#f4f4f7;
+  --dim:#a6a6b3;
+  --mute:#7c7c89;
+  --accent:#8b6cff;
+  --accent-lift:#a892ff;
+  --accent-deep:#5b3fd6;
+  --ok:#3fd68f;
+  --warn:#ffcc5c;
+  --bad:#ff6b78;
+  --info:#6cc5ff;
+  --r-s:6px; --r-m:10px; --r-l:14px;
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px; --s7:48px;
+  --fs-xs:11px; --fs-sm:12px; --fs-md:13px;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;
+  --shadow:0 24px 60px -32px rgba(0,0,0,.95);
+}
+@media (min-width:760px){
+  :root{--fs-xs:clamp(11px,.68vw,12px);--fs-sm:clamp(12px,.8vw,13.5px);--fs-md:clamp(13px,.92vw,15px)}
+}
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;min-height:100vh;
+  background:var(--bg);color:var(--ink);
+  font-family:var(--sans);font-size:var(--fs-md);line-height:1.5;
+  font-variant-numeric:tabular-nums;
+  -webkit-font-smoothing:antialiased;
+}
+/* Layered OLED glass: two very low-alpha light pools over true black. No
+   rainbow gradients — depth comes from blur and hairlines, not hue travel. */
+body::before{
+  content:"";position:fixed;inset:0;z-index:-2;
+  background:
+    radial-gradient(70% 45% at 18% -5%,rgba(139,108,255,.13),transparent 70%),
+    radial-gradient(55% 40% at 92% 8%,rgba(108,197,255,.07),transparent 68%),
+    #000;
+}
+body::after{
+  content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.04;
+  background-image:repeating-linear-gradient(0deg,#fff 0 1px,transparent 1px 3px);
+  background-size:100% 3px;
+}
+::selection{background:rgba(139,108,255,.35)}
+:focus-visible{outline:2px solid var(--accent-lift);outline-offset:2px}
+h1,h2,h3,h4{margin:0;font-weight:650;letter-spacing:-.015em}
+h3{font-size:clamp(15px,1.15vw,18px)}
+h4{font-size:var(--fs-md);color:var(--ink)}
+p{margin:0}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+input,select,textarea{font:inherit;color:var(--ink)}
+input::placeholder{color:var(--mute)}
+a{color:var(--accent-lift)}
+.mono{font-family:var(--mono);font-size:.92em;letter-spacing:-.01em}
+.dim{color:var(--dim)}
+.mute{color:var(--mute)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+[hidden]{display:none !important}
+/* ---- surfaces --------------------------------------------------------- */
+.panel{
+  background:var(--panel);
+  border:1px solid var(--hair);
+  border-radius:var(--r-l);
+  -webkit-backdrop-filter:blur(24px) saturate(155%);
+  backdrop-filter:blur(24px) saturate(155%);
+  padding:var(--s4);
+}
+.hair{height:1px;background:var(--hair);border:0;margin:var(--s3) 0}
+.panel__head{display:flex;align-items:baseline;justify-content:space-between;gap:var(--s3);margin-bottom:var(--s3)}
+.panel__sub{color:var(--mute);font-size:var(--fs-xs);margin-top:calc(var(--s2) * -1 + 2px);margin-bottom:var(--s3)}
+/* ---- chrome ----------------------------------------------------------- */
+.app{max-width:1180px;margin:0 auto;padding:var(--s4) var(--s4) var(--s7)}
+.topbar{
+  position:sticky;top:0;z-index:30;
+  display:flex;flex-wrap:wrap;align-items:center;gap:var(--s3) var(--s4);
+  padding:var(--s3) var(--s4);
+  background:rgba(0,0,0,.55);
+  border:1px solid var(--hair);
+  border-radius:var(--r-l);
+  -webkit-backdrop-filter:blur(30px) saturate(160%);
+  backdrop-filter:blur(30px) saturate(160%);
+  box-shadow:var(--shadow);
+}
+.brand{display:flex;align-items:center;gap:var(--s3);min-width:0;flex:1 1 auto}
+.brand__mark{width:34px;height:34px;flex:0 0 auto;color:var(--accent-lift)}
+.brand__mark svg{display:block;width:100%;height:100%}
+.brand__text{display:flex;flex-direction:column;min-width:0}
+.brand__name{font-size:clamp(15px,1.2vw,19px);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brand__sub{font-size:var(--fs-xs);color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip{
+  display:inline-flex;align-items:center;gap:var(--s2);
+  padding:3px var(--s2);border:1px solid var(--hair);border-radius:999px;
+  background:rgba(255,255,255,.04);font-size:var(--fs-xs);color:var(--dim);
+  white-space:nowrap;
+}
+.chip--ghost{background:none}
+.topbar__right{display:flex;align-items:center;gap:var(--s2);flex:0 0 auto}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--mute);flex:0 0 auto;box-shadow:0 0 0 3px rgba(255,255,255,.05)}
+.dot[data-state="live"]{background:var(--ok);box-shadow:0 0 0 3px rgba(63,214,143,.16)}
+.dot[data-state="retry"]{background:var(--warn);box-shadow:0 0 0 3px rgba(255,204,92,.16)}
+.dot[data-state="offline"]{background:var(--bad);box-shadow:0 0 0 3px rgba(255,107,120,.16)}
+.dot[data-state="connecting"]{background:var(--accent-lift);box-shadow:0 0 0 3px rgba(139,108,255,.18)}
+@media (prefers-reduced-motion:no-preference){
+  .dot[data-state="live"]{animation:pulse 2.4s ease-in-out infinite}
+  .dot[data-state="connecting"],.dot[data-state="retry"]{animation:pulse 1.4s ease-in-out infinite}
+}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+#clock{font-family:var(--mono);font-size:var(--fs-sm);color:var(--dim);letter-spacing:.02em}
+.lang{position:relative;display:flex;align-items:center}
+.lang__select{
+  appearance:none;-webkit-appearance:none;
+  padding:var(--s1) 26px var(--s1) 10px;
+  font-family:var(--mono);font-size:var(--fs-xs);color:var(--dim);
+  background:#0e0e12;border:1px solid var(--hair);border-radius:var(--r-s);
+  cursor:pointer;max-width:176px
+}
+.lang__select:hover{color:var(--ink);border-color:var(--hair-strong)}
+.lang__select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.lang__caret{position:absolute;right:9px;pointer-events:none;color:var(--mute);font-size:var(--fs-xs)}
+.lang__select option{background:#0e0e12;color:var(--ink)}
+/* ---- step rail -------------------------------------------------------- */
+.rail{display:flex;gap:var(--s2);margin:var(--s4) 0 var(--s3)}
+.rail__btn{
+  flex:1 1 0;min-width:0;text-align:left;
+  display:flex;align-items:center;gap:var(--s2);
+  padding:var(--s3);border:1px solid var(--hair);border-radius:var(--r-m);
+  background:rgba(255,255,255,.02);color:var(--dim);
+  transition:border-color .18s ease,background .18s ease,color .18s ease,transform .18s ease;
+}
+@media (prefers-reduced-motion:no-preference){.rail__btn:hover{transform:translateY(-1px)}}
+.rail__btn.is-on{border-color:rgba(139,108,255,.5);background:rgba(139,108,255,.12);color:var(--ink)}
+.rail__idx{font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute)}
+.rail__btn.is-on .rail__idx{color:var(--accent-lift)}
+.rail__name{font-size:var(--fs-sm);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail__badge{margin-left:auto;width:18px;height:18px;flex:0 0 auto}
+.rail__badge svg{display:block;width:18px;height:18px}
+.rail__btn[data-status="done"] .rail__badge{color:var(--ok)}
+.rail__btn[data-status="run"] .rail__badge{color:var(--accent-lift)}
+.rail__btn[data-status="wait"] .rail__badge{color:var(--bad)}
+.rail__btn[data-status="todo"] .rail__badge{color:var(--mute)}
+/* ---- grids ------------------------------------------------------------ */
+.grid{display:grid;gap:var(--s3)}
+.grid--stats{grid-template-columns:repeat(auto-fit,minmax(196px,1fr))}
+.grid--split{grid-template-columns:1fr}
+.grid--log{grid-template-columns:1fr}
+@media (min-width:880px){
+  .grid--split{grid-template-columns:minmax(0,380px) minmax(0,1fr)}
+  .grid--log{grid-template-columns:minmax(0,420px) minmax(0,1fr)}
+}
+.stack{display:flex;flex-direction:column;gap:var(--s3)}
+.stat{
+  padding:var(--s3);border:1px solid var(--hair);border-radius:var(--r-m);
+  background:rgba(255,255,255,.025);
+  display:flex;flex-direction:column;gap:var(--s1);min-width:0;
+}
+.stat__k{font-size:var(--fs-xs);color:var(--mute);text-transform:uppercase;letter-spacing:.08em}
+.stat__v{font-size:clamp(19px,1.7vw,26px);font-weight:700;letter-spacing:-.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat__n{font-size:var(--fs-xs);color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat__v--sm{font-size:clamp(15px,1.2vw,19px)}
+/* ---- buttons ---------------------------------------------------------- */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:var(--s2);
+  padding:9px 14px;border:1px solid var(--hair-strong);border-radius:var(--r-m);
+  background:rgba(255,255,255,.06);color:var(--ink);font-size:var(--fs-sm);font-weight:600;
+  transition:background .16s ease,border-color .16s ease,transform .16s ease,opacity .16s ease;
+  white-space:nowrap;
+}
+@media (prefers-reduced-motion:no-preference){
+  .btn:hover{background:rgba(255,255,255,.1)}
+  .btn:active{transform:translateY(1px)}
+}
+.btn--primary{
+  background:linear-gradient(180deg,var(--accent-lift),var(--accent-deep));
+  border-color:transparent;color:#fff;
+  box-shadow:0 10px 26px -12px rgba(139,108,255,.85);
+  padding:12px 18px;font-size:var(--fs-md);
+}
+@media (prefers-reduced-motion:no-preference){
+  .btn--primary:hover{filter:brightness(1.07)}
+}
+.btn--ghost{background:none;border-color:var(--hair);color:var(--dim);font-weight:500}
+.btn--mini{padding:5px 9px;font-size:var(--fs-xs);font-weight:500;border-radius:var(--r-s)}
+.btn--tiny{padding:3px 7px;font-size:var(--fs-xs);font-weight:500;border-radius:var(--r-s);color:var(--mute);border:1px solid var(--hair);background:none}
+.btn[disabled],.btn.is-disabled{opacity:.45;pointer-events:none}
+.btn-row{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center}
+/* ---- forms ------------------------------------------------------------ */
+.field{display:flex;flex-direction:column;gap:var(--s1);min-width:0}
+.field__label{font-size:var(--fs-xs);color:var(--dim)}
+.field__note{font-size:var(--fs-xs);color:var(--mute)}
+.field__err{font-size:var(--fs-xs);color:var(--bad)}
+input[type=text],input[type=password],input[type=number],input[type=url],select,textarea{
+  width:100%;padding:8px 10px;
+  background:rgba(255,255,255,.05);border:1px solid var(--hair);border-radius:var(--r-s);
+  font-size:var(--fs-sm);
+  transition:border-color .16s ease,background .16s ease;
+}
+input:focus,select:focus,textarea:focus{border-color:rgba(139,108,255,.6);background:rgba(139,108,255,.07);outline:none}
+textarea{min-height:66px;resize:vertical;font-family:var(--mono);font-size:var(--fs-xs);line-height:1.6}
+.fields{display:grid;gap:var(--s3);grid-template-columns:repeat(auto-fit,minmax(168px,1fr))}
+.fields--wide{grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.list{display:flex;flex-direction:column;gap:var(--s2)}
+.list__row{display:flex;gap:var(--s2);align-items:center}
+.list__row input{flex:1 1 auto;min-width:0}
+/* switch */
+.switch{
+  position:relative;width:46px;height:26px;flex:0 0 auto;
+  border-radius:999px;border:1px solid var(--hair-strong);
+  background:rgba(255,255,255,.08);transition:background .18s ease,border-color .18s ease;
+}
+.switch__knob{
+  position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;
+  background:#e9e9ef;transition:transform .18s ease;
+}
+@media (prefers-reduced-motion:reduce){.switch,.switch__knob{transition:none}}
+.switch[aria-checked="true"]{background:var(--accent);border-color:transparent}
+.switch[aria-checked="true"] .switch__knob{transform:translateX(20px);background:#fff}
+.switch.is-pending{opacity:.55}
+/* checkbox */
+.check{display:flex;align-items:center;gap:var(--s2);font-size:var(--fs-sm);color:var(--dim);cursor:pointer}
+.check input{width:16px;height:16px;accent-color:var(--accent);flex:0 0 auto}
+/* segmented weekday picker */
+.weekdays{display:flex;gap:3px;flex-wrap:wrap}
+.weekdays button{
+  width:26px;height:24px;border:1px solid var(--hair);border-radius:var(--r-s);
+  font-size:var(--fs-xs);color:var(--mute);background:rgba(255,255,255,.03);
+}
+.weekdays button.is-on{background:rgba(139,108,255,.22);border-color:rgba(139,108,255,.55);color:var(--ink);font-weight:650}
+/* ---- tables ----------------------------------------------------------- */
+.table{width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
+.table th{
+  text-align:left;font-weight:600;color:var(--mute);font-size:var(--fs-xs);
+  text-transform:uppercase;letter-spacing:.07em;padding:0 var(--s2) var(--s2);
+  border-bottom:1px solid var(--hair);white-space:nowrap;
+}
+.table td{padding:var(--s2);border-bottom:1px solid rgba(255,255,255,.055);vertical-align:top;color:var(--dim)}
+.table tr:last-child td{border-bottom:0}
+.table tbody tr.is-active td{color:var(--ink);background:rgba(139,108,255,.1)}
+.table tbody tr.is-active td:first-child{box-shadow:inset 2px 0 0 var(--accent-lift)}
+.table--rows td{color:var(--ink)}
+.tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.cell-strong{color:var(--ink);font-weight:600}
+.tag{display:inline-block;padding:2px 6px;border-radius:999px;border:1px solid var(--hair);font-size:var(--fs-xs);color:var(--dim)}
+.tag--ok{border-color:rgba(63,214,143,.4);color:var(--ok)}
+.tag--bad{border-color:rgba(255,107,120,.4);color:var(--bad)}
+.tag--accent{border-color:rgba(139,108,255,.45);color:var(--accent-lift)}
+.tag--warn{border-color:rgba(255,204,92,.4);color:var(--warn)}
+.tag--off{color:var(--mute)}
+/* ---- pills ------------------------------------------------------------ */
+.pills{display:flex;flex-wrap:wrap;gap:var(--s2)}
+.pill{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:5px 9px;border-radius:999px;border:1px solid var(--hair);
+  font-size:var(--fs-xs);color:var(--dim);background:rgba(255,255,255,.03);
+}
+.pill__led{width:7px;height:7px;border-radius:50%;background:var(--ok);flex:0 0 auto}
+.pill.is-missing{color:var(--mute);border-style:dashed}
+.pill.is-missing .pill__led{background:var(--bad)}
+.pill__ver{font-family:var(--mono);color:var(--mute)}
+/* ---- checklist -------------------------------------------------------- */
+.checklist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.checklist li{display:flex;align-items:flex-start;gap:var(--s2);padding:var(--s2);border-radius:var(--r-s)}
+.checklist li:nth-child(odd){background:rgba(255,255,255,.022)}
+.checklist__ico{width:18px;height:18px;flex:0 0 auto;margin-top:1px;color:var(--mute)}
+.checklist__ico svg{display:block;width:18px;height:18px}
+.checklist li[data-state="done"] .checklist__ico{color:var(--ok)}
+.checklist li[data-state="running"] .checklist__ico{color:var(--accent-lift)}
+.checklist li[data-state="failed"] .checklist__ico{color:var(--bad)}
+.checklist li[data-state="skipped"] .checklist__ico{color:var(--mute)}
+.checklist__body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto}
+.checklist__title{font-size:var(--fs-sm);color:var(--ink)}
+.checklist__detail{font-size:var(--fs-xs);color:var(--mute);word-break:break-word}
+.checklist__bar{height:2px;border-radius:2px;background:rgba(255,255,255,.09);overflow:hidden;margin-top:3px}
+.checklist__bar i{display:block;height:100%;background:var(--accent);transition:width .3s ease}
+@media (prefers-reduced-motion:reduce){.checklist__bar i{transition:none}}
+/* ---- terminal --------------------------------------------------------- */
+.term{
+  display:flex;flex-direction:column;
+  height:clamp(260px,32vh,420px);
+  border:1px solid var(--hair);border-radius:var(--r-m);
+  background:rgba(0,0,0,.55);overflow:hidden;
+}
+.term__head{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;padding:var(--s2) var(--s3);border-bottom:1px solid var(--hair)}
+.term__title{font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute);text-transform:uppercase;letter-spacing:.1em;margin-right:auto}
+.term select{width:auto;padding:3px 6px;font-size:var(--fs-xs)}
+.term__body{flex:1 1 auto;overflow-y:auto;padding:var(--s2) var(--s3);font-family:var(--mono);font-size:var(--fs-xs);line-height:1.65;scrollbar-width:thin}
+.term__body::-webkit-scrollbar{width:8px;height:8px}
+.term__body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:4px}
+.term__foot{display:flex;align-items:center;gap:var(--s2);padding:var(--s1) var(--s3);border-top:1px solid var(--hair);min-height:26px}
+.term__foot .mute{font-size:var(--fs-xs)}
+.line{display:flex;gap:var(--s2);white-space:pre-wrap;word-break:break-word}
+.line__t{color:#4f4f5c;flex:0 0 auto}
+.line__g{flex:0 0 auto;width:14px;text-align:center}
+.line__c{color:#5a5a68;flex:0 0 auto}
+.line__m{color:#d5d5dd;min-width:0}
+.line[data-level="success"] .line__g{color:var(--ok)}
+.line[data-level="info"] .line__g{color:var(--info)}
+.line[data-level="notice"] .line__g{color:var(--dim)}
+.line[data-level="debug"] .line__g{color:#5a5a68}
+.line[data-level="warning"] .line__g,.line[data-level="warning"] .line__m{color:var(--warn)}
+.line[data-level="error"] .line__g,.line[data-level="error"] .line__m{color:var(--bad)}
+/* ---- gauge ------------------------------------------------------------ */
+.gauge{position:relative;width:100%;max-width:236px;aspect-ratio:1;margin-inline:auto}
+.gauge svg{display:block;width:100%;height:100%}
+.gauge__ring{fill:none;stroke-width:12}
+.gauge__bg{stroke:rgba(255,255,255,.07)}
+.gauge__arc{stroke:var(--accent);stroke-linecap:round;transition:stroke-dashoffset .9s cubic-bezier(.22,.61,.36,1)}
+@media (prefers-reduced-motion:reduce){.gauge__arc{transition:none}}
+.gauge__arc--outer{stroke:rgba(139,108,255,.28)}
+.gauge__label{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;pointer-events:none}
+.gauge__pct{font-size:clamp(24px,2.4vw,34px);font-weight:700;letter-spacing:-.03em}
+.gauge__cap{font-size:var(--fs-xs);color:var(--mute)}
+.gauge__val{font-family:var(--mono);font-size:var(--fs-xs);color:var(--dim)}
+/* ---- pairing ---------------------------------------------------------- */
+.qr-wrap{display:flex;flex-direction:column;gap:var(--s2);align-items:center;width:100%;padding:var(--s2)}
+.qr-box{
+  position:relative;width:100%;max-width:288px;aspect-ratio:1;
+  border:1px solid var(--hair-strong);border-radius:var(--r-m);
+  background:rgba(255,255,255,.04);overflow:hidden;
+  display:grid;place-items:center;
+}
+.qr-box img{width:100%;height:auto;aspect-ratio:1;object-fit:contain;background:#fff;border-radius:var(--r-s);display:block;image-rendering:pixelated}
+.code{
+  font-family:var(--mono);font-size:var(--fs-xs);line-height:1.7;
+  padding:var(--s3);border:1px solid var(--hair);border-radius:var(--r-m);
+  background:rgba(0,0,0,.45);word-break:break-all;user-select:all;-webkit-user-select:all;
+  color:var(--ink);max-height:112px;overflow:auto;
+}
+.step{display:flex;flex-direction:column;gap:var(--s4)}
+@media (prefers-reduced-motion:no-preference){.step{animation:step-in .32s cubic-bezier(.22,.61,.36,1) both}}
+@keyframes step-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.countdown{font-family:var(--mono);font-size:clamp(17px,1.5vw,22px);font-weight:650;color:var(--ink)}
+.countdown.is-out{color:var(--bad)}
+.pair-success{display:flex;flex-direction:column;gap:var(--s3);align-items:flex-start}
+.pair-success__title{display:flex;align-items:center;gap:var(--s2);font-size:clamp(15px,1.2vw,19px);font-weight:700;color:var(--ok)}
+.pair-success__title svg{width:20px;height:20px;flex:0 0 auto}
+@media (prefers-reduced-motion:no-preference){
+  .pair-root.is-done{animation:tunnel-in .55s cubic-bezier(.2,.8,.2,1) both}
+}
+@keyframes tunnel-in{
+  from{opacity:.25;transform:scale(.985);box-shadow:0 0 0 0 rgba(63,214,143,0)}
+  to{opacity:1;transform:scale(1);box-shadow:0 0 0 1px rgba(63,214,143,.28)}
+}
+/* ---- engines ---------------------------------------------------------- */
+.engines{display:grid;gap:var(--s2);grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.engine{
+  display:flex;flex-direction:column;gap:var(--s2);
+  padding:var(--s3);border:1px solid var(--hair);border-radius:var(--r-m);
+  background:rgba(255,255,255,.025);
+  transition:border-color .18s ease,background .18s ease;
+}
+.engine.is-on{border-color:rgba(139,108,255,.38);background:rgba(139,108,255,.07)}
+.engine.is-busy{border-color:rgba(255,204,92,.4)}
+.engine__top{display:flex;align-items:flex-start;gap:var(--s3)}
+.engine__ico{width:30px;height:30px;flex:0 0 auto;color:var(--accent-lift)}
+.engine__ico svg{display:block;width:100%;height:100%}
+.engine__id{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}
+.engine__name{font-size:var(--fs-md);font-weight:650;color:var(--ink)}
+.engine__alt{font-size:var(--fs-xs);color:var(--mute)}
+.engine__tag{font-size:var(--fs-xs);color:var(--dim)}
+.engine__meta{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute)}
+.engine__meta i{font-style:normal;color:var(--dim)}
+.engine__foot{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
+.engine__ref{font-family:var(--mono);font-size:var(--fs-xs);color:#4f4f5c;margin-left:auto}
+/* ---- states ----------------------------------------------------------- */
+.empty,.error{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--s2);
+  padding:var(--s5) var(--s3);text-align:center;color:var(--mute);
+  border:1px dashed var(--hair);border-radius:var(--r-m);font-size:var(--fs-sm);
+}
+.error{border-color:rgba(255,107,120,.35);border-style:solid;color:var(--bad)}
+.error .btn{margin-top:var(--s1)}
+.skeleton{
+  background:linear-gradient(90deg,rgba(255,255,255,.045),rgba(255,255,255,.1),rgba(255,255,255,.045));
+  background-size:240% 100%;border-radius:var(--r-s);min-height:14px;
+}
+@media (prefers-reduced-motion:no-preference){.skeleton{animation:sh 1.5s linear infinite}}
+@keyframes sh{from{background-position:130% 0}to{background-position:-130% 0}}
+.skel-stack{display:flex;flex-direction:column;gap:var(--s2)}
+.banner{
+  display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;
+  padding:var(--s2) var(--s3);border-radius:var(--r-m);
+  border:1px solid rgba(255,204,92,.35);background:rgba(255,204,92,.08);color:var(--warn);
+  font-size:var(--fs-sm);margin-bottom:var(--s3);
+}
+/* ---- save bar --------------------------------------------------------- */
+.savebar{
+  position:sticky;bottom:0;z-index:20;
+  display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap;
+  margin-top:var(--s4);padding:var(--s3) var(--s4);
+  background:rgba(0,0,0,.66);
+  border:1px solid var(--hair-strong);border-radius:var(--r-l);
+  -webkit-backdrop-filter:blur(28px) saturate(160%);
+  backdrop-filter:blur(28px) saturate(160%);
+  box-shadow:var(--shadow);
+}
+.savebar__state{display:flex;flex-direction:column;gap:1px;flex:1 1 auto;min-width:0}
+.savebar__text{font-size:var(--fs-sm);color:var(--dim)}
+.savebar__text.is-dirty{color:var(--warn)}
+.savebar__rev{font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute)}
+/* ---- drawer ----------------------------------------------------------- */
+.drawer{margin-top:var(--s4);border:1px solid var(--hair);border-radius:var(--r-l);background:rgba(255,255,255,.02);overflow:hidden}
+.drawer__head{display:flex;align-items:center;gap:var(--s2);padding:var(--s3) var(--s4);cursor:pointer;width:100%;text-align:left}
+.drawer__head h3{font-size:var(--fs-sm);font-weight:600;color:var(--dim);margin-right:auto}
+.drawer__head svg{width:16px;height:16px;color:var(--mute);transition:transform .18s ease}
+@media (prefers-reduced-motion:reduce){.drawer__head svg{transition:none}}
+.drawer.is-open .drawer__head svg{transform:rotate(90deg)}
+.drawer__body{padding:0 var(--s4) var(--s4);display:grid;gap:var(--s3);grid-template-columns:1fr}
+@media (min-width:900px){.drawer__body{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
+pre.raw{
+  margin:0;padding:var(--s3);border:1px solid var(--hair);border-radius:var(--r-m);
+  background:rgba(0,0,0,.5);font-family:var(--mono);font-size:var(--fs-xs);line-height:1.55;
+  max-height:320px;overflow:auto;color:#c8c8d2;white-space:pre-wrap;word-break:break-word;
+}
+/* ---- toasts ----------------------------------------------------------- */
+#toasts{position:fixed;right:var(--s4);bottom:var(--s4);z-index:50;display:flex;flex-direction:column;gap:var(--s2);max-width:min(380px,90vw)}
+.toast{
+  display:flex;align-items:flex-start;gap:var(--s2);
+  padding:var(--s3);border:1px solid var(--hair-strong);border-radius:var(--r-m);
+  background:rgba(16,16,20,.92);color:var(--ink);font-size:var(--fs-sm);
+  -webkit-backdrop-filter:blur(20px) saturate(150%);
+  backdrop-filter:blur(20px) saturate(150%);
+  box-shadow:var(--shadow);
+}
+@media (prefers-reduced-motion:no-preference){.toast{animation:toast-in .22s ease-out both}}
+@keyframes toast-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.toast[data-kind="ok"]{border-color:rgba(63,214,143,.45)}
+.toast[data-kind="err"]{border-color:rgba(255,107,120,.5)}
+.toast[data-kind="warn"]{border-color:rgba(255,204,92,.45)}
+.toast__x{margin-left:auto;color:var(--mute);font-size:var(--fs-xs);padding:0 var(--s1)}
+footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid var(--hair);display:flex;flex-wrap:wrap;gap:var(--s2) var(--s4);align-items:center;font-size:var(--fs-xs);color:var(--mute)}
+</style>
+</head>
+<body>
+<div class="app">
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand__mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2.6 4.6 5.4v6.1c0 4.4 3 8.2 7.4 9.9 4.4-1.7 7.4-5.5 7.4-9.9V5.4L12 2.6z"/>
+        <path d="M8.6 13.4h2.2l1.1-3.1 1.6 5 1-1.9h2"/>
+      </svg>
+    </span>
+    <span class="brand__text">
+      <h1 class="brand__name" id="node-name">POPOPX Mac Node</h1>
+      <span class="brand__sub" data-i18n="brandSub"></span>
+      <span class="brand__sub mono" id="node-ref"></span>
+    </span>
+  </div>
+  <div class="chip" title="POPOPX-XXXX" id="chip-mem" data-i18n="loadingShort"></div>
+  <div class="chip chip--ghost mono" id="serial-ref"></div>
+  <div class="topbar__right">
+    <span id="clock" aria-live="off">--:--:--</span>
+    <button class="chip chip--ghost" id="conn" data-state="connecting" title="连接中">
+      <span class="dot" id="dot" data-state="connecting"></span>
+      <span id="conn-text" data-i18n="connecting"></span>
+    </button>
+    <div class="lang" role="group" data-i18n-aria="langGroup" aria-label="Console language">
+      <select class="lang__select" id="lang-select" onchange="PPX.setLang(this.value)"></select>
+      <span class="lang__caret" aria-hidden="true">▾</span>
+    </div>
+  </div>
+</header>
+
+<div id="offline" class="banner" hidden>
+  <span data-i18n="offlineBanner"></span>
+  <button class="btn btn--mini" onclick="PPX.retry()" data-i18n="retry"></button>
+</div>
+
+<nav class="rail" data-i18n-aria="railAria" aria-label="Setup steps">
+  <button class="rail__btn is-on" id="rail-1" data-step="1" data-status="todo" onclick="PPX.step(1)">
+    <span class="rail__idx">01</span>
+    <span class="rail__name" data-i18n="s1"></span>
+    <span class="rail__badge" id="railbadge-1"></span>
+  </button>
+  <button class="rail__btn" id="rail-2" data-step="2" data-status="todo" onclick="PPX.step(2)">
+    <span class="rail__idx">02</span>
+    <span class="rail__name" data-i18n="s2"></span>
+    <span class="rail__badge" id="railbadge-2"></span>
+  </button>
+  <button class="rail__btn" id="rail-3" data-step="3" data-status="todo" onclick="PPX.step(3)">
+    <span class="rail__idx">03</span>
+    <span class="rail__name" data-i18n="s3"></span>
+    <span class="rail__badge" id="railbadge-3"></span>
+  </button>
+</nav>
+
+<main>
+<section class="step" id="step-1">
+  <div class="panel">
+    <div class="panel__head">
+      <h2><span data-i18n="s1Title"></span></h2>
+      <span class="tag tag--off" id="install-badge" data-i18n="loadingShort"></span>
+    </div>
+    <p class="panel__sub" data-i18n="s1Desc"></p>
+    <div class="grid grid--stats" id="stats"></div>
+  </div>
+
+  <div class="grid grid--split" style="margin-top:12px">
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="memTitle"></h3><span class="tag" id="tier-tag">—</span></div>
+        <div id="gauge"></div>
+        <hr class="hair">
+        <div class="btn-row">
+          <button class="btn btn--primary" id="btn-deploy" onclick="PPX.installStart()">
+            <span data-i18n="deploy"></span>
+          </button>
+          <button class="btn" id="btn-cancel" onclick="PPX.installCancel()" hidden><span data-i18n="cancelInstall"></span></button>
+        </div>
+        <p class="field__note" id="deploy-hint" data-i18n="idleHint" style="margin-top:8px"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="toolchainTitle"></h3></div>
+        <div class="pills" id="toolchain"></div>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="planTitle"></h3><span class="tag tag--accent" id="plan-llm">—</span></div>
+        <div class="tscroll"><table class="table" id="ladder"></table></div>
+        <p class="field__note" id="plan-note" style="margin-top:8px"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="stepsTitle"></h3></div>
+        <ul class="checklist" id="checklist"></ul>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="logTitle"></h3></div>
+        <div class="term">
+          <div class="term__head">
+            <span class="term__title">node · install.log</span>
+            <label class="sr" for="log-filter" data-i18n="levelFilter"></label>
+            <select id="log-filter" onchange="PPX.logFilter()">
+              <option value="all" data-i18n="filterAll"></option>
+              <option value="info" data-i18n="filterInfo"></option>
+              <option value="notice" data-i18n="filterNotice"></option>
+              <option value="warning" data-i18n="filterWarning"></option>
+              <option value="error" data-i18n="filterError"></option>
+            </select>
+            <button class="btn btn--mini" onclick="PPX.logCopy()" data-i18n="copyLog"></button>
+            <button class="btn btn--mini" onclick="PPX.logClear()" data-i18n="clearLog"></button>
+          </div>
+          <div class="term__body" id="log"></div>
+          <div class="term__foot">
+            <button class="btn btn--tiny" id="lockbtn" onclick="PPX.logUnlock()" hidden><span data-i18n="logUnlock"></span></button>
+            <span class="mute" id="logcount"></span>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</section>
+
+<section class="step" id="step-2" hidden>
+  <div class="grid grid--split">
+    <div class="panel pair-root" id="pair-root">
+      <div class="panel__head">
+        <h2 style="font-size:clamp(15px,1.15vw,18px)" data-i18n="qrTitle"></h2>
+        <span class="tag" id="pair-badge" data-i18n="loadingShort"></span>
+      </div>
+      <p class="panel__sub" data-i18n="qrSub"></p>
+      <div id="pair-body"></div>
+    </div>
+
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="devices"></h3>
+          <span class="tag" id="devices-count">0</span>
+        </div>
+        <div id="devices"></div>
+      </section>
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="bridgeTitle"></h3><span class="tag" id="daemon-tag">—</span></div>
+        <div class="grid grid--stats" id="bridge"></div>
+        <p class="field__note mono" id="bridge-binary" style="margin-top:8px"></p>
+      </section>
+    </div>
+  </div>
+</section>
+
+<section class="step" id="step-3" hidden>
+  <div class="panel">
+    <div class="panel__head"><h2 data-i18n="s3Title"></h2><span class="tag" id="engines-badge">—</span></div>
+    <p class="panel__sub" data-i18n="s3Desc"></p>
+    <div class="engines" id="engines"></div>
+  </div>
+
+  <div class="grid grid--split" style="margin-top:12px">
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="meshTitle"></h3><span class="tag" id="mesh-tag">—</span></div>
+        <div id="mesh"></div>
+      </section>
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="arkTitle"></h3><span class="tag" id="ark-tag">—</span></div>
+        <div id="ark"></div>
+      </section>
+    </div>
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="sentinelTitle"></h3><span class="tag" id="sentinel-tag">—</span></div>
+        <div id="sentinel"></div>
+      </section>
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="drillTitle"></h3></div>
+        <div id="drill"></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="savebar">
+    <div class="savebar__state">
+      <span class="savebar__text" id="save-text" data-i18n="saved"></span>
+      <span class="savebar__rev mono" id="save-rev"></span>
+    </div>
+    <button class="btn" onclick="PPX.revert()" data-i18n="revert"></button>
+    <button class="btn btn--primary" id="btn-save" onclick="PPX.save()" data-i18n="save"></button>
+  </div>
+</section>
+</main>
+
+<div class="drawer" id="drawer">
+  <button class="drawer__head" onclick="PPX.devToggle()">
+    <h3 data-i18n="devTitle"></h3>
+    <span class="mute" data-i18n="devHint"></span>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+  </button>
+  <div class="drawer__body" id="dev-body" hidden>
+    <div class="stack">
+      <div class="btn-row">
+        <button class="btn btn--mini" onclick="PPX.fetchRaw()" data-i18n="rawFetch"></button>
+        <button class="btn btn--mini" onclick="PPX.rawCopy()" data-i18n="rawCopy"></button>
+      </div>
+      <pre class="raw" id="raw">—</pre>
+    </div>
+    <div class="stack">
+      <label class="field__label" for="cmd" data-i18n="cmdLabel"></label>
+      <textarea id="cmd" spellcheck="false"></textarea>
+      <p class="field__note" data-i18n="cmdHint"></p>
+      <div class="btn-row">
+        <button class="btn" onclick="PPX.cmdSend()" data-i18n="cmdSend"></button>
+        <button class="btn btn--ghost" onclick="PPX.cmdClear()" data-i18n="cmdClear"></button>
+      </div>
+      <pre class="raw" id="cmdout">—</pre>
+    </div>
+  </div>
+</div>
+
+<footer class="app__foot">
+  <span class="mono" id="foot-ref"></span>
+  <span class="mono" id="foot-uptime"></span>
+  <span data-i18n="loopbackNote"></span>
+</footer>
+
+</div>
+<div id="toasts" role="status" aria-live="polite"></div>
+
+<script>
+"use strict";
+/* =====================================================================
+   POPOPX Mac Node console — vanilla ES2020, no dependencies.
+
+   Security rules that are enforced throughout this script:
+   * Every value that comes from the node (snapshot fields, SSE frames,
+     subprocess log lines, paths, device labels) is rendered with
+     textContent or createElement. innerHTML is used exactly once, on a
+     hard-coded, non-constant SVG path table. There is no string template
+     that interpolates remote data into markup anywhere in this file.
+   * All network calls go through api()/apiText(), which attach the
+     X-PPX-Token header and throw APIError on non-2xx.
+   ===================================================================== */
+
+var TOKEN = (function () {
+  var m = new URLSearchParams(window.location.search).get("t");
+  return m ? String(m) : "";
+})();
+
+var ROUTE = {
+  snapshot: "/api/snapshot",
+  events: "/api/events",
+  installStart: "/api/install/start",
+  installCancel: "/api/install/cancel",
+  pairingRotate: "/api/pairing/rotate",
+  pairingQR: "/api/pairing/qr.png",
+  pairingRevoke: "/api/pairing/revoke",
+  settings: "/api/settings",
+  engineToggle: "/api/engine/toggle",
+  engineInvoke: "/api/engine/invoke",
+  command: "/api/command",
+  health: "/api/health"
+};
+
+var LEVEL_GLYPH = { debug: "·", info: "›", notice: "•", success: "✓", warning: "!", error: "✕" };
+/* Short weekday glyphs are the same characters in both Chinese scripts, so the
+   Traditional catalog of this one table is the Simplified table. */
+var CJK_WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
+var WEEKDAYS = { zh: CJK_WEEKDAYS, zhHant: CJK_WEEKDAYS, en: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] };
+var WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
+var LOG_LIMIT = 900;
+
+/* ---------------------------------------------------------------- i18n */
+var I18N = {
+  brandSub: { zh: "本地算力与物理执行中枢 · 仅回环可达", en: "Local compute and physical execution hub · loopback only" },
+  loadingShort: { zh: "载入中", en: "Loading" },
+  connecting: { zh: "连接中", en: "Connecting" },
+  live: { zh: "已连接", en: "Connected" },
+  retryState: { zh: "重连中", en: "Reconnecting" },
+  offline: { zh: "已离线", en: "Offline" },
+  offlineBanner: { zh: "控制台与节点的实时通道已中断，页面显示的是最后一次成功读取的数据。", en: "The live channel to the node dropped. This page shows the last snapshot that was read successfully." },
+  retry: { zh: "立即重连", en: "Reconnect now" },
+  /* The picker writes one node-wide setting, so these strings talk about both
+     halves: what the page paints and what the node stores. */
+  langGroup: { zh: "控制台语言", en: "Console language" },
+  langFallback: { zh: "该语言尚未校对，页面暂以英文显示（简报与脚本仍按该语言生成）", en: "No proof-read catalog yet, so the page stays in English (briefings and scripts still use the chosen language)" },
+  langSaveHint: { zh: "页面已切换；节点里的语言会在你点“保存”后更新", en: "The page switched; the node keeps its own language until you press Save" },
+  langSaveFailed: { zh: "写入语言设置失败，已回到节点当前语言", en: "Could not store the language setting; back to the language the node uses" },
+  railAria: { zh: "设置步骤", en: "Setup steps" },
+  s1: { zh: "硬件与引擎部署", en: "Hardware & deploy" },
+  s2: { zh: "iPhone 扫码配对", en: "iPhone pairing" },
+  s3: { zh: "业务开关与物理权限", en: "Engines & physical authority" },
+  s1Title: { zh: "第 1 步 · 硬件扫描与环境一键安装", en: "Step 1 · Hardware scan and one-click install" },
+  s1Desc: { zh: "读取 Apple Silicon 画像，按统一内存档位推荐模型栈，并可一键把本地 AI 引擎装到这台 Mac。", en: "Reads the Apple Silicon profile, picks the model stack from unified memory, and installs the local AI engines on this Mac." },
+  s2Title: { zh: "第 2 步 · iOS 扫码配对绑定", en: "Step 2 · Pair the iPhone" },
+  s3Title: { zh: "第 3 步 · 10 大业务开关与物理权限", en: "Step 3 · Ten engines and physical authority" },
+  s3Desc: { zh: "开关、空闲算力、物理哨兵与时光方舟的写入面板；所有改动都要显式保存到 config/settings.json。", en: "Switches, idle compute sharing, the physical sentinel and the chrono ark. Every change is written to config/settings.json explicitly." },
+  loading: { zh: "等待节点快照…", en: "Waiting for the first snapshot…" },
+  loadFailed: { zh: "无法读取节点状态", en: "Could not read node state" },
+  reloadRetry: { zh: "重试", en: "Retry" },
+  noData: { zh: "暂无数据", en: "No data yet" },
+  chip: { zh: "芯片", en: "Chip" },
+  cores: { zh: "CPU 核心", en: "CPU cores" },
+  coresNote: { zh: "性能核 P · 能效核 E", en: "performance P · efficiency E" },
+  mem: { zh: "统一内存", en: "Unified memory" },
+  memNote: { zh: "Apple Silicon 共享池", en: "Shared Apple Silicon pool" },
+  freeDisk: { zh: "可用 SSD", en: "Free SSD" },
+  freeDiskNote: { zh: "总容量", en: "of total" },
+  tier: { zh: "算力档位", en: "Compute tier" },
+  loadTitle: { zh: "实时负载", en: "Live load" },
+  loadNote: { zh: "采样于", en: "sampled" },
+  memUsed: { zh: "已用内存", en: "Memory in use" },
+  pressure: { zh: "内存压力", en: "Memory pressure" },
+  processes: { zh: "活动进程", en: "Processes" },
+  cpu: { zh: "CPU 负载", en: "CPU load" },
+  nominal: { zh: "正常", en: "Nominal" },
+  warning: { zh: "警告", en: "Warning" },
+  critical: { zh: "危险", en: "Critical" },
+  memTitle: { zh: "统一内存仪表盘", en: "Unified memory gauge" },
+  usedOf: { zh: "已用", en: "used of" },
+  toolchainTitle: { zh: "工具链探针", en: "Toolchain probes" },
+  toolchainEmpty: { zh: "节点还没有回报任何工具链探测结果。", en: "The node has not reported any toolchain probe yet." },
+  present: { zh: "已安装", en: "present" },
+  missing: { zh: "缺失", en: "missing" },
+  stepsTitle: { zh: "部署清单", en: "Provisioning checklist" },
+  stepsEmpty: { zh: "尚无部署任务，点击左侧“一键自动部署”即可开始。", en: "No deploy run yet. Press one-click deploy to start." },
+  logTitle: { zh: "实时安装日志", en: "Live install log" },
+  levelFilter: { zh: "日志级别过滤", en: "Log level filter" },
+  filterAll: { zh: "全部级别", en: "All levels" },
+  filterInfo: { zh: "info 以上", en: "info and up" },
+  filterNotice: { zh: "notice 以上", en: "notice and up" },
+  filterWarning: { zh: "warning 以上", en: "warning and up" },
+  filterError: { zh: "仅 error", en: "error only" },
+  copyLog: { zh: "复制日志", en: "Copy log" },
+  clearLog: { zh: "清屏", en: "Clear" },
+  logCleared: { zh: "已清空显示（节点侧日志仍保留）", en: "View cleared (node-side log kept)" },
+  logLines: { zh: "行日志", en: "log lines" },
+  logLocked: { zh: "已暂停自动滚动", en: "Autoscroll paused" },
+  logUnlock: { zh: "恢复自动滚动", en: "Resume autoscroll" },
+  logEmpty: { zh: "日志窗口为空。安装开始时这里会实时滚动。", en: "The log window is empty. It starts streaming as soon as a deploy runs." },
+  logCopied: { zh: "日志已复制", en: "Log copied" },
+  deploy: { zh: "一键自动部署本地 AI 引擎", en: "One-click deploy local AI engines" },
+  cancelInstall: { zh: "取消部署", en: "Cancel deploy" },
+  idleHint: { zh: "会依次探测 brew / ffmpeg / uv / Ollama，按内存档位拉取适配权重，并初始化 LTX-2.5 工作区。", en: "Probes brew / ffmpeg / uv / Ollama, pulls the weights that fit the memory tier and prepares the LTX-2.5 workspace." },
+  installing: { zh: "部署进行中", en: "Deploy running" },
+  phaseIdle: { zh: "待部署", en: "Idle" },
+  phaseDetecting: { zh: "探测环境", en: "Detecting" },
+  phaseProvisioning: { zh: "安装依赖", en: "Provisioning" },
+  phasePullingLLM: { zh: "拉取语言模型", en: "Pulling LLM" },
+  phasePreparingWorkspace: { zh: "初始化工作区", en: "Preparing workspace" },
+  phaseDownloadingWeights: { zh: "下载视频权重", en: "Downloading weights" },
+  phaseVerifying: { zh: "校验", en: "Verifying" },
+  phaseReady: { zh: "引擎就绪", en: "Engines ready" },
+  phaseFailed: { zh: "部署失败", en: "Deploy failed" },
+  phaseCancelled: { zh: "已取消", en: "Cancelled" },
+  deployStarted: { zh: "已提交部署请求", en: "Deploy requested" },
+  deployFailed: { zh: "无法启动部署", en: "Could not start the deploy" },
+  deployCancel: { zh: "已请求取消", en: "Cancellation requested" },
+  deployCancelFailed: { zh: "取消失败", en: "Cancellation failed" },
+  installDone: { zh: "本地引擎已就绪", en: "Local engines are ready" },
+  installFailedWhy: { zh: "上次部署失败", en: "Last deploy failed" },
+  planTitle: { zh: "模型推荐阶梯", en: "Recommended model ladder" },
+  planNote: { zh: "方案依据", en: "Plan rationale" },
+  thBand: { zh: "内存档", en: "Memory band" },
+  thLLM: { zh: "语言模型", en: "Language model" },
+  thVideo: { zh: "视频精度", en: "Video precision" },
+  thResident: { zh: "常驻内存", en: "Resident" },
+  thNote: { zh: "策略", en: "Policy" },
+  tierCap: { zh: "本机满血", en: "Full-precision local" },
+  tierQuant: { zh: "本机量化", en: "Quantised local" },
+  tierLight: { zh: "轻量本机", en: "Light local" },
+  heavyLocal: { zh: "重型视频本机渲染", en: "Heavy video renders locally" },
+  heavyMesh: { zh: "重型视频转边缘算力", en: "Heavy video routed to mesh" },
+  noPlan: { zh: "节点尚未给出模型方案。", en: "The node has not produced a model plan yet." },
+  qrTitle: { zh: "配对二维码", en: "Pairing QR" },
+  qrSub: { zh: "iOS 端「发现 → Mac Node 配对」扫一扫；同一网络内即可建立端到端加密隧道。", en: "Scan it from iOS · Discover → Mac Node pairing. The encrypted tunnel comes up on the same network." },
+  qr: { zh: "二维码", en: "QR code" },
+  qrRetry: { zh: "重新载入二维码", en: "Reload the QR" },
+  qrLoading: { zh: "正在渲染二维码…", en: "Rendering the QR…" },
+  qrLoadFailed: { zh: "二维码图片读取失败", en: "Could not load the QR image" },
+  noQR: { zh: "节点暂时无法输出二维码图片；下方配对码仍然有效，可在 iOS 端手动粘贴。", en: "The node cannot render the QR image right now; the code below is still valid and can be pasted manually in iOS." },
+  code: { zh: "端到端加密配对码", en: "End-to-end encrypted pairing code" },
+  copyCode: { zh: "复制配对码", en: "Copy code" },
+  uri: { zh: "/*PPX_SCHEME*/ 邀请链接", en: "/*PPX_SCHEME*/ invitation URI" },
+  copyURI: { zh: "复制邀请链接", en: "Copy URI" },
+  pubkey: { zh: "节点公钥", en: "Node public key" },
+  expiry: { zh: "有效期至", en: "Valid for" },
+  expired: { zh: "此配对码已过期", en: "This pairing code has expired" },
+  used: { zh: "此配对码已被使用", en: "This pairing code has been used" },
+  oneTime: { zh: "一次性", en: "single use" },
+  rotate: { zh: "重新生成", en: "Regenerate" },
+  rotateFailed: { zh: "无法重新生成配对码", en: "Could not rotate the pairing offer" },
+  noPairing: { zh: "信令网关尚未签发配对码。安装完成或守护进程启动后会自动出现。", en: "The signalling gateway has not minted an offer yet. It appears once the daemon is up." },
+  tunnel: { zh: "已成功与 iPhone 建立加密隧道", en: "Encrypted tunnel with the iPhone is up" },
+  tunnelSub: { zh: "该设备的公钥已加入白名单，只有它能驱动这台 Mac 的 10 大业务。", en: "This device key is whitelisted; only it can drive the ten engines on this Mac." },
+  devices: { zh: "已配对设备", en: "Paired devices" },
+  devicesEmpty: { zh: "还没有设备完成扫码配对。", en: "No device has completed the QR handshake yet." },
+  revoke: { zh: "撤销", en: "Revoke" },
+  revokeDone: { zh: "设备已撤销", en: "Device revoked" },
+  revokeFailed: { zh: "撤销失败", en: "Revoke failed" },
+  revokedRow: { zh: "已撤销", en: "revoked" },
+  deviceModel: { zh: "机型", en: "Model" },
+  pairedAt: { zh: "配对时间", en: "Paired" },
+  lastSeen: { zh: "最后在线", en: "Last seen" },
+  neverSeen: { zh: "尚未通信", en: "never seen" },
+  copyPubkey: { zh: "复制公钥", en: "Copy key" },
+  bridgeTitle: { zh: "SMP 信令网关", en: "SMP signalling bridge" },
+  daemonStopped: { zh: "守护进程已停止", en: "Daemon stopped" },
+  daemonStarting: { zh: "守护进程启动中", en: "Daemon starting" },
+  daemonRunning: { zh: "守护进程运行中", en: "Daemon running" },
+  daemonDegraded: { zh: "守护进程降级", en: "Daemon degraded" },
+  daemonMissing: { zh: "缺少 simplex-chat 可执行文件", en: "simplex-chat binary missing" },
+  accepted: { zh: "已接受指令", en: "Accepted" },
+  rejected: { zh: "已拒绝指令", en: "Rejected" },
+  delivered: { zh: "已回传结果", en: "Delivered" },
+  outbox: { zh: "出站队列深度", en: "Outbox depth" },
+  uptime: { zh: "运行时长", en: "Uptime" },
+  wsOn: { zh: "WebSocket 已连", en: "WebSocket up" },
+  wsOff: { zh: "WebSocket 未连", en: "WebSocket down" },
+  daemonPath: { zh: "守护进程路径", en: "Daemon path" },
+  bridgeErr: { zh: "最近错误", en: "Last error" },
+  enginesTitle: { zh: "10 大业务引擎", en: "Ten business engines" },
+  enginesBadge: { zh: "已启用", en: "enabled" },
+  enginesLoading: { zh: "等待引擎描述符…", en: "Waiting for engine descriptors…" },
+  runs: { zh: "执行", en: "runs" },
+  failures: { zh: "失败", en: "failures" },
+  artifacts: { zh: "产物", en: "artifacts" },
+  lastRun: { zh: "上次", en: "last" },
+  busyNow: { zh: "执行中", en: "busy" },
+  idleNow: { zh: "空闲", en: "idle" },
+  requires: { zh: "依赖", en: "needs" },
+  needsModels: { zh: "需要本地模型", en: "needs local models" },
+  deterministicFlag: { zh: "确定性 · 不经模型", en: "deterministic · no model" },
+  toggleOn: { zh: "已开启", en: "Switched on" },
+  toggleOff: { zh: "已关闭", en: "Switched off" },
+  toggleFailed: { zh: "开关请求失败", en: "Switch request failed" },
+  save: { zh: "保存配置", en: "Save settings" },
+  saving: { zh: "保存中…", en: "Saving…" },
+  saved: { zh: "配置与节点一致", en: "Settings match the node" },
+  dirty: { zh: "有未保存的本地修改", en: "Local edits not saved" },
+  saveDone: { zh: "配置已写入", en: "Settings written" },
+  saveFailed: { zh: "保存失败", en: "Save failed" },
+  conflict: { zh: "节点已有更新的配置版本，已用节点数据重置表单", en: "The node holds a newer revision; the form was reloaded from it" },
+  revision: { zh: "配置版本", en: "revision" },
+  revert: { zh: "放弃修改", en: "Discard" },
+  reverted: { zh: "已恢复到节点配置", en: "Reverted to the node document" },
+  meshTitle: { zh: "空闲算力共享", en: "Idle compute sharing" },
+  meshOn: { zh: "共享开启", en: "sharing on" },
+  meshOff: { zh: "共享关闭", en: "sharing off" },
+  shareEnable: { zh: "允许出借空闲算力", en: "Lend idle cycles" },
+  maxMem: { zh: "最大内存", en: "Max memory" },
+  maxMemHint: { zh: "本机安全上限", en: "safe ceiling on this machine" },
+  maxJobs: { zh: "并发任务", en: "Concurrent jobs" },
+  minFree: { zh: "最低剩余磁盘 GB", en: "Min free disk GB" },
+  ownerPresent: { zh: "仅机主在场时接单", en: "Only while the owner is present" },
+  windows: { zh: "闲置接单时段", en: "Idle windows" },
+  windowAdd: { zh: "新增时段", en: "Add window" },
+  windowRemove: { zh: "删除", en: "Remove" },
+  windowEmpty: { zh: "没有时段将永不接单；至少保留一个。", en: "With no window the node never accepts work." },
+  from: { zh: "开始", en: "From" },
+  to: { zh: "结束", en: "To" },
+  weekdayShort: { zh: "星期", en: "Days" },
+  acceptingNow: { zh: "当前正在接单", en: "Accepting now" },
+  notAcceptingNow: { zh: "当前不接单", en: "Not accepting now" },
+  accrued: { zh: "累计算力点", en: "Accrued points" },
+  settled: { zh: "已结算任务", en: "Settled jobs" },
+  activeJobs: { zh: "进行中任务", en: "Active jobs" },
+  nextWindow: { zh: "下一个时段", en: "Next window" },
+  meshSandbox: { zh: "沙箱占用", en: "Sandbox bytes" },
+  sentinelTitle: { zh: "物理空间哨兵", en: "Physical-space sentinel" },
+  sentinelSub: { zh: "确定性闭锁：不经大模型，收到 🔒 / LOCK_ALL 立即执行。", en: "Deterministic lockdown: no model in the loop, fires on 🔒 / LOCK_ALL instantly." },
+  sentinelOn: { zh: "哨兵已启用", en: "Sentinel armed" },
+  sentinelOff: { zh: "哨兵已停用", en: "Sentinel off" },
+  mounts: { zh: "需卸载的挂载卷 / NAS 路径", en: "Volumes to unmount" },
+  mountAdd: { zh: "新增挂载路径", en: "Add path" },
+  mountEmpty: { zh: "没有配置挂载路径；闭锁时只清剪贴板、锁屏与 Webhook。", en: "No mount paths configured; lockdown will only clear the clipboard, lock the screen and hit the webhook." },
+  mountHint: { zh: "例如 /Volumes/ENCRYPTED 或 smb://… （闭锁时执行 diskutil unmount）", en: "e.g. /Volumes/ENCRYPTED or smb://… (unmounted via diskutil at lock time)" },
+  clipboard: { zh: "闭锁时清空剪贴板", en: "Clear clipboard on lock" },
+  lockScreen: { zh: "锁定屏幕", en: "Lock the screen" },
+  sleepDisplays: { zh: "关闭显示器", en: "Sleep displays" },
+  phrases: { zh: "触发词（逗号分隔）", en: "Trigger phrases (comma separated)" },
+  hookUrl: { zh: "Home Assistant / Webhook URL", en: "Home Assistant / webhook URL" },
+  hookSecret: { zh: "Webhook 签名密钥", en: "Webhook signing secret" },
+  secretShow: { zh: "显示", en: "Show" },
+  secretHide: { zh: "隐藏", en: "Hide" },
+  drill: { zh: "立即演练", en: "Run drill now" },
+  drillDone: { zh: "演练回执已返回", en: "Drill receipt returned" },
+  drillFailed: { zh: "演练失败", en: "Drill failed" },
+  drillPending: { zh: "演练执行中…", en: "Drill running…" },
+  drillTitle: { zh: "确定性闭锁回执", en: "Deterministic lockdown receipts" },
+  receiptEmpty: { zh: "尚无闭锁记录。点“立即演练”会产生一条真实回执。", en: "No lockdown on record yet. Press run-drill-now to produce one." },
+  modelFree: { zh: "零模型参与", en: "zero-model" },
+  modelUsed: { zh: "有模型参与（异常）", en: "model involved (unexpected)" },
+  receiptTrigger: { zh: "触发词", en: "Trigger" },
+  receiptClip: { zh: "剪贴板", en: "Clipboard" },
+  receiptUnmount: { zh: "已卸载", en: "Unmounted" },
+  receiptMountFail: { zh: "卸载失败", en: "Mount failures" },
+  receiptScreen: { zh: "锁屏", en: "Screen" },
+  receiptWebhook: { zh: "Webhook", en: "Webhook" },
+  receiptElapsed: { zh: "耗时", en: "Elapsed" },
+  arkTitle: { zh: "时光数字方舟", en: "Chrono Ark" },
+  arkSub: { zh: "密码学时间锁 + 心跳失联守护，到期或失联后按托付解封。", en: "Cryptographic time lock plus missed-beat guardianship; opens on schedule or after silence." },
+  arkOk: { zh: "守护正常", en: "Guardian healthy" },
+  arkAlert: { zh: "心跳已逾期", en: "Heartbeat overdue" },
+  beat: { zh: "心跳周期（小时）", en: "Heartbeat interval (hours)" },
+  missed: { zh: "容忍失联次数", en: "Missed beats tolerated" },
+  graceDue: { zh: "失联判定时刻", en: "Release deadline" },
+  lockDur: { zh: "时间锁时长（秒）", en: "Time-lock (seconds)" },
+  lockDays: { zh: "约合", en: "about" },
+  daysUnit: { zh: "天", en: "days" },
+  unlocks: { zh: "最早可解封", en: "earliest unlock" },
+  directory: { zh: "加密档案目录", en: "Encrypted archive directory" },
+  dirHint: { zh: "由节点固定在 vault/sealed/，正是 chrono_ark 写入胶囊的位置", en: "Fixed by the node at vault/sealed/, which is exactly where chrono_ark writes capsules" },
+  dirReveal: { zh: "在访达中打开", en: "Reveal in Finder" },
+  dirUnsupported: { zh: "网页不能列出本机目录，也不能改这个路径；“在访达中打开”由本机节点执行。", en: "A page cannot list local directories or change this path; “Reveal in Finder” is executed by the node on this machine." },
+  revealFailed: { zh: "无法让节点打开档案目录", en: "The node could not open the archive folder" },
+  archives: { zh: "已封存档案", en: "Sealed archives" },
+  archivesEmpty: { zh: "还没有封存任何档案。", en: "Nothing has been sealed yet." },
+  archiveSealedAt: { zh: "封存于", en: "sealed" },
+  archiveOpens: { zh: "可解封于", en: "opens" },
+  archiveRounds: { zh: "派生轮次", en: "rounds" },
+  archiveFingerprint: { zh: "密钥指纹", en: "key fingerprint" },
+  archiveOpen: { zh: "已到期待投递", en: "past lock" },
+  archiveSealed: { zh: "仍在锁定", en: "still sealed" },
+  beneficiary: { zh: "继承人称呼", en: "Beneficiary name" },
+  beneficiaryQueue: { zh: "继承人队列地址", en: "Beneficiary queue" },
+  devTitle: { zh: "开发者抽屉", en: "Developer drawer" },
+  devHint: { zh: "原始快照 JSON 与信令指令注入", en: "Raw snapshot JSON and wire command injection" },
+  devOpen: { zh: "展开", en: "Expand" },
+  devClose: { zh: "收起", en: "Collapse" },
+  rawFetch: { zh: "抓取原始快照", en: "Fetch raw snapshot" },
+  rawCopy: { zh: "复制 JSON", en: "Copy JSON" },
+  rawEmpty: { zh: "尚未抓取。", en: "Not fetched yet." },
+  rawFailed: { zh: "抓取失败", en: "Fetch failed" },
+  rawTruncated: { zh: "内容过长，已截断显示", en: "Truncated for display" },
+  cmdLabel: { zh: "注入 ::popopx_sys::NODE_CMD 指令", en: "Inject a ::popopx_sys::NODE_CMD command" },
+  cmdHint: { zh: "格式 ::popopx_sys::NODE_CMD::{serviceId}::{action}::{payload}，走与 iOS 完全相同的执行路径。", en: "Format ::popopx_sys::NODE_CMD::{serviceId}::{action}::{payload}; it takes the exact path an iOS command takes." },
+  cmdSend: { zh: "执行", en: "Execute" },
+  cmdClear: { zh: "清空输出", en: "Clear output" },
+  cmdEmpty: { zh: "请输入指令文本", en: "Type a command first" },
+  cmdDone: { zh: "指令已执行", en: "Command executed" },
+  cmdFailed: { zh: "指令执行失败", en: "Command failed" },
+  copyDone: { zh: "已复制到剪贴板", en: "Copied to the clipboard" },
+  copyFailed: { zh: "复制失败", en: "Copy failed" },
+  loopbackNote: { zh: "页面与 API 全部来自本机 127.0.0.1；无外部脚本、无字体、无追踪。", en: "Page and API come from 127.0.0.1 only; no external scripts, fonts or trackers." },
+  unknown: { zh: "未知", en: "unknown" },
+  yes: { zh: "是", en: "yes" },
+  no: { zh: "否", en: "no" },
+  never: { zh: "从未", en: "never" },
+  secondsUnit: { zh: "秒", en: "s" },
+  ago: { zh: "前", en: "ago" },
+  paired: { zh: "已配对", en: "Paired" },
+  released: { zh: "已开启", en: "Released" },
+  now: { zh: "现在", en: "now" }
+};
+
+/* ------------------------------------------------------- locale registry */
+/* `LOCALES` is replaced at document build time with `ConsoleLanguage
+   .displayOrder` — the same 17 languages the POPOPX iOS app ships
+   (apps/ios/POPOPX.xcodeproj `knownRegions` without `Base`, which is an Xcode
+   artefact rather than a locale) plus `zh-Hant`, which the phone does not
+   offer, and `system`, which follows the Mac's per-app language exactly the way
+   the phone follows iOS's Display Language setting. Generating it from Swift is
+   what keeps the two apps from offering different lists.
+
+   `catalog` is the honest coverage boundary: the hand-written interface copy is
+   maintained in Simplified Chinese and English, so every other language in this
+   list is offered and stored but rendered from the English catalog until its own
+   catalog lands. The page says so out loud instead of pretending.
+
+   `zh-Hant` is the exception, and `HANT` below is how: it is this page's own
+   Simplified column converted with Apple's CoreFoundation `Hans-Hant` transform
+   (see `TraditionalChinese`), injected at build time. A derived catalog cannot
+   fall behind the hand-written one, because it *is* the hand-written one. */
+var LOCALES = /*PPX_LANGS*/[];
+
+var HANT = /*PPX_HANT*/{};
+
+function localeEntry(code) {
+  for (var i = 0; i < LOCALES.length; i += 1) { if (LOCALES[i].code === code) { return LOCALES[i]; } }
+  return null;
+}
+
+function localeKnown(code) { return code === "system" || localeEntry(code) !== null; }
+
+function normaliseTag(tag) {
+  var parts = String(tag || "").toLowerCase().replace(/_/g, "-").split("-");
+  if (!parts.length || !parts[0]) { return "en"; }
+  /* The phone ships one Chinese catalog, zh-Hans, so zh / zh-CN / zh-Hant all
+     resolve to it rather than to a locale that exists in neither app. */
+  if (parts[0] === "zh") { return "zh-Hans"; }
+  var joined = parts.join("-");
+  for (var i = 0; i < LOCALES.length; i += 1) {
+    var code = LOCALES[i].code;
+    if (code.toLowerCase() === joined || code.toLowerCase() === parts[0]) { return code; }
+  }
+  return "en";
+}
+
+function systemLocale() {
+  var tags = [];
+  if (navigator.languages && navigator.languages.length) { tags = navigator.languages.slice(); }
+  tags.push(navigator.language || "");
+  for (var i = 0; i < tags.length; i += 1) {
+    var raw = String(tags[i] || "");
+    if (!raw) { continue; }
+    var code = normaliseTag(raw);
+    /* normaliseTag answers "en" for both a real English preference and an
+       unknown one; only the first is a decision, the other keeps scanning. */
+    if (code !== "en" || raw.toLowerCase().replace(/_/g, "-").indexOf("en") === 0) { return code; }
+  }
+  return "en";
+}
+
+function catalogFor(code) {
+  var entry = code === "system" ? localeEntry(systemLocale()) : localeEntry(code);
+  if (!entry) { return "en"; }
+  return entry.catalog || "en";
+}
+
+/* One lookup rule for every surface, so a string cannot be Traditional in a
+   label and Simplified in a tooltip. */
+function catalogValue(key, catalog) {
+  var row = I18N[key];
+  if (!row) { return null; }
+  if (catalog === "zhHant") { return HANT[key] || row.en || null; }
+  return row[catalog] || row.en || null;
+}
+
+function uiIsChinese() { return catalogFor(S.lang) !== "en"; }
+
+/* Dynamic copy that travels on the snapshot (engine names, checklist titles)
+   arrives as `xZh` / `xHant` / `xEn`; the node generates all three because one
+   snapshot is broadcast to every tab. */
+function snapshotField(object, base) {
+  var suffix = { zh: "Zh", zhHant: "Hant", en: "En" }[catalogFor(S.lang)];
+  var value = object[base + suffix];
+  if (value) { return String(value); }
+  return String(object[base + "En"] || object[base + "Zh"] || "");
+}
+
+var S = {
+  lang: "system",
+  langPending: false,
+  langAdopted: false,
+  snap: null,
+  step: 1,
+  entries: [],
+  seen: {},
+  autoScroll: true,
+  logStep: 0,
+  logFilter: "all",
+  form: null,
+  formBuilt: false,
+  formBase: 0,
+  dirty: false,
+  saving: false,
+  hadTunnel: false,
+  expiredRendered: false,
+  clockOffset: 0,
+  es: null,
+  esBackoff: 1000,
+  esTimer: null,
+  refreshTimer: null,
+  devOpen: false,
+  rawText: "",
+  copyable: {},
+  qrNonce: 0,
+  engineKeys: "",
+  engineRows: {},
+  gauge: null,
+  drillResult: null,
+  booted: false
+};
+
+/* -------------------------------------------------------------- helpers */
+function t(key) { var value = catalogValue(key, catalogFor(S.lang)); return value === null ? "" : value; }
+function el(id) { return document.getElementById(id); }
+
+function h(tag, attrs, kids) {
+  var node = document.createElement(tag);
+  if (attrs) {
+    Object.keys(attrs).forEach(function (key) {
+      var value = attrs[key];
+      if (value === null || value === undefined || value === false) { return; }
+      if (key === "text") { node.textContent = String(value); }
+      else if (key === "cls") { node.className = value; }
+      else if (key === "html") { throw new Error("markup injection is not allowed"); }
+      else if (key === "on") { Object.keys(value).forEach(function (ev) { node.addEventListener(ev, value[ev]); }); }
+      else if (key === "style") { Object.keys(value).forEach(function (p) { node.style.setProperty(p, value[p]); }); }
+      else if (key === "hidden") { if (value) { node.hidden = true; } }
+      else { node.setAttribute(key, String(value)); }
+    });
+  }
+  (Array.isArray(kids) ? kids : (kids === null || kids === undefined ? [] : [kids])).forEach(function (kid) {
+    if (kid === null || kid === undefined || kid === false) { return; }
+    node.appendChild(typeof kid === "object" ? kid : document.createTextNode(String(kid)));
+  });
+  return node;
+}
+function clear(node) { while (node && node.firstChild) { node.removeChild(node.firstChild); } }
+function setText(id, value) { var node = el(id); if (node) { node.textContent = value === null || value === undefined ? "" : String(value); } }
+function show(id, on) { var node = el(id); if (node) { node.hidden = !on; } }
+
+function fmt(n, digits) {
+  if (n === null || n === undefined || isNaN(Number(n))) { return "—"; }
+  var value = Number(n);
+  var fixed = digits === undefined ? (value >= 100 || value === Math.trunc(value) ? 0 : 1) : digits;
+  return value.toFixed(fixed);
+}
+function bytes(b) {
+  if (b === null || b === undefined || isNaN(Number(b))) { return "—"; }
+  var units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  var value = Number(b);
+  var index = 0;
+  while (value >= 1024 && index < units.length - 1) { value /= 1024; index += 1; }
+  return (index === 0 ? String(value) : value.toFixed(1)) + " " + units[index];
+}
+function clockOf(date) {
+  if (!date) { return "--:--:--"; }
+  function pad(x) { return x < 10 ? "0" + x : String(x); }
+  return pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
+}
+function stampOf(date) {
+  if (!date) { return t("never"); }
+  return clockOf(date);
+}
+function dateOf(value) { return value ? new Date(value) : null; }
+function relTime(date) {
+  if (!date) { return t("never"); }
+  var seconds = Math.max(0, Math.round((nodeNow() - date.getTime()) / 1000));
+  if (seconds < 60) { return seconds + t("secondsUnit") + " " + t("ago"); }
+  if (seconds < 3600) { return Math.round(seconds / 60) + "m " + t("ago"); }
+  return Math.round(seconds / 3600) + "h " + t("ago");
+}
+function nodeNow() { return Date.now() + S.clockOffset; }
+function dur(seconds) {
+  if (seconds === null || seconds === undefined) { return "—"; }
+  var s = Math.max(0, Math.round(Number(seconds)));
+  var parts = [];
+  var d = Math.floor(s / 86400); s -= d * 86400;
+  var hh = Math.floor(s / 3600); s -= hh * 3600;
+  var mm = Math.floor(s / 60); s -= mm * 60;
+  if (d) { parts.push(d + "d"); }
+  parts.push((d ? zero2(hh) : String(hh)) + ":" + zero2(mm) + ":" + zero2(s));
+  return parts.join(" ");
+}
+function zero2(x) { return x < 10 ? "0" + x : String(x); }
+function anon(path) {
+  if (!path) { return ""; }
+  return String(path).replace(/^\/Users\/[^/]+/, "~").replace(/^\/home\/[^/]+/, "~");
+}
+function hashKey(text) {
+  var value = String(text === null || text === undefined ? "" : text);
+  var hash = 5381;
+  for (var i = 0; i < value.length; i += 1) { hash = ((hash << 5) + hash) ^ value.charCodeAt(i); }
+  return (hash >>> 0).toString(36);
+}
+function clone(object) { return JSON.parse(JSON.stringify(object === undefined ? null : object)); }
+
+/* ------------------------------------------------------------------ api */
+function APIError(message, status, path) {
+  this.name = "APIError";
+  this.message = message;
+  this.status = status;
+  this.path = path;
+}
+APIError.prototype = Object.create(Error.prototype);
+
+function api(path, options) {
+  var opts = options || {};
+  var init = { method: opts.method || "GET", headers: {}, cache: "no-store" };
+  init.headers["X-PPX-Token"] = TOKEN;
+  if (opts.accept === "png") { init.headers["Accept"] = "image/png"; }
+  else if (opts.raw) { init.headers["Accept"] = "application/json"; }
+  else { init.headers["Accept"] = "application/json"; }
+  if (opts.json !== undefined) {
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(opts.json);
+  }
+  var url = path;
+  if (opts.query) {
+    var params = new URLSearchParams();
+    Object.keys(opts.query).forEach(function (key) { params.set(key, String(opts.query[key])); });
+    url = path + (path.indexOf("?") >= 0 ? "&" : "?") + params.toString();
+  }
+  return fetch(url, init).then(function (response) {
+    if (!response.ok) {
+      return response.text().then(function (text) {
+        var message = text;
+        try {
+          var parsed = JSON.parse(text);
+          if (parsed && parsed.error) { message = String(parsed.error); }
+        } catch (ignored) { /* plain text or empty body is fine */ }
+        if (response.status === 401) { message = message || "401"; }
+        throw new APIError(message || (response.status + " " + response.statusText), response.status, path);
+      });
+    }
+    if (opts.raw) { return response.text(); }
+    if (response.status === 204) { return null; }
+    var header = (response.headers.get("content-type") || "");
+    if (header.indexOf("json") < 0) { return response.text(); }
+    return response.json();
+  });
+}
+
+/* ---------------------------------------------------------------- toast */
+function toast(kind, text) {
+  var host = el("toasts");
+  if (!host) { return; }
+  var node = h("div", { cls: "toast", "data-kind": kind }, [
+    h("span", { text: text }),
+    h("button", { cls: "toast__x", text: "×", aria: { label: "close" }, onclick: "PPX.dismiss(this)" })
+  ]);
+  host.appendChild(node);
+  window.setTimeout(function () { if (node.parentNode) { node.parentNode.removeChild(node); } }, kind === "err" ? 6200 : 4200);
+  while (host.children.length > 4) { host.removeChild(host.firstChild); }
+}
+function fail(kind, error) {
+  toast("err", t(kind) + " · " + (error && error.message ? error.message : String(error)));
+}
+
+/* --------------------------------------------------------------- icons  */
+/* Static, hard-coded path table. Values are constants in this file — never
+   remote data — so injecting them as markup cannot carry attacker input. */
+var ICONS = {
+  done: '<path d="M20 6 9 17l-5-5"/>',
+  todo: '<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>',
+  run: '<circle cx="12" cy="12" r="8" stroke-dasharray="12 8"/>',
+  wait: '<path d="M12 3 2 20h20L12 3z"/><path d="M12 10v5"/><path d="M12 17.5v.5"/>',
+  brain: '<path d="M9 4a3 3 0 0 1 3 3v10a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3z"/><path d="M15 4a3 3 0 0 0-3 3v10a3 3 0 0 0 6 0V7a3 3 0 0 0-3-3z"/>',
+  waves: '<path d="M2 9c2 0 2 2 4 2s2-2 4-2 2 2 4 2 2-2 4-2 2 2 4 2"/><path d="M2 15c2 0 2 2 4 2s2-2 4-2 2 2 4 2 2-2 4-2 2 2 4 2"/>',
+  eye: '<path d="M3 12s4-6 9-6 9 6 9 6-4 6-9 6-9-6-9-6z"/><path d="M4 4l16 16"/>',
+  film: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 5v14M16 5v14M3 12h18"/>',
+  mesh: '<circle cx="12" cy="5" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="18" r="2"/><path d="M12 7 6.5 16M12 7l5.5 9M7 18h10"/>',
+  sun: '<path d="M12 5v-2M5 12H3M19 12h-2M6.5 6.5 5 5M17.5 6.5 19 5"/><path d="M4 18h16"/><path d="M12 18a5 5 0 0 0-5-5"/><path d="M12 18a5 5 0 0 1 5-5"/>',
+  lock: '<rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><path d="M12 14v3"/>',
+  hour: '<path d="M7 3h10M7 21h10"/><path d="M8 3v4l4 5 4-5V3"/><path d="M8 21v-4l4-5 4 5v4"/>',
+  heart: '<rect x="2" y="4" width="20" height="16" rx="3"/><path d="M12 17s-4-2.6-4-5.2A2.2 2.2 0 0 1 12 10a2.2 2.2 0 0 1 4 1.8C16 14.4 12 17 12 17z"/>',
+  tv: '<rect x="2" y="7" width="20" height="13" rx="2"/><path d="M8 3l4 4 4-4"/>',
+  shield: '<path d="M12 2.6 4.6 5.4v6.1c0 4.4 3 8.2 7.4 9.9 4.4-1.7 7.4-5.5 7.4-9.9V5.4L12 2.6z"/>',
+  chev: '<path d="M9 5l7 7-7 7"/>'
+};
+function svgIcon(name, size) {
+  var path = ICONS[name];
+  if (!path) { return h("span", { text: "•" }); }
+  var wrap = h("span", { "aria-hidden": "true" });
+  /* The only innerHTML use in this file: a constant table above, no remote data. */
+  wrap.innerHTML = '<svg viewBox="0 0 24 24" width="' + (size || 18) + '" height="' + (size || 18) +
+    '" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' + path + "</svg>";
+  return wrap;
+}
+var SYMBOL_ICON = {
+  "brain.head.profile": "brain",
+  "water.waves": "waves",
+  "eye.slash": "eye",
+  "film.stack": "film",
+  "point.3.connected.trianglepath.dotted": "mesh",
+  "sun.horizon": "sun",
+  "lock.shield": "lock",
+  "hourglass": "hour",
+  "heart.text.square": "heart",
+  "play.tv": "tv"
+};
+
+/* --------------------------------------------------------------- i18n IO */
+/* Fills the picker from `LOCALES`, which is `ConsoleLanguage.displayOrder`
+   injected by the node: the 17 regions the POPOPX iOS app ships plus `system`.
+   Re-run on every language flip because the option labels are endonyms, which
+   by design never translate — a Hungarian always reads "Magyar". */
+function buildLangMenu() {
+  var select = el("lang-select");
+  if (!select) { return; }
+  select.innerHTML = "";
+  LOCALES.forEach(function (item) {
+    var option = document.createElement("option");
+    option.value = item.code;
+    option.textContent = item.name;
+    if (item.code === S.lang) { option.selected = true; }
+    select.appendChild(option);
+  });
+  select.value = S.lang;
+}
+
+function applyLang() {
+  var catalog = catalogFor(S.lang);
+  document.documentElement.setAttribute("data-lang", S.lang);
+  document.documentElement.setAttribute("lang",
+    catalog === "zh" ? "zh-Hans-CN" : (catalog === "zhHant" ? "zh-Hant-TW" : "en"));
+  buildLangMenu();
+  var missing = [];
+  Array.prototype.forEach.call(document.querySelectorAll("[data-i18n]"), function (node) {
+    var key = node.getAttribute("data-i18n");
+    var value = catalogValue(key, catalog);
+    if (value === null) { missing.push(key); return; }
+    node.textContent = value;
+  });
+  Array.prototype.forEach.call(document.querySelectorAll("[data-i18n-ph]"), function (node) {
+    var key = node.getAttribute("data-i18n-ph");
+    var value = catalogValue(key, catalog);
+    if (value !== null) { node.setAttribute("placeholder", value); }
+  });
+  /* Accessible names are read aloud by VoiceOver, so they are part of the
+     catalog too — an English "Language" in a Chinese console is a bug. */
+  Array.prototype.forEach.call(document.querySelectorAll("[data-i18n-aria]"), function (node) {
+    var key = node.getAttribute("data-i18n-aria");
+    var value = catalogValue(key, catalog);
+    if (value !== null) { node.setAttribute("aria-label", value); }
+  });
+  if (missing.length) {
+    /* Loud, visible, and never falls back to the raw key on screen. */
+    console.error("missing i18n keys", missing.join(", "));
+    toast("warn", "i18n " + missing.length);
+  }
+  /* Re-run the connection chip through its own setter: the label and the title
+     are the only two strings there that are not `[data-i18n]` nodes, and
+     `setConn` already null-checks both, so a language flip cannot throw. */
+  setConn(CONN.state);
+  renderAll();
+}
+
+/* ------------------------------------------------------- connection state */
+var CONN = { state: "connecting", lastOk: 0, lastPoll: 0 };
+var CHANNELS = ["install", "pairing", "engine", "bridge", "result", "mesh", "sentinel", "settings", "system"];
+
+function connKeyFor(state) { return state === "retry" ? "retryState" : state; }
+function setConn(state) {
+  CONN.state = state;
+  var dot = el("dot"), btn = el("conn");
+  if (dot) { dot.setAttribute("data-state", state); }
+  if (btn) {
+    btn.setAttribute("data-state", state);
+    btn.setAttribute("title", t(connKeyFor(state)));
+    var label = el("conn-text");
+    if (label) { label.textContent = t(connKeyFor(state)); }
+  }
+  show("offline", state === "offline" || state === "retry");
+}
+
+function openSSE() {
+  if (S.es) { try { S.es.close(); } catch (ignored) { } S.es = null; }
+  if (!TOKEN) {
+    setConn("offline");
+    toast("err", "token");
+    return;
+  }
+  setConn(CONN.lastOk ? "connecting" : "connecting");
+  var source = new EventSource(ROUTE.events + "?t=" + encodeURIComponent(TOKEN));
+  S.es = source;
+  source.onopen = function () {
+    S.esBackoff = 1000;
+    CONN.lastOk = Date.now();
+    setConn("live");
+    refreshSnapshot(true);
+  };
+  source.onerror = function () { scheduleReconnect(); };
+  CHANNELS.forEach(function (channel) {
+    source.addEventListener(channel, function (event) { onFrame(channel, event.data); });
+  });
+  source.onmessage = function (event) { onFrame("system", event.data); };
+}
+
+/* Exponential backoff. The server advertises `retry: 3000`, but a node that is
+   gone must not turn the page into a 1 Hz reconnect loop. */
+function scheduleReconnect() {
+  if (S.esTimer) { return; }
+  if (S.es) { try { S.es.close(); } catch (ignored) { } S.es = null; }
+  setConn(CONN.lastOk ? "retry" : "offline");
+  var delay = Math.min(30000, S.esBackoff);
+  S.esBackoff = Math.min(30000, S.esBackoff * 2);
+  S.esTimer = window.setTimeout(function () { S.esTimer = null; openSSE(); }, delay);
+}
+
+function onFrame(channel, data) {
+  CONN.lastOk = Date.now();
+  setConn("live");
+  var event = null;
+  try { event = JSON.parse(String(data)); } catch (ignored) { event = null; }
+  var level = event && event.level ? String(event.level) : "info";
+  var message = event && event.message ? String(event.message) : String(data);
+  var at = event && event.at ? event.at : null;
+  var payload = (event && event.payload) || null;
+  if (channel === "install") {
+    addLog({
+      time: at,
+      level: level,
+      channel: "install",
+      text: message,
+      phase: payload && payload.phase ? String(payload.phase) : "",
+      seq: payload && payload.seq !== undefined ? Number(payload.seq) : undefined
+    });
+  }
+  if (channel === "pairing") { refreshSnapshot(true); return; }
+  queueRefresh();
+}
+
+function queueRefresh() {
+  if (S.refreshTimer) { window.clearTimeout(S.refreshTimer); }
+  S.refreshTimer = window.setTimeout(function () { S.refreshTimer = null; refreshSnapshot(false); }, 140);
+}
+
+function refreshSnapshot(force) {
+  CONN.lastPoll = Date.now();
+  return api(ROUTE.snapshot).then(function (snap) {
+    CONN.lastOk = Date.now();
+    if (S.es) { setConn("live"); }
+    var first = !S.snap;
+    S.snap = snap;
+    S.clockOffset = new Date(snap.serverTime).getTime() - Date.now();
+    if (first) { S.hadTunnel = liveDevices(snap).length > 0; }
+    absorbTail(snap);
+    if (!S.formBuilt) { buildSettingsForm(snap); }
+    /* The node owns the language choice, so the first snapshot after a reload
+       wins over the page default; later snapshots must not yank the UI out
+       from under someone editing the form or waiting on their own change. */
+    if (!S.langAdopted) {
+      S.langAdopted = true;
+      var saved = (snap.settings || {}).language;
+      if (!S.langPending && localeKnown(saved) && saved !== S.lang) { adoptLanguage(saved); }
+    }
+    renderAll();
+  }).catch(function (error) {
+    if (!S.snap) { renderFatal(error); }
+    setConn(CONN.lastOk ? "offline" : "connecting");
+    if (error && error.status === 401) { toast("err", String(error.message)); }
+  });
+}
+
+/* A reload must still show the installer history: the snapshot carries
+   install.tail and the hub replays its backlog, so both are folded in here
+   and deduped by sequence number. */
+function absorbTail(snap) {
+  ((snap.install && snap.install.tail) || []).forEach(function (line) {
+    addLog({ time: line.at, level: line.level, channel: "install", phase: line.phase, text: line.text, seq: line.seq });
+  });
+  (snap.eventsBacklog || []).forEach(function (event) {
+    if (event.channel !== "install") { return; }
+    addLog({ time: event.at, level: event.level, channel: event.channel, text: event.message, phase: "" });
+  });
+}
+
+function renderFatal(error) {
+  var message = error && error.message ? String(error.message) : String(error);
+  ["stats", "gauge", "toolchain", "ladder", "checklist", "pair-body", "devices", "bridge",
+    "engines", "mesh", "sentinel", "ark", "drill"].forEach(function (id) {
+      var slot = el(id);
+      if (!slot) { return; }
+      clear(slot);
+      slot.appendChild(h("div", { cls: "error" }, [
+        h("span", { text: t("loadFailed") }),
+        h("span", { cls: "mono", text: message }),
+        h("button", { cls: "btn btn--mini", text: t("reloadRetry"), onclick: "PPX.retry()" })
+      ]));
+    });
+  setText("install-badge", t("offline"));
+}
+
+/* -------------------------------------------------------------- utilities */
+function liveDevices(snap) {
+  return ((snap && snap.pairedDevices) || []).filter(function (device) { return !device.revoked; });
+}
+function runtimeFor(snap, kind) {
+  var list = snap.engines || [];
+  for (var index = 0; index < list.length; index += 1) {
+    if (list[index].kind === kind) { return list[index]; }
+  }
+  return null;
+}
+function enabledCount(snap) { return (snap.engines || []).filter(function (item) { return item.enabled; }).length; }
+function ollamaReady(snap) {
+  var list = snap.toolchain || [];
+  for (var index = 0; index < list.length; index += 1) {
+    if (String(list[index].name).toLowerCase().indexOf("ollama") >= 0) { return Boolean(list[index].present); }
+  }
+  return Boolean(snap.install && snap.install.phase === "ready");
+}
+function ceilingGB() {
+  var hardware = S.snap && S.snap.hardware;
+  if (!hardware) { return 32; }
+  var value = Number(hardware.meshMemoryCeilingGB);
+  if (value > 0) { return Math.max(4, Math.round(value)); }
+  return Math.max(8, Math.round((Number(hardware.memoryGB) || 16) * 0.55));
+}
+function phaseKey(phase) {
+  var text = String(phase || "idle");
+  return "phase" + text.charAt(0).toUpperCase() + text.slice(1);
+}
+function tierLabel(tier) {
+  if (tier === "flagship") { return t("tierCap"); }
+  if (tier === "high") { return t("tierQuant"); }
+  if (tier === "light") { return t("tierLight"); }
+  return t("unknown");
+}
+function emptyState(key) { return h("div", { cls: "empty" }, h("span", { text: t(key) })); }
+function noteLine(key) { return h("p", { cls: "field__note", text: t(key) }); }
+
+/* ------------------------------------------------------------------- log */
+function logRank(level) {
+  var order = { debug: 0, info: 1, notice: 2, success: 3, warning: 4, error: 5 };
+  return order[level] === undefined ? 1 : order[level];
+}
+function logPasses(entry) { return S.logFilter === "all" ? true : logRank(entry.level) >= logRank(S.logFilter); }
+function logNode(entry) {
+  var line = h("div", { cls: "line", "data-level": entry.level });
+  line.appendChild(h("span", { cls: "line__t", text: clockOf(dateOf(entry.time)) }));
+  line.appendChild(h("span", { cls: "line__g", text: LEVEL_GLYPH[entry.level] || "›" }));
+  if (entry.phase) { line.appendChild(h("span", { cls: "line__c", text: "[" + entry.phase + "]" })); }
+  line.appendChild(h("span", { cls: "line__m", text: String(entry.text) }));
+  return line;
+}
+function seenKey(entry) {
+  return entry.seq !== undefined && entry.seq !== null
+    ? "seq:" + entry.seq
+    : "k:" + entry.channel + ":" + String(entry.time) + ":" + String(entry.text);
+}
+function addLog(entry) {
+  var key = seenKey(entry);
+  if (S.seen[key]) { return; }
+  S.seen[key] = true;
+  S.entries.push(entry);
+  if (S.entries.length > LOG_LIMIT) {
+    S.entries.splice(0, S.entries.length - LOG_LIMIT);
+    if (Object.keys(S.seen).length > LOG_LIMIT * 3) {
+      var pruned = {};
+      S.entries.forEach(function (kept) { pruned[seenKey(kept)] = true; });
+      S.seen = pruned;
+    }
+  }
+  var body = el("log");
+  if (!body || S.step !== 1 || !logPasses(entry)) { return; }
+  var placeholder = body.querySelector(".empty");
+  if (placeholder) { body.removeChild(placeholder); }
+  body.appendChild(logNode(entry));
+  while (body.children.length > LOG_LIMIT) { body.removeChild(body.firstChild); }
+  if (S.autoScroll) { body.scrollTop = body.scrollHeight; }
+  setText("logcount", S.entries.length + " " + t("logLines"));
+}
+function rebuildLog() {
+  var body = el("log");
+  if (!body) { return; }
+  clear(body);
+  var shown = 0;
+  S.entries.forEach(function (entry) {
+    if (!logPasses(entry)) { return; }
+    shown += 1;
+    body.appendChild(logNode(entry));
+  });
+  if (!shown) { body.appendChild(emptyState("logEmpty")); }
+  if (S.autoScroll) { body.scrollTop = body.scrollHeight; }
+  setText("logcount", S.entries.length + " " + t("logLines"));
+}
+function onLogScroll() {
+  var body = el("log");
+  if (!body) { return; }
+  var gap = body.scrollHeight - body.scrollTop - body.clientHeight;
+  S.autoScroll = gap <= 24;
+  show("lockbtn", !S.autoScroll);
+}
+
+/* ------------------------------------------------------------ top / rail */
+function renderTop() {
+  var snap = S.snap, node = snap.node || {}, hardware = snap.hardware || {}, install = snap.install || {};
+  setText("node-name", node.displayName || "POPOPX Node");
+  setText("node-ref", String(node.version || snap.version || "") + " · schema " + String(node.schemaRevision || "?"));
+  setText("chip-mem", String(hardware.shortLabel || ((hardware.chipName || "?") + " · " + String(hardware.memoryGB || "?") + " GB")));
+  el("chip-mem").setAttribute("title", String(hardware.serialMasked || ""));
+  setText("serial-ref", "#" + String(node.nodeId || "").slice(0, 8));
+  setText("foot-ref", "node " + String(node.nodeId || "") + " · " + String(snap.consoleURL || ""));
+  var badge = el("install-badge");
+  badge.textContent = t(phaseKey(install.phase));
+  badge.className = "tag " + (install.phase === "ready" ? "tag--ok"
+    : install.phase === "failed" ? "tag--bad" : install.running ? "tag--accent" : "tag--off");
+}
+
+var RAIL_ICON = { done: "done", run: "run", wait: "wait", todo: "todo" };
+function setRail(number, status) {
+  var btn = el("rail-" + number);
+  if (btn) { btn.setAttribute("data-status", status); }
+  var slot = el("railbadge-" + number);
+  if (slot) { clear(slot); slot.appendChild(svgIcon(RAIL_ICON[status] || "todo", 16)); }
+}
+function renderRail() {
+  var snap = S.snap, install = snap.install || {}, offer = snap.pairing;
+  var devices = liveDevices(snap);
+  setRail(1, install.phase === "ready" ? "done" : install.running ? "run" : install.phase === "failed" ? "wait" : "todo");
+  setRail(2, devices.length ? "done"
+    : !offer ? "run"
+      : new Date(offer.expiresAt).getTime() < nodeNow() ? "wait" : "todo");
+  setRail(3, enabledCount(snap) > 0 ? "done" : "todo");
+}
+
+/* -------------------------------------------------------------- step one */
+function statCard(key, value, note, small) {
+  return h("div", { cls: "stat" }, [
+    h("span", { cls: "stat__k", text: t(key) }),
+    h("span", { cls: "stat__v" + (small ? " stat__v--sm" : ""), text: value }),
+    note ? h("span", { cls: "stat__n", text: note }) : null
+  ]);
+}
+function renderStats() {
+  var snap = S.snap, hardware = snap.hardware || {}, load = snap.load || {}, plan = snap.plan || {};
+  var slot = el("stats");
+  clear(slot);
+  slot.appendChild(statCard("chip", String(hardware.chipName || t("unknown")), String(hardware.modelIdentifier || ""), true));
+  slot.appendChild(statCard("cores",
+    String(hardware.performanceCoreCount || 0) + "P · " + String(hardware.efficiencyCoreCount || 0) + "E",
+    t("coresNote") + " · " + String(hardware.logicalCPUCount || 0)));
+  slot.appendChild(statCard("mem", String(hardware.memoryGB || 0) + " GB", bytes(hardware.memoryTotal && hardware.memoryTotal.bytes), true));
+  slot.appendChild(statCard("freeDisk", bytes(hardware.freeDisk && hardware.freeDisk.bytes),
+    t("freeDiskNote") + " " + bytes(hardware.totalDisk && hardware.totalDisk.bytes)));
+  slot.appendChild(statCard("tier", tierLabel(hardware.tier || plan.tier), String(plan.videoPrecision || ""), true));
+  slot.appendChild(statCard("load", fmt(load.cpuLoadPercent, 0) + " %",
+    t("processes") + " " + String(load.activeProcessCount || 0) + " · " + t("pressure") + " " + t(String(load.memoryPressure || "nominal"))));
+}
+
+var SVG_NS = "http://www.w3.org/2000/svg";
+function svgShape(name, attrs) {
+  var node = document.createElementNS(SVG_NS, name);
+  Object.keys(attrs || {}).forEach(function (key) { node.setAttribute(key, String(attrs[key])); });
+  return node;
+}
+function buildGauge() {
+  var slot = el("gauge");
+  clear(slot);
+  var svg = svgShape("svg", { viewBox: "0 0 120 120", role: "img", "aria-label": t("memTitle") });
+  var innerArc = svgShape("circle", {
+    class: "gauge__ring gauge__arc", cx: 60, cy: 60, r: 42,
+    "stroke-dasharray": 263.9, "stroke-dashoffset": 263.9, transform: "rotate(-90 60 60)"
+  });
+  var outerArc = svgShape("circle", {
+    class: "gauge__ring gauge__arc--outer", cx: 60, cy: 60, r: 54,
+    "stroke-dasharray": 339.3, "stroke-dashoffset": 339.3, transform: "rotate(-90 60 60)"
+  });
+  [svgShape("circle", { class: "gauge__ring gauge__bg", cx: 60, cy: 60, r: 54 }),
+    outerArc,
+    svgShape("circle", { class: "gauge__ring gauge__bg", cx: 60, cy: 60, r: 42 }),
+    innerArc].forEach(function (node) { svg.appendChild(node); });
+  slot.appendChild(h("div", { cls: "gauge" }, [
+    svg,
+    h("div", { cls: "gauge__label" }, [
+      h("span", { cls: "gauge__pct", id: "gauge-pct" }, "0%"),
+      h("span", { cls: "gauge__cap", id: "gauge-cap" }, t("loadingShort")),
+      h("span", { cls: "gauge__val", id: "gauge-val" }, "")
+    ])
+  ]));
+  S.gauge = { inner: innerArc, outer: outerArc };
+}
+function renderGauge() {
+  var snap = S.snap, hardware = snap.hardware || {}, load = snap.load || {}, plan = snap.plan || {};
+  if (!S.gauge || !el("gauge-pct")) { buildGauge(); }
+  var total = Number(hardware.memoryTotal && hardware.memoryTotal.bytes) || 1;
+  var used = Number(load.memoryUsed && load.memoryUsed.bytes) || 0;
+  var share = Math.max(0, Math.min(1, used / total));
+  var resident = Math.max(0, Math.min(1, (Number(plan.expectedResidentGB) || 0) / (Number(hardware.memoryGB) || 1)));
+  S.gauge.inner.setAttribute("stroke-dashoffset", String(263.9 * (1 - share)));
+  S.gauge.outer.setAttribute("stroke-dashoffset", String(339.3 * (1 - resident)));
+  setText("gauge-pct", Math.round(share * 100) + "%");
+  setText("gauge-cap", t("usedOf") + " " + bytes(total));
+  setText("gauge-val", bytes(used) + " · " + t("thResident") + " " + String(plan.expectedResidentGB || 0) + " GB");
+}
+function renderToolchain() {
+  var list = (S.snap && S.snap.toolchain) || [];
+  var slot = el("toolchain");
+  clear(slot);
+  if (!list.length) { slot.appendChild(emptyState("toolchainEmpty")); return; }
+  list.forEach(function (probe) {
+    var pill = h("span", { cls: "pill" + (probe.present ? "" : " is-missing"), title: anon(probe.resolvedPath || "") });
+    pill.appendChild(h("span", { cls: "pill__led" }));
+    pill.appendChild(h("span", { text: String(probe.name || "?") }));
+    if (probe.versionLine) { pill.appendChild(h("span", { cls: "pill__ver", text: String(probe.versionLine).slice(0, 34) })); }
+    pill.appendChild(h("span", { cls: "tag " + (probe.present ? "tag--ok" : "tag--bad"), text: probe.present ? t("present") : t("missing") }));
+    slot.appendChild(pill);
+  });
+}
+var LADDER = [
+  { tier: "flagship", band: ">= 96 GB", llm: "qwen3.8:27b-q8_0", video: "ltx-2.5 · BF16", policy: "heavyLocal" },
+  { tier: "high", band: "48 - 95 GB", llm: "qwen3.8:27b-q4_k_m", video: "ltx-2.5-mlx-8bit", policy: "heavyLocal" },
+  { tier: "light", band: "< 48 GB", llm: "qwen3.8:9b-q4_k_m", video: "ltx-2.5-mlx-4bit", policy: "heavyMesh" }
+];
+function renderLadder() {
+  var snap = S.snap, plan = snap.plan || {}, hardware = snap.hardware || {};
+  var slot = el("ladder");
+  clear(slot);
+  var head = document.createElement("tr");
+  ["thBand", "thLLM", "thVideo", "thResident", "thNote"].forEach(function (key) { head.appendChild(h("th", { text: t(key) })); });
+  var thead = document.createElement("thead");
+  thead.appendChild(head);
+  slot.appendChild(thead);
+  var body = document.createElement("tbody");
+  LADDER.forEach(function (row) {
+    var active = String(plan.tier || hardware.tier || "") === row.tier;
+    var tr = document.createElement("tr");
+    if (active) { tr.className = "is-active"; }
+    tr.appendChild(h("td", { cls: "cell-strong", text: row.band }));
+    tr.appendChild(h("td", { text: active ? String(plan.llmRef || row.llm) + " · " + String(plan.llmQuantization || "") : row.llm }));
+    tr.appendChild(h("td", { text: active ? String(plan.videoRef || "") + " · " + String(plan.videoPrecision || "") : row.video }));
+    tr.appendChild(h("td", { text: active ? String(plan.expectedResidentGB || 0) + " GB" : "—" }));
+    var policy = active ? (plan.routeHeavyVideoToMesh ? "heavyMesh" : "heavyLocal") : row.policy;
+    tr.appendChild(h("td", {}, h("span", { cls: "tag " + (policy === "heavyMesh" ? "tag--warn" : "tag--ok"), text: t(policy) })));
+    body.appendChild(tr);
+  });
+  slot.appendChild(body);
+  setText("plan-llm", String(plan.llmRef || "—"));
+  setText("plan-note", plan.rationale ? t("planNote") + " · " + String(plan.rationale) : t("noPlan"));
+  if (plan.ollamaModelPull) { S.copyable.pull = String(plan.ollamaModelPull); }
+}
+var STATE_ICON = { pending: "todo", running: "run", done: "done", skipped: "todo", failed: "wait" };
+function renderChecklist() {
+  var install = (S.snap && S.snap.install) || {};
+  var steps = install.steps || [];
+  var slot = el("checklist");
+  clear(slot);
+  if (!steps.length) { slot.appendChild(emptyState("stepsEmpty")); return; }
+  steps.forEach(function (step) {
+    var state = String(step.state || "pending");
+    var li = h("li", { "data-state": state });
+    li.appendChild(h("span", { cls: "checklist__ico" }, svgIcon(STATE_ICON[state] || "todo", 18)));
+    var text = h("div", { cls: "checklist__body" });
+    text.appendChild(h("span", { cls: "checklist__title", text: snapshotField(step, "title") || step.id }));
+    if (step.detail) { text.appendChild(h("span", { cls: "checklist__detail", text: String(step.detail) })); }
+    if (state === "running") {
+      var bar = h("div", { cls: "checklist__bar" });
+      var fill = h("i");
+      fill.style.width = Math.round(Math.max(0, Math.min(1, Number(step.progress) || 0)) * 100) + "%";
+      bar.appendChild(fill);
+      text.appendChild(bar);
+    }
+    li.appendChild(text);
+    slot.appendChild(li);
+  });
+}
+function renderDeployControls() {
+  var install = (S.snap && S.snap.install) || {};
+  var running = Boolean(install.running);
+  el("btn-deploy").hidden = running;
+  show("btn-cancel", running);
+  var text;
+  if (running) {
+    text = t("installing") + " · " + Math.round(Math.max(0, Math.min(1, Number(install.progress) || 0)) * 100) + "%";
+  } else if (install.phase === "ready") {
+    text = t("installDone");
+  } else if (install.phase === "failed") {
+    text = t("installFailedWhy") + " · " + String(install.lastError || t("unknown"));
+  } else if (install.phase === "cancelled") {
+    text = t("phaseCancelled") + " · " + t("idleHint");
+  } else {
+    text = t("idleHint");
+  }
+  setText("deploy-hint", text);
+  var logSlot = el("log");
+  if (logSlot && !logSlot.firstChild) { logSlot.appendChild(emptyState("logEmpty")); }
+}
+
+/* -------------------------------------------------------------- step two */
+var PAIR_VIEW = { name: "", code: "" };
+function renderPairing() {
+  var snap = S.snap;
+  var slot = el("pair-body");
+  var root = el("pair-root");
+  var offer = snap.pairing;
+  var devices = liveDevices(snap);
+  var badge = el("pair-badge");
+  if (devices.length) {
+    if (!root.classList.contains("is-done")) {
+      root.classList.add("is-done");
+    }
+    S.hadTunnel = true;
+    badge.className = "tag tag--ok";
+    badge.textContent = t("paired");
+    if (offer && offer.nodePublicKey) { S.copyable.pubkey = String(offer.nodePublicKey); }
+    if (PAIR_VIEW.name !== "done") {
+      clear(slot);
+      var first = devices[0];
+      slot.appendChild(h("div", { cls: "pair-success" }, [
+        h("div", { cls: "pair-success__title" }, [svgIcon("done", 20), h("span", { text: t("tunnel") })]),
+        h("p", { cls: "dim", text: t("tunnelSub") }),
+        h("div", { cls: "chip mono" }, String(first.label || t("unknown")) + " · " + String(first.publicKey || "").slice(0, 22) + "…"),
+        h("div", { cls: "btn-row" }, [
+          h("button", { cls: "btn", text: t("rotate"), onclick: "PPX.rotatePairing()" }),
+          offer && offer.nodePublicKey ? h("button", { cls: "btn btn--ghost", text: t("copyPubkey"), onclick: "PPX.copyThis('pubkey')" }) : null
+        ])
+      ]));
+      PAIR_VIEW.name = "done";
+    }
+    return;
+  }
+  S.hadTunnel = false;
+  root.classList.remove("is-done");
+  if (!offer) {
+    badge.className = "tag tag--off";
+    badge.textContent = t("daemonStarting");
+    if (PAIR_VIEW.name !== "none") {
+      clear(slot);
+      PAIR_VIEW.name = "none";
+      PAIR_VIEW.code = "";
+      slot.appendChild(h("div", { cls: "stack" }, [
+        emptyState("noPairing"),
+        h("button", { cls: "btn", text: t("rotate"), onclick: "PPX.rotatePairing()" })
+      ]));
+    }
+    return;
+  }
+  S.copyable.pubkey = String(offer.nodePublicKey || "");
+  S.copyable.code = String(offer.code || "");
+  S.copyable.uri = String(offer.invitationURI || "");
+  var expired = new Date(offer.expiresAt).getTime() < nodeNow();
+  badge.className = "tag " + (offer.used ? "tag--accent" : expired ? "tag--bad" : "tag--ok");
+  badge.textContent = offer.used ? t("used") : expired ? t("expired") : t("oneTime");
+  var code = String(offer.code || "");
+  if (PAIR_VIEW.name !== "qr" || PAIR_VIEW.code !== code) {
+    clear(slot);
+    PAIR_VIEW.name = "qr";
+    PAIR_VIEW.code = code;
+    var image = document.createElement("img");
+    image.id = "qr-img";
+    image.setAttribute("alt", t("qr"));
+    image.addEventListener("error", function () { renderQRFallback(); });
+    slot.appendChild(h("div", { cls: "qr-box" }, h("div", { cls: "qr-wrap", id: "qr-slot" }, [
+      image,
+      h("span", { cls: "mute", id: "qr-state", text: t("qrLoading") })
+    ])));
+    slot.appendChild(h("div", { cls: "btn-row" }, [
+      h("span", { cls: "countdown", id: "pair-countdown", text: "" }),
+      h("button", { cls: "btn btn--mini", text: t("copyCode"), onclick: "PPX.copyThis('code')" }),
+      h("button", { cls: "btn btn--mini", text: t("copyURI"), onclick: "PPX.copyThis('uri')" })
+    ]));
+    slot.appendChild(h("div", { cls: "stack" }, [
+      valueBlock("code", offer.code),
+      valueBlock("uri", offer.invitationURI),
+      valueBlock("pubkey", offer.nodePublicKey),
+      h("p", {
+        cls: "field__note",
+        text: t("expiry") + " · " + stampOf(dateOf(offer.issuedAt)) + " → " + stampOf(dateOf(offer.expiresAt)) +
+          " · " + (offer.oneTime ? t("oneTime") : "")
+      }),
+      h("button", { cls: "btn btn--primary", text: t("rotate"), onclick: "PPX.rotatePairing()" })
+    ]));
+    loadQR(code);
+  }
+  updatePairCountdown();
+}
+function loadQR(code) {
+  var image = el("qr-img");
+  if (!image) { return; }
+  var params = new URLSearchParams();
+  params.set("t", TOKEN);
+  params.set("size", "512");
+  params.set("v", hashKey(code));
+  image.addEventListener("load", function () {
+    var state = el("qr-state");
+    if (state) { state.textContent = t("qr"); }
+  });
+  image.src = ROUTE.pairingQR + "?" + params.toString();
+}
+function renderQRFallback() {
+  var slot = el("qr-slot");
+  if (!slot) { return; }
+  clear(slot);
+  slot.appendChild(h("div", { cls: "error" }, [
+    h("span", { text: t("qrLoadFailed") }),
+    h("span", { text: t("noQR") }),
+    h("button", { cls: "btn btn--mini", text: t("qrRetry"), onclick: "PPX.qrRetry()" })
+  ]));
+}
+function valueBlock(name, value) {
+  var labelKey = name === "code" ? "code" : name === "uri" ? "uri" : "pubkey";
+  var buttonKey = name === "code" ? "copyCode" : name === "uri" ? "copyURI" : "copyPubkey";
+  return h("div", { cls: "stack" }, [
+    h("span", { cls: "field__label", text: t(labelKey) }),
+    h("div", { cls: "code", text: String(value || "—") }),
+    h("button", { cls: "btn btn--mini", text: t(buttonKey), onclick: "PPX.copyThis('" + name + "')" })
+  ]);
+}
+function updatePairCountdown() {
+  if (!S.snap || S.step !== 2 || PAIR_VIEW.name !== "qr") { return; }
+  var offer = S.snap.pairing;
+  var node = el("pair-countdown");
+  if (!offer || !node) { return; }
+  var remaining = Math.round((new Date(offer.expiresAt).getTime() - nodeNow()) / 1000);
+  if (remaining <= 0) {
+    node.textContent = t("expired");
+    node.classList.add("is-out");
+    if (PAIR_VIEW.name === "qr" && !S.expiredRendered) { S.expiredRendered = true; renderPairing(); }
+    return;
+  }
+  S.expiredRendered = false;
+  node.classList.remove("is-out");
+  node.textContent = t("expiry") + " " + zero2(Math.floor(remaining / 60)) + ":" + zero2(remaining % 60);
+}
+function renderDevices() {
+  var devices = (S.snap && S.snap.pairedDevices) || [];
+  var slot = el("devices");
+  clear(slot);
+  setText("devices-count", String(devices.filter(function (item) { return !item.revoked; }).length));
+  if (!devices.length) { slot.appendChild(emptyState("devicesEmpty")); return; }
+  var table = h("table", { cls: "table table--rows" });
+  var head = document.createElement("tr");
+  ["devices", "pairedAt", "lastSeen", "revoke"].forEach(function (key) { head.appendChild(h("th", { text: t(key) })); });
+  var thead = document.createElement("thead");
+  thead.appendChild(head);
+  table.appendChild(thead);
+  var body = document.createElement("tbody");
+  devices.forEach(function (device) {
+    var row = document.createElement("tr");
+    row.appendChild(h("td", {}, [
+      h("div", { cls: "cell-strong", text: String(device.label || t("unknown")) }),
+      h("div", { cls: "mono mute", text: String(device.publicKey || "").slice(0, 26) + "…" }),
+      device.deviceModel ? h("div", { cls: "mute", text: String(device.deviceModel) }) : null
+    ]));
+    row.appendChild(h("td", { text: stampOf(dateOf(device.pairedAt)) + " · " + relTime(dateOf(device.pairedAt)) }));
+    row.appendChild(h("td", { text: device.lastSeenAt ? relTime(dateOf(device.lastSeenAt)) : t("neverSeen") }));
+    row.appendChild(h("td", {}, device.revoked
+      ? h("span", { cls: "tag tag--bad", text: t("revokedRow") })
+      : h("button", { cls: "btn btn--mini", text: t("revoke"), "data-key": String(device.publicKey || ""), onclick: "PPX.revokeDevice(this)" })));
+    body.appendChild(row);
+  });
+  table.appendChild(body);
+  slot.appendChild(table);
+}
+function renderBridge() {
+  var bridge = (S.snap && S.snap.bridge) || {};
+  var keys = {
+    stopped: "daemonStopped", starting: "daemonStarting", running: "daemonRunning",
+    degraded: "daemonDegraded", missingBinary: "daemonMissing"
+  };
+  var tag = el("daemon-tag");
+  tag.textContent = t(keys[String(bridge.daemon || "stopped")] || "daemonStopped");
+  tag.className = "tag " + (bridge.daemon === "running" ? "tag--ok" : bridge.daemon === "degraded" ? "tag--warn" : "tag--bad");
+  var slot = el("bridge");
+  clear(slot);
+  slot.appendChild(statCard("wsOn", bridge.websocketConnected ? t("yes") : t("no"), t(bridge.websocketConnected ? "wsOn" : "wsOff"), true));
+  slot.appendChild(statCard("accepted", String(bridge.acceptedCommands || 0), t("rejected") + " " + String(bridge.rejectedCommands || 0)));
+  slot.appendChild(statCard("delivered", String(bridge.deliveredResults || 0), t("outbox") + " " + String(bridge.outboxDepth || 0)));
+  slot.appendChild(statCard("uptime", dur(bridge.uptimeSeconds), "port " + String(bridge.controlPort || ""), true));
+  setText("bridge-binary", bridge.binaryPath
+    ? t("daemonPath") + " · " + anon(String(bridge.binaryPath)) + (bridge.lastError ? " · " + t("bridgeErr") + " · " + String(bridge.lastError) : "")
+    : bridge.lastError ? t("bridgeErr") + " · " + String(bridge.lastError) : "");
+}
+
+/* ------------------------------------------------------------- step three */
+function renderEngines() {
+  var snap = S.snap;
+  var slot = el("engines");
+  var descriptors = (snap.descriptors || []).slice().sort(function (a, b) { return (a.order || 0) - (b.order || 0); });
+  var badge = el("engines-badge");
+  badge.textContent = enabledCount(snap) + " / " + (descriptors.length || 10) + " " + t("enginesBadge");
+  badge.className = "tag " + (enabledCount(snap) ? "tag--ok" : "tag--off");
+  if (!descriptors.length) {
+    clear(slot);
+    slot.appendChild(emptyState("enginesLoading"));
+    S.engineKeys = "";
+    return;
+  }
+  var signature = descriptors.map(function (item) { return item.kind; }).join(",") + "|" + S.lang;
+  if (signature === S.engineKeys && S.engineRows.length === descriptors.length) {
+    descriptors.forEach(function (descriptor, index) {
+      updateEngineRow(S.engineRows[index], descriptor, runtimeFor(snap, descriptor.kind), snap);
+    });
+    return;
+  }
+  clear(slot);
+  S.engineRows = [];
+  descriptors.forEach(function (descriptor) {
+    var row = buildEngineRow(descriptor);
+    S.engineRows.push(row);
+    slot.appendChild(row.root);
+    updateEngineRow(row, descriptor, runtimeFor(snap, descriptor.kind), snap);
+  });
+  S.engineKeys = signature;
+}
+function buildEngineRow(descriptor) {
+  var toggle = h("button", {
+    cls: "switch", role: "switch", tabindex: "0", "aria-checked": "false",
+    "data-kind": String(descriptor.kind || ""), onclick: "PPX.toggleEngine(this)"
+  }, h("span", { cls: "switch__knob" }));
+  toggle.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle.click(); }
+  });
+  var icon = h("span", { cls: "engine__ico" });
+  var name = h("span", { cls: "engine__name" });
+  var alt = h("span", { cls: "engine__alt" });
+  var tagline = h("span", { cls: "engine__tag" });
+  var counters = h("div", { cls: "engine__meta" });
+  var extras = h("div", { cls: "engine__foot" });
+  var root = h("article", { cls: "engine" }, [
+    h("div", { cls: "engine__top" }, [icon, h("div", { cls: "engine__id" }, [name, alt, tagline])]),
+    counters,
+    extras,
+    h("div", { cls: "engine__foot" }, [toggle, h("span", { cls: "engine__ref", text: String(descriptor.kind || "") })])
+  ]);
+  return {
+    root: root, icon: icon, name: name, alt: alt, tagline: tagline,
+    counters: counters, extras: extras, toggle: toggle, kind: String(descriptor.kind || "")
+  };
+}
+function updateEngineRow(row, descriptor, runtime, snap) {
+  var state = runtime || {
+    enabled: false, busy: false, runs: 0, failures: 0,
+    artifactsProduced: 0, lastRunAt: null, lastSummary: null, lastDurationMs: null
+  };
+  clear(row.icon);
+  row.icon.appendChild(svgIcon(SYMBOL_ICON[String(descriptor.symbolName)] || "shield", 30));
+  row.name.textContent = snapshotField(descriptor, "title") || String(descriptor.kind || "");
+  row.alt.textContent = uiIsChinese() ? String(descriptor.titleEn || "") : String(descriptor.titleZh || "");
+  row.tagline.textContent = snapshotField(descriptor, "tagline");
+  row.toggle.setAttribute("aria-checked", state.enabled ? "true" : "false");
+  row.toggle.setAttribute("aria-label", row.name.textContent);
+  row.root.classList.toggle("is-on", Boolean(state.enabled));
+  row.root.classList.toggle("is-busy", Boolean(state.busy));
+  clear(row.counters);
+  [
+    [t("runs"), String(state.runs || 0)],
+    [t("failures"), String(state.failures || 0)],
+    [t("artifacts"), String(state.artifactsProduced || 0)],
+    [t("lastRun"), state.lastRunAt ? stampOf(dateOf(state.lastRunAt)) : t("never")],
+    [state.busy ? t("busyNow") : t("idleNow"), state.lastDurationMs ? fmt(state.lastDurationMs, 0) + " ms" : ""]
+  ].forEach(function (pair) {
+    if (pair[1] === "") { return; }
+    row.counters.appendChild(h("span", {}, [pair[0] + " ", h("i", { text: pair[1] })]));
+  });
+  clear(row.extras);
+  (descriptor.requires || []).forEach(function (item) {
+    row.extras.appendChild(h("span", { cls: "tag", text: t("requires") + " " + String(item) }));
+  });
+  if (descriptor.deterministic) { row.extras.appendChild(h("span", { cls: "tag tag--accent", text: t("deterministicFlag") })); }
+  var needsModels = (descriptor.requires || []).some(function (item) { return String(item).indexOf("ollama") >= 0; });
+  if (needsModels && !ollamaReady(snap)) { row.extras.appendChild(h("span", { cls: "tag tag--warn", text: t("needsModels") })); }
+  if (state.lastSummary) { row.extras.appendChild(h("span", { cls: "mute", text: String(state.lastSummary).slice(0, 80) })); }
+}
+
+/* ------------------------------------------------------- settings document */
+function ensureForm(snap) {
+  if (!S.form) {
+    S.form = clone(snap.settings || {});
+    S.formBase = (snap.settings || {}).revision || 0;
+  }
+  if (!S.formBuilt) { buildSettingsForm(); S.formBuilt = true; }
+}
+function markDirty() { S.dirty = true; renderSaveBar(); }
+function adoptLanguage(code) {
+  var known = localeKnown(code);
+  var next = known ? String(code) : "en";
+  if (S.lang && S.lang !== "system" && !known) { next = S.lang; }
+  S.lang = next;
+  S.langPending = false;
+  var select = el("lang-select");
+  if (select) { select.value = next; }
+  document.documentElement.setAttribute("lang", next);
+  applyLang();
+}
+function nodeRevision() { return S.snap && S.snap.settings ? Number(S.snap.settings.revision) : Number(S.formBase) || 0; }
+function fieldWrap(labelKey, control, noteNode) {
+  return h("label", { cls: "field" }, [
+    h("span", { cls: "field__label", text: t(labelKey) }),
+    control,
+    noteNode || null
+  ]);
+}
+function note(text) { return h("span", { cls: "field__note", text: text }); }
+function numField(labelKey, read, write, min, max, noteText, onAfter) {
+  var input = h("input", { type: "number", min: String(min), max: String(max), step: "1", value: String(read()) });
+  var holder = note(noteText === null || noteText === undefined ? "" : noteText);
+  input.addEventListener("input", function () {
+    var raw = Number(input.value);
+    if (isNaN(raw)) { return; }
+    var value = Math.max(min, Math.min(max, Math.round(raw)));
+    write(value);
+    if (onAfter) { holder.textContent = onAfter(value); }
+    markDirty();
+  });
+  return fieldWrap(labelKey, input, noteText === null ? null : holder);
+}
+function textField(labelKey, read, write, placeholderKey, noteText) {
+  var input = h("input", { type: "text", spellcheck: "false", value: String(read() === undefined || read() === null ? "" : read()) });
+  if (placeholderKey) { input.setAttribute("placeholder", t(placeholderKey)); }
+  input.addEventListener("input", function () { write(input.value); markDirty(); });
+  return fieldWrap(labelKey, input, noteText ? note(t(noteText)) : null);
+}
+function urlField(labelKey, read, write, placeholder, noteText) {
+  var input = h("input", { type: "text", spellcheck: "false", value: String(read() || ""), inputmode: "url" });
+  if (placeholder) { input.setAttribute("placeholder", placeholder); }
+  input.addEventListener("input", function () { write(input.value); markDirty(); });
+  return fieldWrap(labelKey, input, noteText ? note(t(noteText)) : null);
+}
+function secretField(labelKey, read, write) {
+  var input = h("input", { type: "password", spellcheck: "false", value: String(read() || ""), autocomplete: "off" });
+  input.addEventListener("input", function () { write(input.value); markDirty(); });
+  var button = h("button", { cls: "btn btn--tiny", text: t("secretShow"), type: "button" });
+  button.addEventListener("click", function () {
+    if (input.type === "password") { input.type = "text"; button.textContent = t("secretHide"); }
+    else { input.type = "password"; button.textContent = t("secretShow"); }
+  });
+  return fieldWrap(labelKey, h("div", { cls: "list__row" }, [input, button]), null);
+}
+function checkField(labelKey, read, write) {
+  var input = h("input", { type: "checkbox" });
+  input.checked = Boolean(read());
+  input.addEventListener("change", function () { write(input.checked); markDirty(); });
+  return h("label", { cls: "check" }, [input, h("span", { text: t(labelKey) })]);
+}
+function hourSelect(value, write) {
+  var select = h("select");
+  for (var hour = 0; hour < 24; hour += 1) {
+    var option = h("option", { value: String(hour), text: zero2(hour) + ":00" });
+    if (hour === Number(value)) { option.selected = true; }
+    select.appendChild(option);
+  }
+  select.addEventListener("change", function () { write(Number(select.value)); markDirty(); });
+  return select;
+}
+function weekdayPicker(item) {
+  var host = h("div", { cls: "weekdays" });
+  [1, 2, 3, 4, 5, 6, 0].forEach(function (day) {
+    var labels = WEEKDAYS[catalogFor(S.lang)] || WEEKDAYS.en;
+    var button = h("button", { type: "button", text: labels[day], title: labels[day] });
+    button.classList.toggle("is-on", (item.weekdays || []).indexOf(day) >= 0);
+    button.addEventListener("click", function () {
+      var list = (item.weekdays || []).slice();
+      var position = list.indexOf(day);
+      if (position >= 0) { list.splice(position, 1); } else { list.push(day); }
+      list.sort(function (a, b) { return a - b; });
+      item.weekdays = list;
+      button.classList.toggle("is-on", list.indexOf(day) >= 0);
+      markDirty();
+    });
+    host.appendChild(button);
+  });
+  return host;
+}
+function buildMeshForm() {
+  var slot = el("mesh");
+  clear(slot);
+  var mesh = S.form.mesh = S.form.mesh || {};
+  slot.appendChild(checkField("shareEnable", function () { return mesh.sharingEnabled; }, function (value) { mesh.sharingEnabled = value; }));
+  slot.appendChild(h("hr", { cls: "hair" }));
+  var ceiling = ceilingGB();
+  var grid = h("div", { cls: "fields" });
+  grid.appendChild(numField("maxMem", function () { return mesh.maxMemoryGB || 8; }, function (value) { mesh.maxMemoryGB = value; },
+    4, ceiling, t("maxMemHint") + " " + ceiling + " GB"));
+  grid.appendChild(numField("maxJobs", function () { return mesh.maxConcurrentJobs || 1; }, function (value) { mesh.maxConcurrentJobs = value; }, 1, 8, null));
+  grid.appendChild(numField("minFree", function () { return mesh.minFreeDiskGB || 10; }, function (value) { mesh.minFreeDiskGB = value; }, 10, 4096, null));
+  slot.appendChild(grid);
+  slot.appendChild(checkField("ownerPresent", function () { return mesh.requireOwnerPresent; }, function (value) { mesh.requireOwnerPresent = value; }));
+  slot.appendChild(h("hr", { cls: "hair" }));
+  slot.appendChild(h("span", { cls: "field__label", text: t("windows") }));
+  slot.appendChild(h("div", { id: "windows-list", cls: "list" }));
+  renderWindowList();
+  slot.appendChild(h("button", { cls: "btn btn--mini", text: t("windowAdd"), type: "button", onclick: "PPX.windowAdd()" }));
+  slot.appendChild(h("div", { id: "mesh-live", cls: "stack" }));
+}
+function renderWindowList() {
+  var host = el("windows-list");
+  if (!host) { return; }
+  clear(host);
+  var mesh = S.form.mesh;
+  mesh.idleWindows = mesh.idleWindows || [];
+  mesh.idleWindows.forEach(function (item, index) {
+    host.appendChild(h("div", { cls: "list__row" }, [
+      hourSelect(item.startHour, function (value) { item.startHour = value; }),
+      h("span", { cls: "mute", text: "→" }),
+      hourSelect(item.endHour, function (value) { item.endHour = value; }),
+      weekdayPicker(item),
+      h("button", { cls: "btn btn--tiny", text: t("windowRemove"), type: "button", onclick: "PPX.windowRemove(" + index + ")" })
+    ]));
+  });
+  if (!mesh.idleWindows.length) { host.appendChild(note(t("windowEmpty"))); }
+}
+function buildSentinelForm() {
+  var slot = el("sentinel");
+  clear(slot);
+  var sentinel = S.form.sentinel = S.form.sentinel || {};
+  var flags = h("div", { cls: "list" });
+  flags.appendChild(checkField("clipboard", function () { return sentinel.clipboardClear; }, function (value) { sentinel.clipboardClear = value; }));
+  flags.appendChild(checkField("lockScreen", function () { return sentinel.lockScreen; }, function (value) { sentinel.lockScreen = value; }));
+  flags.appendChild(checkField("sleepDisplays", function () { return sentinel.sleepDisplays; }, function (value) { sentinel.sleepDisplays = value; }));
+  slot.appendChild(flags);
+  slot.appendChild(h("hr", { cls: "hair" }));
+  slot.appendChild(h("span", { cls: "field__label", text: t("mounts") }));
+  slot.appendChild(h("div", { id: "mount-list", cls: "list" }));
+  renderMountList();
+  slot.appendChild(h("button", { cls: "btn btn--mini", text: t("mountAdd"), type: "button", onclick: "PPX.mountAdd()" }));
+  slot.appendChild(note(t("mountHint")));
+  slot.appendChild(h("hr", { cls: "hair" }));
+  var grid = h("div", { cls: "fields fields--wide" });
+  grid.appendChild(urlField("hookUrl", function () { return sentinel.webhookURL; }, function (value) { sentinel.webhookURL = value; }, "http://homeassistant.local:8123/api/webhook/…", "hookUrl"));
+  grid.appendChild(secretField("hookSecret", function () { return sentinel.webhookSecret; }, function (value) { sentinel.webhookSecret = value; }));
+  slot.appendChild(grid);
+  slot.appendChild(textField("phrases", function () { return (sentinel.triggerPhrases || []).join(", "); },
+    function (value) {
+      sentinel.triggerPhrases = value.split(",").map(function (item) { return item.trim(); }).filter(function (item) { return item.length; });
+    }, null, null));
+  slot.appendChild(h("div", { id: "sentinel-live", cls: "engine__meta" }));
+  slot.appendChild(h("button", { cls: "btn btn--primary", text: t("drill"), type: "button", onclick: "PPX.drill()" }));
+}
+function renderMountList() {
+  var host = el("mount-list");
+  if (!host) { return; }
+  clear(host);
+  var sentinel = S.form.sentinel;
+  sentinel.unmountPaths = sentinel.unmountPaths || [];
+  sentinel.unmountPaths.forEach(function (item, index) {
+    var input = h("input", { type: "text", spellcheck: "false", value: String(item) });
+    input.addEventListener("input", function () { sentinel.unmountPaths[index] = input.value; markDirty(); });
+    host.appendChild(h("div", { cls: "list__row" }, [
+      input,
+      h("button", { cls: "btn btn--tiny", text: t("windowRemove"), type: "button", onclick: "PPX.mountRemove(" + index + ")" })
+    ]));
+  });
+  if (!sentinel.unmountPaths.length) { host.appendChild(note(t("mountEmpty"))); }
+}
+function buildArkForm() {
+  var slot = el("ark");
+  clear(slot);
+  var ark = S.form.ark = S.form.ark || {};
+  var grid = h("div", { cls: "fields" });
+  grid.appendChild(numField("beat", function () { return ark.heartbeatIntervalHours || 1; }, function (value) { ark.heartbeatIntervalHours = value; }, 1, 8760, null));
+  grid.appendChild(numField("missed", function () { return ark.missedHeartbeatsBeforeRelease || 1; }, function (value) { ark.missedHeartbeatsBeforeRelease = value; }, 1, 24, null));
+  grid.appendChild(numField("lockDur", function () { return ark.timelockSeconds || 60; }, function (value) { ark.timelockSeconds = value; }, 60, 315360000,
+    t("lockDays") + " " + Math.round((Number(ark.timelockSeconds) || 0) / 86400) + " " + t("daysUnit"),
+    function (value) { return t("lockDays") + " " + Math.round(value / 86400) + " " + t("daysUnit"); }));
+  slot.appendChild(grid);
+  var people = h("div", { cls: "fields fields--wide" });
+  people.appendChild(textField("beneficiary", function () { return ark.beneficiaryName; }, function (value) { ark.beneficiaryName = value; }, null, null));
+  people.appendChild(textField("beneficiaryQueue", function () { return ark.beneficiaryQueue; }, function (value) { ark.beneficiaryQueue = value; }, "smp://…", null));
+  slot.appendChild(people);
+  slot.appendChild(h("hr", { cls: "hair" }));
+  /* The capsule folder is fixed by the node and is not a field of ArkConfig,
+     so it is shown read-only: an editable box here would be a control the
+     engine never reads back, and a page cannot host NSOpenPanel. */
+  slot.appendChild(fieldWrap("directory", h("span", { cls: "mono", text: "vault/sealed/" }), note(t("dirHint"))));
+  slot.appendChild(h("div", { cls: "btn-row" }, [
+    h("button", { cls: "btn btn--mini", text: t("dirReveal"), type: "button", onclick: "PPX.revealDir()" })
+  ]));
+  slot.appendChild(note(t("dirUnsupported")));
+  slot.appendChild(h("hr", { cls: "hair" }));
+  slot.appendChild(h("span", { cls: "field__label", text: t("archives") }));
+  slot.appendChild(h("div", { id: "ark-live", cls: "stack" }));
+}
+
+function buildSettingsForm() {
+  if (!S.form) { return; }
+  buildMeshForm();
+  buildSentinelForm();
+  buildArkForm();
+}
+function renderSettingsViews() {
+  var snap = S.snap;
+  var mesh = snap.mesh || {};
+  var meshTag = el("mesh-tag");
+  meshTag.textContent = mesh.sharingEnabled ? t("meshOn") : t("meshOff");
+  meshTag.className = "tag " + (mesh.sharingEnabled ? (mesh.acceptingNow ? "tag--ok" : "tag--accent") : "tag--off");
+  var live = el("mesh-live");
+  if (live) {
+    clear(live);
+    live.appendChild(h("div", { cls: "engine__meta" }, [
+      h("span", {}, [t(mesh.acceptingNow ? "acceptingNow" : "notAcceptingNow"), h("i", { text: mesh.acceptingNow ? t("yes") : t("no") })]),
+      h("span", {}, [t("activeJobs") + " ", h("i", { text: String(mesh.activeJobs || 0) })]),
+      h("span", {}, [t("accrued") + " ", h("i", { text: String(mesh.accruedPoints || 0) })]),
+      h("span", {}, [t("settled") + " ", h("i", { text: String(mesh.completedJobs || 0) })]),
+      h("span", {}, [t("meshSandbox") + " ", h("i", { text: bytes(mesh.sandboxBytesUsed) })]),
+      h("span", {}, [t("nextWindow") + " ", h("i", { text: String(mesh.nextWindowLabel || t("never")) })])
+    ]));
+  }
+  var sentinelDocument = snap.settings ? snap.settings.sentinel : null;
+  var sentinelTag = el("sentinel-tag");
+  var armed = Boolean(sentinelDocument && ((sentinelDocument.unmountPaths || []).length ||
+    sentinelDocument.webhookURL || sentinelDocument.clipboardClear || sentinelDocument.lockScreen));
+  sentinelTag.textContent = armed ? t("sentinelOn") : t("sentinelOff");
+  sentinelTag.className = "tag " + (armed ? "tag--ok" : "tag--off");
+  var sentinelLive = el("sentinel-live");
+  if (sentinelLive) {
+    clear(sentinelLive);
+    var last = (snap.lockdowns || [])[0];
+    sentinelLive.appendChild(h("span", { cls: "tag", text: t("receiptTrigger") + " " + (last ? String(last.trigger) : t("never")) }));
+    sentinelLive.appendChild(h("span", { cls: "tag", text: t("receiptElapsed") + " " + (last ? String(last.elapsedMs) + " ms" : "—") }));
+    sentinelLive.appendChild(h("span", { cls: "tag", text: t("modelFree") + " " + (last && last.modelInvolved ? t("no") : t("yes")) }));
+  }
+  var ark = snap.settings ? snap.settings.ark : null;
+  var arkTag = el("ark-tag");
+  var deadline = ark && ark.lastHeartbeatAt
+    ? new Date(ark.lastHeartbeatAt).getTime() +
+      (Number(ark.heartbeatIntervalHours || 72) * Math.max(1, Number(ark.missedHeartbeatsBeforeRelease || 4)) * 3600000)
+    : null;
+  var overdue = deadline !== null && deadline < nodeNow();
+  arkTag.textContent = overdue ? t("arkAlert") : t("arkOk");
+  arkTag.className = "tag " + (overdue ? "tag--bad" : "tag--ok");
+  var arkLive = el("ark-live");
+  if (arkLive) {
+    clear(arkLive);
+    if (deadline !== null) {
+      arkLive.appendChild(h("div", { cls: "engine__meta" }, [
+        h("span", {}, [t("graceDue") + " ", h("i", { text: stampOf(new Date(deadline)) + " · " + relTime(new Date(deadline)) })])
+      ]));
+    }
+    var vaults = snap.vaults || [];
+    if (!vaults.length) { arkLive.appendChild(emptyState("archivesEmpty")); }
+    else {
+      var table = h("table", { cls: "table" });
+      var head = document.createElement("tr");
+      ["archives", "archiveSealedAt", "archiveOpens", "archiveFingerprint", "archiveSealed"].forEach(function (key) {
+        head.appendChild(h("th", { text: t(key) }));
+      });
+      var thead = document.createElement("thead");
+      thead.appendChild(head);
+      table.appendChild(thead);
+      var body = document.createElement("tbody");
+      vaults.forEach(function (vault) {
+        var openable = new Date(vault.earliestOpenAt).getTime() <= nodeNow();
+        var row = document.createElement("tr");
+        row.appendChild(h("td", {}, [
+          h("div", { cls: "cell-strong", text: String(vault.label || t("unknown")) }),
+          h("div", { cls: "mono mute", text: anon(String(vault.path || "")) })
+        ]));
+        row.appendChild(h("td", { text: stampOf(dateOf(vault.sealedAt)) }));
+        row.appendChild(h("td", { text: stampOf(dateOf(vault.earliestOpenAt)) }));
+        row.appendChild(h("td", { cls: "mono", text: String(vault.derivedKeyFingerprint || "").slice(0, 12) + " · " + String(vault.rounds || 0) }));
+        row.appendChild(h("td", {}, h("span", {
+          cls: "tag " + (openable || vault.released ? "tag--ok" : "tag--off"),
+          text: vault.released ? t("released") : openable ? t("archiveOpen") : t("archiveSealed")
+        })));
+        body.appendChild(row);
+      });
+      table.appendChild(body);
+      arkLive.appendChild(table);
+    }
+  }
+  renderLockdowns();
+}
+var RECEIPT_FIELDS = [
+  ["trigger", null], ["clipboardCleared", "receiptClip"], ["screenLocked", "receiptScreen"],
+  ["displaysSlept", "sleepDisplays"], ["unmounted", "receiptUnmount"], ["mountFailures", "receiptMountFail"],
+  ["webhookStatus", "receiptWebhook"], ["webhookTarget", "receiptWebhook"], ["elapsedMs", "receiptElapsed"],
+  ["modelInvolved", "modelUsed"]
+];
+function receiptValue(value) {
+  if (Array.isArray(value)) { return value.map(function (item) { return anon(String(item)); }).join(", ") || "—"; }
+  if (value === true) { return t("yes"); }
+  if (value === false) { return t("no"); }
+  if (value === null || value === undefined) { return "—"; }
+  return anon(String(value));
+}
+function receiptCard(receipt, accent) {
+  var card = h("div", { cls: "stat" });
+  if (accent) { card.style.setProperty("border-color", "rgba(139,108,255,.5)"); }
+  card.appendChild(h("span", {
+    cls: "stat__k",
+    text: stampOf(dateOf(receipt.triggeredAt)) + " · " + String(receipt.trigger || "")
+  }));
+  card.appendChild(h("span", {
+    cls: "stat__v stat__v--sm mono",
+    text: String(receipt.elapsedMs || 0) + " ms · " + (receipt.modelInvolved ? t("modelUsed") : t("modelFree"))
+  }));
+  var detail = [];
+  RECEIPT_FIELDS.forEach(function (pair) {
+    if (!pair[1] || receipt[pair[0]] === undefined) { return; }
+    detail.push(t(pair[1]) + " " + receiptValue(receipt[pair[0]]));
+  });
+  card.appendChild(h("span", { cls: "stat__n", text: detail.join("  ·  ") }));
+  return card;
+}
+function renderLockdowns() {
+  var slot = el("drill");
+  clear(slot);
+  if (S.drillResult) { slot.appendChild(drillCard(S.drillResult)); }
+  var receipts = (S.snap && S.snap.lockdowns) || [];
+  if (!receipts.length && !S.drillResult) { slot.appendChild(emptyState("receiptEmpty")); return; }
+  receipts.slice(0, 6).forEach(function (receipt) { slot.appendChild(receiptCard(receipt, false)); });
+}
+function drillCard(result) {
+  var card = h("div", { cls: "stat" });
+  card.style.setProperty("border-color", result.ok ? "rgba(63,214,143,.5)" : "rgba(255,107,120,.5)");
+  card.appendChild(h("span", { cls: "stat__k", text: (result.ok ? "✓ " : "✕ ") + String(result.headline || t("unknown")) }));
+  card.appendChild(h("span", {
+    cls: "stat__v stat__v--sm mono",
+    text: String(result.durationMs || 0) + " ms · " + (result.deterministic ? t("modelFree") : t("modelUsed"))
+  }));
+  if (result.body) { card.appendChild(h("span", { cls: "stat__n", text: String(result.body) })); }
+  var metrics = result.metrics || {};
+  var receipt = metrics.receipt || metrics.lockdown || metrics.LockdownReceipt || null;
+  if (receipt && typeof receipt === "object") {
+    Object.keys(receipt).sort().forEach(function (key) {
+      card.appendChild(h("div", { cls: "engine__meta" }, [
+        h("span", { text: key }), h("i", { text: receiptValue(receipt[key]) })
+      ]));
+    });
+  }
+  (result.artifacts || []).forEach(function (path) {
+    card.appendChild(h("span", { cls: "mono mute", text: anon(String(path)) }));
+  });
+  return card;
+}
+function renderSaveBar() {
+  var text = el("save-text");
+  if (!text) { return; }
+  if (S.saving) { text.textContent = t("saving"); text.className = "savebar__text"; }
+  else if (S.dirty) { text.textContent = t("dirty"); text.className = "savebar__text is-dirty"; }
+  else { text.textContent = t("saved"); text.className = "savebar__text"; }
+  setText("save-rev", t("revision") + " " + String(S.formBase) + " · " + t("now") + " " + String(nodeRevision()));
+  var button = el("btn-save");
+  button.textContent = S.saving ? t("saving") : t("save");
+  button.classList.toggle("is-disabled", S.saving || !S.dirty);
+}
+
+/* ------------------------------------------------------------- rendering IO */
+function renderStep1() {
+  renderStats();
+  renderGauge();
+  renderToolchain();
+  renderLadder();
+  renderChecklist();
+  renderDeployControls();
+  if (S.logStep !== 1) { rebuildLog(); S.logStep = 1; }
+}
+function renderStep2() {
+  renderPairing();
+  renderDevices();
+  renderBridge();
+}
+function renderStep3() {
+  ensureForm(S.snap);
+  renderEngines();
+  renderSettingsViews();
+  renderSaveBar();
+}
+function skeleton(id, rows, height) {
+  var slot = el(id);
+  if (!slot) { return; }
+  clear(slot);
+  var stack = h("div", { cls: "skel-stack" });
+  for (var index = 0; index < rows; index += 1) {
+    stack.appendChild(h("div", { cls: "skeleton", style: { height: (height || 16) + "px", width: (100 - index * 7) + "%" } }));
+  }
+  slot.appendChild(stack);
+}
+function renderPending() {
+  skeleton("stats", 6, 60);
+  skeleton("gauge", 1, 180);
+  skeleton("toolchain", 1, 34);
+  skeleton("ladder", 4, 22);
+  skeleton("checklist", 3, 26);
+  skeleton("pair-body", 3, 56);
+  skeleton("devices", 2, 34);
+  skeleton("bridge", 4, 60);
+  skeleton("engines", 4, 74);
+  skeleton("mesh", 4, 38);
+  skeleton("sentinel", 3, 38);
+  skeleton("ark", 3, 38);
+  skeleton("drill", 1, 60);
+  S.gauge = null;
+  var body = el("log");
+  if (body && !body.firstChild) { body.appendChild(h("div", { cls: "line" }, h("span", { cls: "line__m", text: t("loading") }))); }
+  setText("install-badge", t("loadingShort"));
+}
+function renderAll() {
+  if (!S.snap) { renderPending(); return; }
+  renderTop();
+  renderRail();
+  if (S.step === 1) { renderStep1(); }
+  else if (S.step === 2) { renderStep2(); }
+  else { renderStep3(); }
+  renderSaveBar();
+}
+
+/* ----------------------------------------------------------------- actions */
+function copyText(text) {
+  var value = String(text || "");
+  if (!value) { toast("warn", t("copyFailed")); return; }
+  function legacy() {
+    var area = document.createElement("textarea");
+    area.value = value;
+    area.setAttribute("readonly", "readonly");
+    area.style.position = "fixed";
+    area.style.top = "-2000px";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (ignored) { ok = false; }
+    document.body.removeChild(area);
+    toast(ok ? "ok" : "err", t(ok ? "copyDone" : "copyFailed"));
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(value).then(function () { toast("ok", t("copyDone")); }, legacy);
+  } else {
+    legacy();
+  }
+}
+function resultLines(result) {
+  var lines = [];
+  lines.push((result.ok ? "✓ " : "✕ ") + String(result.headline || t("unknown")) +
+    " · " + String(result.engine || "") + " · " + (result.deterministic ? "deterministic" : "model") +
+    " · " + String(result.durationMs || 0) + " ms · " + stampOf(dateOf(result.at)));
+  if (result.body) { lines.push(String(result.body)); }
+  (result.artifacts || []).forEach(function (path) { lines.push("artifact  " + anon(String(path))); });
+  var metrics = result.metrics || {};
+  Object.keys(metrics).sort().forEach(function (key) {
+    var value = metrics[key];
+    lines.push("  " + key + " = " + (value && typeof value === "object" ? JSON.stringify(value) : String(value)));
+  });
+  return lines;
+}
+function appendResultLines(result) {
+  var slot = el("cmdout");
+  if (!slot) { return; }
+  if (slot.firstChild && slot.textContent.charAt(0) === "—") { clear(slot); }
+  resultLines(result).forEach(function (line) { slot.appendChild(h("div", { text: line })); });
+  while (slot.children.length > 200) { slot.removeChild(slot.firstChild); }
+  slot.scrollTop = slot.scrollHeight;
+}
+
+/* -------------------------------------------------------------- mutations */
+function doInstallStart() {
+  var button = el("btn-deploy");
+  button.classList.add("is-disabled");
+  api(ROUTE.installStart, { method: "POST" }).then(function () {
+    button.classList.remove("is-disabled");
+    toast("ok", t("deployStarted"));
+    refreshSnapshot(true);
+  }).catch(function (error) {
+    button.classList.remove("is-disabled");
+    fail("deployFailed", error);
+  });
+}
+function doInstallCancel() {
+  var button = el("btn-cancel");
+  button.classList.add("is-disabled");
+  api(ROUTE.installCancel, { method: "POST" }).then(function () {
+    button.classList.remove("is-disabled");
+    toast("ok", t("deployCancel"));
+    refreshSnapshot(true);
+  }).catch(function (error) {
+    button.classList.remove("is-disabled");
+    fail("deployCancelFailed", error);
+  });
+}
+function doRotate() {
+  api(ROUTE.pairingRotate, { method: "POST" }).then(function (offer) {
+    PAIR_VIEW.name = "";
+    PAIR_VIEW.code = "";
+    S.qrNonce = (S.qrNonce || 0) + 1;
+    var code = offer && offer.code ? String(offer.code) : "";
+    toast("ok", t("rotate") + " · " + code.slice(0, 20) + (code.length > 20 ? "…" : ""));
+    return refreshSnapshot(true);
+  }).catch(function (error) { fail("rotateFailed", error); });
+}
+function doRevoke(button) {
+  var publicKey = button.getAttribute("data-key") || "";
+  if (!publicKey) { return; }
+  button.classList.add("is-disabled");
+  api(ROUTE.pairingRevoke, { method: "POST", json: { publicKey: publicKey } }).then(function () {
+    toast("ok", t("revokeDone"));
+    return refreshSnapshot(true);
+  }).catch(function (error) {
+    button.classList.remove("is-disabled");
+    fail("revokeFailed", error);
+  });
+}
+function doToggle(button) {
+  var kind = button.getAttribute("data-kind") || "";
+  var next = button.getAttribute("aria-checked") !== "true";
+  if (!kind) { return; }
+  button.classList.add("is-pending");
+  api(ROUTE.engineToggle, { method: "POST", json: { kind: kind, enabled: next } }).then(function (body) {
+    button.classList.remove("is-pending");
+    if (body && body.engines && body.hardware) { S.snap = body; S.clockOffset = new Date(body.serverTime).getTime() - Date.now(); }
+    toast("ok", t(next ? "toggleOn" : "toggleOff") + " · " + kind);
+    if (body && body.engines) { renderAll(); } else { refreshSnapshot(true); }
+  }).catch(function (error) {
+    button.classList.remove("is-pending");
+    fail("toggleFailed", error);
+    refreshSnapshot(true);
+  });
+}
+function syncFormAfterSnapshot() {
+  var settings = S.snap && S.snap.settings;
+  if (!settings) { return; }
+  if (!S.form || !S.dirty) {
+    S.form = clone(settings);
+    S.formBase = settings.revision;
+    return;
+  }
+  /* Unsaved edits survive a background refresh, but the engine map and the
+     revision baseline always track the node, because /api/engine/toggle writes
+     the very same document and a stale copy could switch an engine back off. */
+  S.form.enginesEnabled = clone(settings.enginesEnabled);
+  S.formBase = settings.revision;
+}
+function doSave() {
+  if (S.saving || !S.form) { return; }
+  if (Number(S.formBase) !== nodeRevision()) {
+    toast("warn", t("conflict"));
+    S.form = null;
+    S.formBuilt = false;
+    S.dirty = false;
+    refreshSnapshot(true);
+    return;
+  }
+  var previousBase = Number(S.formBase);
+  S.saving = true;
+  renderSaveBar();
+  api(ROUTE.settings, { method: "POST", json: S.form }).then(function (next) {
+    S.saving = false;
+    S.dirty = false;
+    var applied = next && next.revision !== undefined ? Number(next.revision) : previousBase;
+    if (applied > previousBase + 1) { toast("warn", t("conflict")); }
+    S.form = clone(next || {});
+    S.formBase = applied;
+    S.formBuilt = false;
+    return refreshSnapshot(true).then(function () {
+      toast("ok", t("saveDone") + " · r" + String(applied));
+    });
+  }).catch(function (error) {
+    S.saving = false;
+    fail("saveFailed", error);
+    refreshSnapshot(true);
+  });
+}
+function doRevert() {
+  if (!S.snap) { return; }
+  S.form = clone(S.snap.settings || {});
+  S.formBase = (S.snap.settings || {}).revision || 0;
+  S.dirty = false;
+  S.formBuilt = false;
+  renderAll();
+  toast("ok", t("reverted"));
+}
+function doDrill() {
+  toast("ok", t("drillPending"));
+  api(ROUTE.engineInvoke, { method: "POST", json: { kind: "phantom_sentinel", action: "drill", payload: {} } })
+    .then(function (result) {
+      S.drillResult = result || {};
+      renderLockdowns();
+      toast(result && result.ok ? "ok" : "err", t(result && result.ok ? "drillDone" : "drillFailed"));
+      return refreshSnapshot(true);
+    }).catch(function (error) { fail("drillFailed", error); });
+}
+function doReveal() {
+  /* No path travels with the request: the node reveals the folder it seals
+     into, so a page cannot point Finder at an arbitrary location. */
+  api(ROUTE.engineInvoke, { method: "POST", json: { kind: "chrono_ark", action: "reveal", payload: {} } })
+    .then(function (result) {
+      appendResultLines(result || {});
+      toast(result && result.ok ? "ok" : "warn", String((result && result.headline) || t("dirReveal")));
+    }).catch(function (error) { fail("revealFailed", error); });
+}
+function doFetchRaw() {
+  api(ROUTE.snapshot, { raw: true }).then(function (text) {
+    var full = String(text || "");
+    S.rawText = full;
+    var slot = el("raw");
+    var shown = full.length > 60000 ? full.slice(0, 60000) + " …" : full;
+    slot.textContent = shown;
+    if (shown !== full) { toast("warn", t("rawTruncated")); }
+  }).catch(function (error) {
+    el("raw").textContent = t("rawFailed") + " · " + (error && error.message ? String(error.message) : String(error));
+    fail("rawFailed", error);
+  });
+}
+function doCommand() {
+  var box = el("cmd");
+  var text = String(box.value || "").trim();
+  if (!text) { toast("warn", t("cmdEmpty")); return; }
+  api(ROUTE.command, { method: "POST", json: { text: text } }).then(function (result) {
+    appendResultLines(result || {});
+    toast(result && result.ok ? "ok" : "err", t(result && result.ok ? "cmdDone" : "cmdFailed"));
+    return refreshSnapshot(true);
+  }).catch(function (error) { fail("cmdFailed", error); });
+}
+function windowAdd() {
+  var mesh = S.form.mesh;
+  mesh.idleWindows = mesh.idleWindows || [];
+  mesh.idleWindows.push({ startHour: 1, endHour: 7, weekdays: [2, 3, 4, 5, 6] });
+  renderWindowList();
+  markDirty();
+}
+function windowRemove(index) {
+  var mesh = S.form.mesh;
+  if (!mesh.idleWindows || index < 0 || index >= mesh.idleWindows.length) { return; }
+  mesh.idleWindows.splice(index, 1);
+  renderWindowList();
+  markDirty();
+}
+function mountAdd() {
+  var sentinel = S.form.sentinel;
+  sentinel.unmountPaths = sentinel.unmountPaths || [];
+  sentinel.unmountPaths.push("");
+  renderMountList();
+  markDirty();
+}
+function mountRemove(index) {
+  var sentinel = S.form.sentinel;
+  if (!sentinel.unmountPaths || index < 0 || index >= sentinel.unmountPaths.length) { return; }
+  sentinel.unmountPaths.splice(index, 1);
+  renderMountList();
+  markDirty();
+}
+
+/* --------------------------------------------------------------- lifecycle */
+function tick() {
+  setText("clock", clockOf(new Date()));
+  if (!S.snap) { return; }
+  var node = S.snap.node || {};
+  if (node.startedAt) {
+    setText("foot-uptime", t("uptime") + " " + dur((nodeNow() - new Date(node.startedAt).getTime()) / 1000));
+  }
+  updatePairCountdown();
+  if (S.step === 1) { renderDeployControls(); }
+  var alive = S.es && (S.es.readyState === 0 || S.es.readyState === 1);
+  if (alive) { return; }
+  if (!S.esTimer && Date.now() - CONN.lastOk > 8000) { openSSE(); }
+  if (Date.now() - CONN.lastPoll > 20000) { refreshSnapshot(false); }
+}
+function boot() {
+  if (S.booted) { return; }
+  S.booted = true;
+  el("log").addEventListener("scroll", onLogScroll);
+  el("cmd").value = "::popopx_sys::NODE_CMD::shadow_cos::briefing::{}";
+  el("raw").textContent = t("rawEmpty");
+  el("cmdout").textContent = "—";
+  applyLang();
+  refreshSnapshot(true);
+  openSSE();
+  window.setInterval(tick, 1000);
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) { return; }
+    refreshSnapshot(true);
+    if (!S.es) { openSSE(); }
+  });
+}
+
+var PPX = {
+  /* The picker is the node's setting, not a browser preference: the same value
+     decides which catalog the page paints, which language the report templates
+     are written in, and what the local model is asked to answer in. So the
+     click is posted through the ordinary settings route, and a failed POST
+     pulls the stored value back — the UI never claims a language the node is
+     not using. */
+  setLang: function (lang) {
+    if (!localeKnown(lang) || lang === S.lang) { return; }
+    S.lang = lang;
+    S.formBuilt = false;
+    S.engineKeys = "";
+    applyLang();
+    if (lang !== "en" && catalogFor(lang) === "en") { toast("warn", t("langFallback") + " · " + lang); }
+    if (!S.snap || !S.snap.settings) { return; }
+    if (S.dirty) { toast("warn", t("langSaveHint")); return; }
+    var nextDocument = clone(S.snap.settings);
+    nextDocument.language = lang;
+    S.langPending = true;
+    api(ROUTE.settings, { method: "POST", json: nextDocument }).then(function (applied) {
+      S.langPending = false;
+      adoptLanguage(applied && applied.language ? applied.language : lang);
+      return refreshSnapshot(true);
+    }).catch(function (error) {
+      S.langPending = false;
+      fail("langSaveFailed", error);
+      refreshSnapshot(true);
+    });
+  },
+  step: function (number) {
+    S.step = number;
+    S.logStep = 0;
+    [1, 2, 3].forEach(function (index) {
+      show("step-" + index, index === number);
+      var button = el("rail-" + index);
+      if (button) { button.classList.toggle("is-on", index === number); }
+    });
+    renderAll();
+  },
+  retry: function () {
+    if (S.esTimer) { window.clearTimeout(S.esTimer); S.esTimer = null; }
+    S.esBackoff = 1000;
+    openSSE();
+    refreshSnapshot(true);
+  },
+  installStart: doInstallStart,
+  installCancel: doInstallCancel,
+  logFilter: function () {
+    S.logFilter = el("log-filter").value;
+    rebuildLog();
+  },
+  logClear: function () {
+    clear(el("log"));
+    el("log").appendChild(emptyState("logEmpty"));
+    toast("ok", t("logCleared"));
+  },
+  logCopy: function () {
+    var lines = S.entries.filter(logPasses).map(function (entry) {
+      return clockOf(dateOf(entry.time)) + " " + (LEVEL_GLYPH[entry.level] || "›") +
+        " [" + entry.channel + "]" + (entry.phase ? ":" + entry.phase : "") + " " + entry.text;
+    });
+    if (!lines.length) { toast("warn", t("logEmpty")); return; }
+    copyText(lines.join("\n"));
+  },
+  logUnlock: function () {
+    S.autoScroll = true;
+    show("lockbtn", false);
+    var body = el("log");
+    if (body) { body.scrollTop = body.scrollHeight; }
+  },
+  rotatePairing: doRotate,
+  revokeDevice: doRevoke,
+  qrRetry: function () {
+    PAIR_VIEW.name = "";
+    S.qrNonce = (S.qrNonce || 0) + 1;
+    if (S.snap) { renderPairing(); }
+  },
+  copyThis: function (name) { copyText(S.copyable[name]); },
+  toggleEngine: doToggle,
+  save: doSave,
+  revert: doRevert,
+  drill: doDrill,
+  revealDir: doReveal,
+  windowAdd: windowAdd,
+  windowRemove: windowRemove,
+  mountAdd: mountAdd,
+  mountRemove: mountRemove,
+  devToggle: function () {
+    var drawer = el("drawer");
+    S.devOpen = !S.devOpen;
+    drawer.classList.toggle("is-open", S.devOpen);
+    show("dev-body", S.devOpen);
+    var title = drawer.querySelector("h3");
+    if (title) { title.textContent = t("devTitle"); }
+    if (S.devOpen && !S.rawText) { doFetchRaw(); }
+  },
+  fetchRaw: doFetchRaw,
+  rawCopy: function () {
+    if (!S.rawText) { doFetchRaw(); return; }
+    copyText(S.rawText);
+  },
+  cmdSend: doCommand,
+  cmdClear: function () { clear(el("cmdout")); el("cmdout").textContent = "—"; },
+  dismiss: function (button) {
+    var node = button.parentNode;
+    if (node && node.parentNode) { node.parentNode.removeChild(node); }
+  }
+};
+
+window.PPX = PPX;
+boot();
+</script>
+</body>
+</html>
+
+"""#
+}
+
+// MARK: - Loopback console server
+
+/// The whole local web console: an HTTP/1.1 + SSE listener on `Network.framework`
+/// plus the single-page wizard it serves.
+///
+/// Concurrency shape, because it is the part that is easy to get wrong:
+///
+/// * One serial `DispatchQueue` receives every `NWConnection` callback. Nothing
+///   in this file blocks it — no semaphore, no `Thread.sleep`, no `waitUntilExit`.
+/// * Every piece of mutable state lives in an actor: this server (listener,
+///   token, registries), `WEBConnection` (one socket's read pump), `WEBWriter`
+///   (one socket's write queue) and `WEBSSEChannel` (one event subscription).
+/// * Only `Sendable` values cross those boundaries. `NWConnection`, `NWListener`,
+///   `NWEndpoint`, `NWPath` and both `State` enums are `Sendable` in the macOS 14
+///   SDK, so no `@unchecked` box is needed anywhere in this file.
+public actor LocalWebConsoleServer {
+
+    // MARK: Wire limits
+
+    /// Anything bigger gets `413` at the head, before a single body byte is
+    /// buffered. The largest legitimate document here is a settings POST.
+    public static let maxBodyBytes = 8 * 1_024 * 1_024
+    static let maxHeadBytes = 64 * 1_024
+    static let maxTargetBytes = 8 * 1_024
+    static let maxHeaderCount = 100
+    static let maxConnections = 64
+
+    /// Every socket shares this one queue. One queue means no lock, and it keeps
+    /// reads and writes on the same socket strictly ordered.
+    static let workQueue = DispatchQueue(label: "chat.popopx.macnode.console", qos: .utility)
+
+    // MARK: Response headers
+
+    /// `default-src 'self'` with an explicit `'unsafe-inline'` for `style-src`
+    /// and `script-src`.
+    ///
+    /// Why inline is the right trade here rather than a hole: the document is
+    /// one static byte string (`WEBConsoleHTML.document`) that never receives a
+    /// Swift, user or remote value at template time — every dynamic node on the
+    /// page is built with `createElement`/`textContent`, and the only place
+    /// markup is assigned from a string anywhere in the page is one hard-coded
+    /// SVG path table inside `svgIcon`, which takes no arguments. The inline
+    /// blocks are therefore the app's own audited code, delivered from the same
+    /// origin over loopback; an attacker able to change them already has the
+    /// binary. The stricter alternative — two extra asset routes plus a
+    /// per-response nonce — buys nothing against a 127.0.0.1-only origin while
+    /// breaking the "one embedded document, no asset routes" requirement, so the
+    /// constraint is enforced in the renderer instead of in the header.
+    static let securityPolicy = [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data:",
+        "connect-src 'self'",
+        "font-src 'self'",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'"
+    ].joined(separator: "; ")
+
+    /// Stamped on every response and every event stream. `response(...)` is the
+    /// only way to build a body, so a route cannot forget one.
+    static let securityHeaders: [(String, String)] = [
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+        ("Referrer-Policy", "no-referrer"),
+        ("Cross-Origin-Resource-Policy", "same-origin"),
+        ("Content-Security-Policy", securityPolicy)
+    ]
+
+    // MARK: State
+
+    /// Everything the console may touch. Deliberately existential: the console
+    /// cannot reach into an engine, only ask the node.
+    private let facade: any NodeConsoleFacade
+    private let host: String
+    private let requestedPort: UInt16
+
+    /// Random per launch, never persisted. A token that survives a reboot is a
+    /// token that can leak out of an old bookmark.
+    public let token: String
+
+    private var listener: NWListener?
+    private var boundPort: UInt16?
+    private var listening = false
+    private var stopped = false
+    private var connections: [UUID: WEBConnection] = [:]
+    private var channels: [UUID: WEBSSEChannel] = [:]
+    private var readyWaiter: CheckedContinuation<UInt16, any Error>?
+    private var listenerFailure: String?
+    private let bootDate = Date()
+
+    private let encoder = NodeJSON.encoder()
+    private let decoder = NodeJSON.decoder()
+
+    // MARK: Life and death
+
+    public init(facade: any NodeConsoleFacade,
+                host: String = NodeWire.consoleHost,
+                port: UInt16 = NodeWire.consolePort) {
+        self.facade = facade
+        self.host = host
+        self.requestedPort = port
+        self.token = TextKit.randomToken()
+    }
+
+    /// Binds the loopback socket and waits until the port is actually ours. Does
+    /// not touch the browser: call `openInBrowser()` when the UI is ready.
+    public func start() async throws {
+        guard !listening else { return }
+        guard requestedPort > 0 else { throw WEBConsoleError.portOutOfRange }
+        guard Self.isLoopbackLiteral(host) else {
+            throw WEBConsoleError.addressNotLoopback(host)
+        }
+        stopped = false
+        listenerFailure = nil
+
+        let parameters = NWParameters.tcp
+        // Loopback is not a preference, it is the security model: nothing on this
+        // server is authenticated by anything but the bearer token, and the
+        // console can start installers, rotate pairing offers and toggle engines.
+        parameters.requiredInterfaceType = .loopback
+        parameters.allowLocalEndpointReuse = true
+        parameters.includePeerToPeer = false
+        parameters.acceptLocalOnly = true
+        guard let port = NWEndpoint.Port(rawValue: requestedPort) else {
+            throw WEBConsoleError.portOutOfRange
+        }
+        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: port)
+
+        let listener = try NWListener(using: parameters, on: port)
+        listener.newConnectionLimit = Self.maxConnections
+        listener.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            Task { await self.noteListener(state) }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            Task { await self.accept(connection) }
+        }
+        self.listener = listener
+        listener.start(queue: Self.workQueue)
+
+        do {
+            boundPort = try await waitUntilReady()
+        } catch {
+            listener.cancel()
+            self.listener = nil
+            throw WEBConsoleError.listenerFailed(listenerFailure ?? error.localizedDescription)
+        }
+        listening = true
+        audit()
+    }
+
+    /// Closes the listener, every socket and every event subscription. Safe to
+    /// call twice, and safe to call when it never started.
+    public func stop() async {
+        stopped = true
+        listening = false
+        let live = Array(channels.values)
+        channels.removeAll(keepingCapacity: false)
+        for channel in live { await channel.close() }
+        let open = Array(connections.values)
+        connections.removeAll(keepingCapacity: false)
+        for connection in open { await connection.shutdown() }
+        listener?.cancel()
+        listener = nil
+        boundPort = nil
+        readyWaiter?.resume(throwing: WEBConsoleError.notListening)
+        readyWaiter = nil
+    }
+
+    /// Hands the tokenised URL to the default browser. Kept out of `start()` so
+    /// the console can be started head-first in tests and CI.
+    public func openInBrowser() async {
+        let target = url
+        #if canImport(AppKit)
+        await MainActor.run {
+            // `open` answers with a Bool that means "the browser accepted the
+            // request", not "the page loaded"; the page itself reports liveness.
+            _ = NSWorkspace.shared.open(target)
+        }
+        #else
+        _ = target
+        #endif
+    }
+
+    /// The console URL, token included.
+    ///
+    /// The token rides in the query because a top-level navigation cannot attach
+    /// an `X-PPX-Token` header, and `GET /` has to answer with something. That is
+    /// acceptable only under three properties this type guarantees: the socket is
+    /// loopback-bound by construction (`requiredInterfaceType = .loopback`,
+    /// `acceptLocalOnly`, an explicit `127.0.0.1` required local endpoint and the
+    /// `audit()` check below); the URL is never published anywhere except to the
+    /// owner's own browser by the app itself, and dies with the process; and the
+    /// page loads no third-party resource at all while sending
+    /// `Referrer-Policy: no-referrer`, so the token cannot travel onward even if
+    /// the owner pastes the URL somewhere. It is also the only place the browser
+    /// will put it for us: the QR is an `<img>`, and an `<img>` cannot set
+    /// headers.
+    public var url: URL {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host
+        components.port = Int(boundPort ?? requestedPort)
+        components.path = ConsoleRoute.index
+        components.queryItems = [URLQueryItem(name: NodeWire.consoleTokenQuery, value: token)]
+        return components.url ?? URL(string: "http://\(host):\(requestedPort)/")!
+    }
+
+    /// `true` once `start()` has returned without throwing.
+    public var isListening: Bool { listening }
+
+    /// The port actually bound; equal to the requested port in the normal case.
+    public var boundConsolePort: UInt16 { boundPort ?? requestedPort }
+
+    /// Live event-stream viewers.
+    public var streamCount: Int { channels.count }
+
+    // MARK: - Startup audit
+
+    private func waitUntilReady() async throws -> UInt16 {
+        if let failure = listenerFailure { throw WEBConsoleError.listenerFailed(failure) }
+        return try await withCheckedThrowingContinuation { continuation in
+            if let port = listener?.port?.rawValue, listener?.state == .ready {
+                continuation.resume(returning: port)
+                return
+            }
+            readyWaiter = continuation
+        }
+    }
+
+    private func noteListener(_ state: NWListener.State) {
+        switch state {
+        case .ready:
+            let port = listener?.port?.rawValue ?? requestedPort
+            boundPort = port
+            if let waiter = readyWaiter {
+                readyWaiter = nil
+                waiter.resume(returning: port)
+            }
+        case .waiting(let error):
+            listenerFailure = error.localizedDescription
+        case .failed(let error):
+            listening = false
+            listenerFailure = error.localizedDescription
+            if let waiter = readyWaiter {
+                readyWaiter = nil
+                waiter.resume(throwing: error)
+            }
+        case .cancelled:
+            listening = false
+        case .setup:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    /// One operator-visible line at startup. No path, no token, ever.
+    private func audit() {
+        let endpoint = listener?.parameters.requiredLocalEndpoint
+        let pinned = endpoint.map { Self.isLoopback($0) } ?? true
+        assert(endpoint == nil || pinned, "POPOPX console must only ever bind loopback")
+        print("POPOPX console · http://\(host):\(boundConsolePort)/ · loopback=\(pinned ? "yes" : "NO — MISCONFIGURED") · body cap \(Self.maxBodyBytes / 1_048_576) MiB · bearer token lives until the app quits")
+        if !pinned {
+            print("POPOPX console · AUDIT: resolved endpoint \(String(describing: endpoint)) is not loopback; refusing to serve")
+            Task { await self.stop() }
+        }
+    }
+
+    // MARK: - Accept
+
+    private func accept(_ connection: NWConnection) async {
+        guard listening, !stopped else {
+            connection.cancel()
+            return
+        }
+        let viaLoopback = connection.currentPath.map { Self.pathIsLoopback($0) } ?? true
+        guard Self.isLoopback(connection.endpoint), viaLoopback else {
+            // Defence in depth: `requiredInterfaceType = .loopback` should make
+            // this unreachable, but a refused socket is cheaper than an argument.
+            print("POPOPX console · AUDIT: refused a peer that did not arrive on lo0")
+            connection.cancel()
+            return
+        }
+        let handler = WEBConnection(connection: connection, server: self)
+        connections[handler.identifier] = handler
+        await handler.begin()
+    }
+
+    func connectionEnded(_ identifier: UUID) {
+        connections[identifier] = nil
+    }
+
+    func streamEnded(_ identifier: UUID) {
+        channels[identifier] = nil
+    }
+
+    /// A channel that gave up on a slow reader. The viewer reconnects on its own;
+    /// the node never stalls waiting for a browser that stopped reading.
+    func streamDropped(_ identifier: UUID, reason: String) {
+        channels[identifier] = nil
+        print("POPOPX console · dropped one event stream (\(reason)); viewers left: \(channels.count)")
+    }
+
+    // MARK: - Loopback tests
+
+    /// Literal form only. `0.0.0.0`, a LAN address and a hostname are all
+    /// rejected before a socket exists, so a mistyped host cannot silently
+    /// expose the console to a network.
+    static func isLoopbackLiteral(_ host: String) -> Bool {
+        let text = host.trimmingCharacters(in: .whitespaces).lowercased()
+        if text == "localhost" || text == "::1" { return true }
+        let parts = text.split(separator: ".")
+        guard parts.count == 4, parts.first == "127" else { return false }
+        return parts.allSatisfy { part in
+            part.count <= 3 && (Int(part).map { (0...255).contains($0) } ?? false)
+        }
+    }
+
+    static func isLoopback(_ endpoint: NWEndpoint) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else {
+            // A unix or opaque endpoint peer is local by construction, but this
+            // server never binds one, so refuse rather than assume.
+            return false
+        }
+        switch host {
+        case .ipv4(let address): return address.isLoopback
+        case .ipv6(let address): return address.isLoopback
+        case .name(let name, _): return name == "localhost"
+        @unknown default: return false
+        }
+    }
+
+    /// `true` when the socket travelled on `lo0`. Absent path information is
+    /// treated as loopback because the listener itself is pinned to `lo0`.
+    static func pathIsLoopback(_ path: NWPath) -> Bool {
+        guard let first = path.availableInterfaces.first else { return true }
+        return first.type == .loopback
+    }
+
+    // MARK: - Routing
+
+    /// One parsed request in, one dispatch outcome out. `.stream` means the
+    /// socket became an event stream and must not receive another response.
+    func serve(_ request: WEBHTTPRequest,
+               on connection: WEBConnection,
+               writer: WEBWriter) async -> WEBDispatch {
+        guard listening, !stopped else {
+            return .response(failure(.notListening, path: request.path, keepAlive: false))
+        }
+        let path = Self.normalisedPath(from: request.path)
+        let keepAlive = request.keepAliveWanted
+        do {
+            guard let response = try await route(request, path: path, connection: connection, writer: writer) else {
+                return .stream
+            }
+            let final = request.method == "HEAD" ? Self.withoutBody(response) : response
+            return .response(Self.stampingConnection(final, keepAlive: keepAlive))
+        } catch let error as WEBConsoleError {
+            return .response(Self.stampingConnection(failure(error, path: path, keepAlive: keepAlive),
+                                                     keepAlive: keepAlive && error.httpStatus < 500))
+        } catch is CancellationError {
+            return .nothing
+        } catch {
+            return .response(Self.stampingConnection(failure(.sendFailed(error.localizedDescription),
+                                                             path: path,
+                                                             keepAlive: false),
+                                                     keepAlive: false))
+        }
+    }
+
+    /// The route table. Paths are matched against `ConsoleRoute` literals and
+    /// never against a percent-decoded form, so `/api/%65vents` is a 404 rather
+    /// than a smuggled hit, and no route resolves to a file on disk.
+    private func route(_ request: WEBHTTPRequest,
+                       path: String,
+                       connection: WEBConnection,
+                       writer: WEBWriter) async throws -> WEBHTTPResponse? {
+        if path == ConsoleRoute.index {
+            guard Self.allows(request.method, for: path) else {
+                throw WEBConsoleError.unsupportedMethod(request.method)
+            }
+            let presented = (request.header(NodeWire.consoleTokenHeader) ?? "")
+                + (request.queryValue(NodeWire.consoleTokenQuery) ?? "")
+            if presented.isEmpty {
+                // A bare navigation is pointed at the tokenised form instead of
+                // getting a 401 wall. Safe by construction, not by taste: this
+                // address only exists on 127.0.0.1, only the app itself ever
+                // hands it out (to the owner's own browser), the token dies with
+                // the process, `no-referrer` stops it travelling onward and the
+                // page fetches nothing remote. See `url`.
+                return WEBHTTPResponse(status: 302,
+                                       reason: "Found",
+                                       typeHeader: "text/plain; charset=utf-8",
+                                       headers: Self.securityHeaders
+                                           + [("Cache-Control", "no-store")]
+                                           + [("Location", "\(ConsoleRoute.index)?\(NodeWire.consoleTokenQuery)=\(token)")],
+                                       body: Data("redirecting to the tokenised console".utf8))
+            }
+            guard authorized(request) else {
+                throw WEBConsoleError.unauthorized
+            }
+            return response(Data(WEBConsoleHTML.document.utf8),
+                            type: "text/html; charset=utf-8",
+                            status: 200)
+        }
+
+        guard path.hasPrefix("/api/") else {
+            throw WEBConsoleError.notFound(path)
+        }
+        // Every API route, without exception, needs the bearer. This is the only
+        // gate: no cookie, no session, no "localhost is special".
+        guard authorized(request) else {
+            throw WEBConsoleError.unauthorized
+        }
+        guard Self.allows(request.method, for: path) else {
+            throw WEBConsoleError.unsupportedMethod(request.method)
+        }
+
+        switch path {
+        case ConsoleRoute.snapshot:
+            return try json(await facade.snapshot())
+
+        case ConsoleRoute.health:
+            let snapshot = await facade.snapshot()
+            let health = WEBHealth(
+                ok: listening && !stopped,
+                service: AppPaths.appName,
+                version: NodeVersion.current.semanticString,
+                node: snapshot.node.displayName,
+                consolePort: boundConsolePort,
+                loopback: listener?.parameters.requiredLocalEndpoint.map { Self.isLoopback($0) } ?? false,
+                viewers: channels.count,
+                uptimeSeconds: max(0, Int(Date().timeIntervalSince(bootDate))),
+                serverTime: Date()
+            )
+            return try json(health)
+
+        case ConsoleRoute.events:
+            // Long-lived. The read side of this socket stops being pumped, so a
+            // viewer waiting for events costs one task and no pool thread.
+            try await openEvents(connection: connection, writer: writer)
+            return nil
+
+        case ConsoleRoute.installStart:
+            await facade.startInstall()
+            return try json(WEBStatus(ok: true, detail: "install requested"))
+
+        case ConsoleRoute.installCancel:
+            await facade.cancelInstall()
+            return try json(WEBStatus(ok: true, detail: "cancel requested"))
+
+        case ConsoleRoute.pairingRotate:
+            guard let offer = await facade.rotatePairing() else {
+                throw WEBConsoleError.noPairingOffer
+            }
+            return try json(offer)
+
+        case ConsoleRoute.pairingQR:
+            let size = Self.clampedPixelSize(request.queryValue("size"))
+            guard let asset = await facade.pairingQR(pixelSize: size) else {
+                throw WEBConsoleError.noPairingOffer
+            }
+            return response(asset.png, type: "image/png", status: 200, length: asset.png.count)
+
+        case ConsoleRoute.pairingRevoke:
+            let body: WEBRevokeRequest = try decode(WEBRevokeRequest.self, from: request)
+            let key = body.publicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { throw WEBConsoleError.badEngine("publicKey is required") }
+            await facade.revokePairing(publicKey: key)
+            return try json(WEBStatus(ok: true, detail: AppPaths.anonymise(key)))
+
+        case ConsoleRoute.settings:
+            let submitted: NodeSettings = try decode(NodeSettings.self, from: request)
+            return try json(await facade.updateSettings(submitted))
+
+        case ConsoleRoute.engineToggle:
+            let body: WEBEngineToggleRequest = try decode(WEBEngineToggleRequest.self, from: request)
+            guard let kind = EngineKind(rawValue: body.kind) else {
+                throw WEBConsoleError.unknownEngine(body.kind)
+            }
+            await facade.setEngineEnabled(kind, enabled: body.enabled)
+            // The fresh snapshot rides back on the same round trip, which is what
+            // lets the switch settle without a second request.
+            return try json(await facade.snapshot())
+
+        case ConsoleRoute.engineInvoke:
+            let body: WEBEngineInvokeRequest = try decode(WEBEngineInvokeRequest.self, from: request)
+            guard let kind = EngineKind(rawValue: body.kind) else {
+                throw WEBConsoleError.unknownEngine(body.kind)
+            }
+            let action = body.action.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !action.isEmpty else { throw WEBConsoleError.badEngine("action is required") }
+            return try json(await facade.invokeEngine(kind, action: action, payload: body.payload ?? [:]))
+
+        case ConsoleRoute.commandInject:
+            let body: WEBCommandRequest = try decode(WEBCommandRequest.self, from: request)
+            let text = body.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { throw WEBConsoleError.emptyBody }
+            // A human typing into the developer drawer usually leaves the prefix
+            // off; wrapping keeps the wire grammar single-sourced in `NodeWire`.
+            let line = text.hasPrefix(NodeWire.commandPrefix) ? text : NodeWire.commandPrefix + text
+            return try json(await facade.submitWireCommand(line))
+
+        default:
+            throw WEBConsoleError.notFound(path)
+        }
+    }
+
+    /// Read routes answer `GET`/`HEAD`, mutation routes answer `POST`, nothing
+    /// answers `OPTIONS`: the page is same-origin by construction, so a preflight
+    /// can only come from somebody else's document, and the answer to that is no.
+    static func allows(_ method: String, for path: String) -> Bool {
+        let readable: Set<String> = [
+            ConsoleRoute.index, ConsoleRoute.snapshot, ConsoleRoute.events,
+            ConsoleRoute.pairingQR, ConsoleRoute.health
+        ]
+        switch method {
+        case "GET", "HEAD": return readable.contains(path)
+        case "POST": return !readable.contains(path) && ConsoleRoute.all.contains(path)
+        default: return false
+        }
+    }
+
+    static func allowHeader(for path: String) -> String {
+        let readable: Set<String> = [
+            ConsoleRoute.index, ConsoleRoute.snapshot, ConsoleRoute.events,
+            ConsoleRoute.pairingQR, ConsoleRoute.health
+        ]
+        return readable.contains(path) ? "GET, HEAD" : "POST"
+    }
+
+    // MARK: - Event stream
+
+    private func openEvents(connection: WEBConnection, writer: WEBWriter) async throws {
+        let headers: [(String, String)] = [
+            ("Content-Type", "text/event-stream; charset=utf-8"),
+            ("Cache-Control", "no-cache, no-transform"),
+            ("Connection", "keep-alive"),
+            ("X-Accel-Buffering", "no")
+        ]
+        // `retry:` before anything else so a dropped stream reconnects by itself;
+        // the page layers exponential backoff on top for when the node is gone.
+        try await writer.openStream(headers: headers, preamble: Data("retry: 3000\n\n".utf8))
+        let channel = WEBSSEChannel(writer: writer, server: self, connection: connection)
+        channels[channel.identifier] = channel
+        await connection.track(channel)
+        await channel.begin(facade: facade)
+    }
+
+    // MARK: - Token
+
+    private func authorized(_ request: WEBHTTPRequest) -> Bool {
+        guard !token.isEmpty else { return false }
+        // `Digest.matches` is the model layer's constant-time comparison: a
+        // loopback server is still a server, and a local process that can time
+        // 32 bytes should not be able to read them one at a time.
+        if Digest.matches(request.header(NodeWire.consoleTokenHeader) ?? "", token) { return true }
+        return Digest.matches(request.queryValue(NodeWire.consoleTokenQuery) ?? "", token)
+    }
+
+    // MARK: - Response builders
+
+    private func json<T: Encodable>(_ value: T) throws -> WEBHTTPResponse {
+        do {
+            return response(try encoder.encode(value), type: "application/json; charset=utf-8", status: 200)
+        } catch {
+            throw WEBConsoleError.sendFailed("could not encode \(T.self)")
+        }
+    }
+
+    /// The only way a body reaches the wire: security headers, `Content-Type`,
+    /// `Content-Length` and `Cache-Control` are all stamped here.
+    private func response(_ body: Data,
+                          type: String,
+                          status: Int,
+                          length: Int? = nil) -> WEBHTTPResponse {
+        let payload = body
+        var pairs = Self.securityHeaders
+        pairs.append(("Cache-Control", "no-store"))
+        pairs.append(("Content-Length", String(length ?? payload.count)))
+        return WEBHTTPResponse(status: status,
+                               reason: Self.reason(for: status),
+                               typeHeader: type,
+                               headers: pairs,
+                               body: payload)
+    }
+
+    func failure(_ error: WEBConsoleError, path: String, keepAlive: Bool) -> WEBHTTPResponse {
+        let status = error.httpStatus
+        let api = path.hasPrefix("/api/")
+        var pairs = Self.securityHeaders
+        pairs.append(("Cache-Control", "no-store"))
+        if case .unsupportedMethod = error {
+            pairs.append(("Allow", Self.allowHeader(for: path)))
+        }
+        // A malformed or oversized stream cannot be trusted to still be framed
+        // correctly, and a 5xx means we are done with this socket anyway.
+        pairs.append(("Connection", keepAlive && status < 500 ? "keep-alive" : "close"))
+        let body: Data
+        let type: String
+        if api {
+            body = NodeJSON.encodeLine(WEBErrorBody(error: error.clientMessage, status: status)) ?? Data("{}".utf8)
+            type = "application/json; charset=utf-8"
+        } else {
+            body = Data(error.clientMessage.utf8)
+            type = "text/plain; charset=utf-8"
+        }
+        pairs.append(("Content-Length", String(body.count)))
+        return WEBHTTPResponse(status: status,
+                               reason: Self.reason(for: status),
+                               typeHeader: type,
+                               headers: pairs,
+                               body: body)
+    }
+
+    static func withoutBody(_ response: WEBHTTPResponse) -> WEBHTTPResponse {
+        WEBHTTPResponse(status: response.status,
+                        reason: response.reason,
+                        typeHeader: response.typeHeader,
+                        headers: response.headers,
+                        body: nil)
+    }
+
+    /// Last word on `Connection`, so no route can accidentally promise keep-alive
+    /// to a client that asked to hang up.
+    static func stampingConnection(_ response: WEBHTTPResponse, keepAlive: Bool) -> WEBHTTPResponse {
+        let pairs = response.headers.filter { $0.0.lowercased() != "connection" }
+            + [("Connection", keepAlive ? "keep-alive" : "close")]
+        return WEBHTTPResponse(status: response.status,
+                               reason: response.reason,
+                               typeHeader: response.typeHeader,
+                               headers: pairs,
+                               body: response.body)
+    }
+
+    private func decode<T: Decodable>(_ type: T.Type, from request: WEBHTTPRequest) throws -> T {
+        guard !request.body.isEmpty else { throw WEBConsoleError.emptyBody }
+        do {
+            return try decoder.decode(type, from: request.body)
+        } catch {
+            throw WEBConsoleError.undecodableBody(typeName: String(describing: T.self))
+        }
+    }
+
+    /// Keeps one QR request from asking CoreImage for an 8K bitmap.
+    static func clampedPixelSize(_ raw: String?) -> Int {
+        guard let text = raw, let value = Int(text) else { return 512 }
+        return min(max(value, 128), 2048)
+    }
+
+    /// `/api/snapshot/` and `/api/snapshot` are the same route. Trailing slashes
+    /// are the only rewrite: dot segments cannot match a literal, and there is no
+    /// filesystem behind any of these strings.
+    static func normalisedPath(from raw: String) -> String {
+        var text = raw
+        while text.count > 1, text.hasSuffix("/") {
+            text.removeLast()
+        }
+        return text.isEmpty ? "/" : text
+    }
+
+    static func reason(for status: Int) -> String {
+        switch status {
+        case 200: return "OK"
+        case 204: return "No Content"
+        case 302: return "Found"
+        case 400: return "Bad Request"
+        case 401: return "Unauthorized"
+        case 404: return "Not Found"
+        case 405: return "Method Not Allowed"
+        case 408: return "Request Timeout"
+        case 411: return "Length Required"
+        case 413: return "Content Too Large"
+        case 414: return "URI Too Long"
+        case 500: return "Internal Server Error"
+        case 501: return "Not Implemented"
+        case 503: return "Service Unavailable"
+        default: return "Status"
+        }
+    }
+
+    /// RFC 1123 `Date` header, built by hand. A shared `DateFormatter` would be a
+    /// non-`Sendable` object living in a static, which is exactly the kind of
+    /// thing this file refuses to do.
+    static func dateHeader(_ date: Date) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "GMT") ?? .gmt
+        let parts = calendar.dateComponents([.weekday, .day, .month, .year, .hour, .minute, .second], from: date)
+        let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        let weekday = weekdays[min(6, max(0, (parts.weekday ?? 1) - 1))]
+        let month = months[min(11, max(0, (parts.month ?? 1) - 1))]
+        return String(format: "%@, %02d %@ %04d %02d:%02d:%02d GMT",
+                      weekday, parts.day ?? 1, month, parts.year ?? 1970,
+                      parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0)
+    }
+
+    // MARK: - Payload documents
+
+    /// Local `GET /api/health` body: the console's own liveness. The snapshot is
+    /// the document of record for anything about the node.
+    public struct WEBHealth: Codable, Sendable {
+        public let ok: Bool
+        public let service: String
+        public let version: String
+        public let node: String
+        public let consolePort: UInt16
+        public let loopback: Bool
+        public let viewers: Int
+        public let uptimeSeconds: Int
+        public let serverTime: Date
+    }
+
+    public struct WEBStatus: Codable, Sendable {
+        public let ok: Bool
+        public let detail: String
+    }
+
+    struct WEBErrorBody: Codable {
+        let error: String
+        let status: Int
+    }
+
+    struct WEBRevokeRequest: Codable { let publicKey: String }
+    struct WEBEngineToggleRequest: Codable { let kind: String; let enabled: Bool }
+    struct WEBEngineInvokeRequest: Codable {
+        let kind: String
+        let action: String
+        let payload: [String: JSONValue]?
+    }
+    struct WEBCommandRequest: Codable { let text: String }
+
+    // MARK: - Dispatch outcome
+
+    enum WEBDispatch: Sendable {
+        case response(WEBHTTPResponse)
+        /// The socket is an event stream now; the read pump stands down.
+        case stream
+        /// Nothing to write (cancelled mid-route).
+        case nothing
+    }
+
+    // MARK: - Incremental parser
+
+    /// One event produced by `WEBWireParser`: a whole request, or the error that
+    /// ended this connection.
+    enum WEBWireEvent: Sendable {
+        case request(WEBHTTPRequest)
+        case failure(WEBConsoleError)
+    }
+
+    /// Incremental HTTP/1.1 request reader.
+    ///
+    /// `NWConnection.receive` hands back whatever the kernel happens to hold:
+    /// half a request line, three pipelined requests in one read, or byte 4 096
+    /// of a 6 MB settings document. This parser therefore owns a buffer plus an
+    /// explicit phase and emits a request only once both the head terminator and
+    /// `Content-Length` bytes have arrived — one read is never assumed to equal
+    /// one request. Every bad input becomes a `WEBWireEvent.failure` value and a
+    /// `close`, because a protocol violation desynchronises the stream: there is
+    /// no `fatalError` and no precondition in this type, since the input is
+    /// untrusted by definition.
+    struct WEBWireParser {
+        enum Phase {
+            case head
+            case body
+            case dead
+        }
+
+        /// The parsed head, held across reads until the body lands.
+        private struct Head {
+            var method: String
+            var target: String
+            var path: String
+            var query: [URLQueryItem]
+            var version: String
+            var headers: [String: String]
+            var keepAlive: Bool
+            var contentLength: Int
+        }
+
+        static let headEnd = Data([13, 10, 13, 10])
+
+        private var buffer = Data()
+        private var phase: Phase = .head
+        private var pending: Head?
+        private var expected = 0
+
+        let bodyLimit: Int
+        let headLimit: Int
+        let targetLimit: Int
+        let headerLimit: Int
+
+        init(bodyLimit: Int = LocalWebConsoleServer.maxBodyBytes,
+             headLimit: Int = LocalWebConsoleServer.maxHeadBytes,
+             targetLimit: Int = LocalWebConsoleServer.maxTargetBytes,
+             headerLimit: Int = LocalWebConsoleServer.maxHeaderCount) {
+            self.bodyLimit = bodyLimit
+            self.headLimit = headLimit
+            self.targetLimit = targetLimit
+            self.headerLimit = headerLimit
+        }
+
+        var isDead: Bool { phase == .dead }
+
+        /// Feeds one TCP segment and returns every message it completed.
+        mutating func feed(_ data: Data) -> [WEBWireEvent] {
+            var events: [WEBWireEvent] = []
+            guard phase != .dead else { return events }
+            buffer.append(data)
+            while phase != .dead {
+                if phase == .head {
+                    guard let end = buffer.firstRange(of: Self.headEnd) else {
+                        if buffer.count > headLimit {
+                            events.append(.failure(.oversizedHead(limitBytes: headLimit)))
+                            phase = .dead
+                        }
+                        return events
+                    }
+                    let raw = buffer.subdata(in: buffer.startIndex..<end.lowerBound)
+                    buffer.removeSubrange(buffer.startIndex..<end.upperBound)
+                    rebalance()
+                    do {
+                        let parsed = try parseHead(raw)
+                        if parsed.contentLength == 0 {
+                            events.append(.request(Self.message(parsed, body: Data())))
+                        } else {
+                            pending = parsed
+                            expected = parsed.contentLength
+                            phase = .body
+                        }
+                    } catch let error as WEBConsoleError {
+                        events.append(.failure(error))
+                        phase = .dead
+                        return events
+                    } catch {
+                        events.append(.failure(.malformedHeaders))
+                        phase = .dead
+                        return events
+                    }
+                } else {
+                    guard let parsed = pending else {
+                        phase = .dead
+                        return events
+                    }
+                    guard buffer.count >= expected else { return events }
+                    let start = buffer.startIndex
+                    let body = buffer.subdata(in: start..<(start + expected))
+                    buffer.removeSubrange(start..<(start + expected))
+                    rebalance()
+                    pending = nil
+                    expected = 0
+                    phase = .head
+                    events.append(.request(Self.message(parsed, body: body)))
+                }
+            }
+            return events
+        }
+
+        /// `Data` slices keep their original index space, so normalising after
+        /// every removal keeps the `startIndex + count` arithmetic above honest.
+        private mutating func rebalance() {
+            if buffer.isEmpty {
+                buffer.removeAll(keepingCapacity: true)
+            } else if buffer.startIndex != 0 {
+                buffer = Data(buffer)
+            }
+        }
+
+        private func parseHead(_ data: Data) throws -> Head {
+            guard let text = String(data: data, encoding: .utf8) else {
+                throw WEBConsoleError.malformedHeaders
+            }
+            var lines = text.components(separatedBy: "\r\n")
+            guard let requestLine = lines.first, !requestLine.isEmpty else {
+                throw WEBConsoleError.malformedHeaders
+            }
+            lines.removeFirst()
+            let parts = requestLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+            guard parts.count == 3 else { throw WEBConsoleError.malformedHeaders }
+            let method = String(parts[0]).uppercased()
+            let target = String(parts[1])
+            let version = String(parts[2]).uppercased()
+            guard !method.isEmpty, method.allSatisfy({ $0.isLetter }) else {
+                throw WEBConsoleError.malformedHeaders
+            }
+            guard version == "HTTP/1.1" || version == "HTTP/1.0" else {
+                throw WEBConsoleError.malformedHeaders
+            }
+            guard target.utf8.count <= targetLimit else {
+                throw WEBConsoleError.targetTooLong(limitBytes: targetLimit)
+            }
+            guard target.hasPrefix("/"), !target.hasPrefix("//") else {
+                // Origin-form only: no absolute-form proxy targets, no
+                // authority-form, and `//host/` cannot become an open redirect.
+                throw WEBConsoleError.malformedHeaders
+            }
+
+            var headers: [String: String] = [:]
+            var count = 0
+            for line in lines {
+                if line.isEmpty { continue }
+                guard let colon = line.firstIndex(of: ":") else {
+                    throw WEBConsoleError.malformedHeaders
+                }
+                let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+                let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                guard !name.isEmpty, !name.contains(" ") else {
+                    throw WEBConsoleError.malformedHeaders
+                }
+                count += 1
+                if count > headerLimit { throw WEBConsoleError.oversizedHead(limitBytes: headLimit) }
+                // Duplicate headers fold into one comma list; `Content-Length`
+                // consistency is checked after the fold.
+                headers[name] = headers[name].map { $0 + ", " + value } ?? value
+            }
+
+            if let encoding = headers["transfer-encoding"], !encoding.isEmpty {
+                // Chunked bodies would need a second state machine, and no client
+                // of this console needs one. Say so instead of guessing.
+                throw WEBConsoleError.unsupportedEncoding(encoding)
+            }
+
+            var length = 0
+            if let declared = headers["content-length"] {
+                let values = declared.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                guard let first = values.first, let parsed = Int(first), parsed >= 0 else {
+                    throw WEBConsoleError.malformedHeaders
+                }
+                guard values.allSatisfy({ Int($0) == parsed }) else {
+                    // Two different Content-Length values is request smuggling.
+                    throw WEBConsoleError.malformedHeaders
+                }
+                guard parsed <= bodyLimit else {
+                    // Refused at the head: the bytes are never buffered.
+                    throw WEBConsoleError.payloadTooLarge(limitBytes: bodyLimit, neededBytes: parsed)
+                }
+                length = parsed
+            } else if Self.methodMayCarryBody(method) {
+                throw WEBConsoleError.missingContentLength
+            }
+
+            let connection = (headers["connection"] ?? "").lowercased()
+            var keepAlive = version == "HTTP/1.1"
+            if connection.contains("close") { keepAlive = false }
+            if connection.contains("keep-alive") { keepAlive = true }
+
+            let split = Self.split(target)
+            return Head(method: method,
+                        target: target,
+                        path: split.path,
+                        query: split.query,
+                        version: version,
+                        headers: headers,
+                        keepAlive: keepAlive,
+                        contentLength: length)
+        }
+
+        private static func message(_ head: Head, body: Data) -> WEBHTTPRequest {
+            WEBHTTPRequest(method: head.method,
+                           target: head.target,
+                           path: head.path,
+                           query: head.query,
+                           version: head.version,
+                           headers: head.headers,
+                           body: body,
+                           keepAliveWanted: head.keepAlive)
+        }
+
+        static func methodMayCarryBody(_ method: String) -> Bool {
+            method == "POST" || method == "PUT" || method == "PATCH"
+        }
+
+        static func split(_ target: String) -> (path: String, query: [URLQueryItem]) {
+            guard let mark = target.firstIndex(of: "?") else { return (target, []) }
+            let path = String(target[..<mark])
+            let remainder = String(target[target.index(after: mark)...])
+            var items: [URLQueryItem] = []
+            for pair in remainder.split(separator: "&", omittingEmptySubsequences: true) {
+                let pieces = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                let rawName = String(pieces[0])
+                let rawValue = pieces.count > 1 ? String(pieces[1]) : ""
+                items.append(URLQueryItem(name: rawName.removingPercentEncoding ?? rawName,
+                                         value: rawValue.isEmpty ? "" : (rawValue.removingPercentEncoding ?? rawValue)))
+            }
+            return (path, items)
+        }
+    }
+
+    // MARK: - Write side
+
+    /// The write side of one connection.
+    ///
+    /// Exactly one `NWConnection.send` is in flight per socket and the un-acked
+    /// backlog is capped, so a viewer that stops reading cannot grow the node's
+    /// memory. `sendFrame` waits until the kernel has taken the bytes, which is
+    /// what gives an event stream real back-pressure instead of an unbounded
+    /// queue; a caller that hits the cap gets an error and uses it to drop that
+    /// one client rather than stall the pool.
+    actor WEBWriter {
+        static let backlogLimit = 16 * 1_024 * 1_024
+
+        private let connection: NWConnection
+        private var queued: [Data] = []
+        private var backlog = 0
+        private var writing = false
+        private var headSent = false
+        private var streaming = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        private var closed = false
+
+        init(connection: NWConnection) {
+            self.connection = connection
+        }
+
+        var isClosed: Bool { closed }
+        var isStreaming: Bool { streaming }
+
+        /// A complete response: status line, headers, body.
+        func send(_ response: WEBHTTPResponse) throws {
+            guard !closed, !headSent else { throw WEBConsoleError.writerClosed }
+            headSent = true
+            let chunks = Self.bytes(for: response)
+            try enqueue(chunks, bytes: chunks.reduce(0) { $0 + $1.count })
+        }
+
+        /// Switches the socket to `text/event-stream`.
+        func openStream(headers: [(String, String)], preamble: Data) throws {
+            guard !closed, !headSent else { throw WEBConsoleError.writerClosed }
+            headSent = true
+            streaming = true
+            let provided = Set(headers.map { $0.0.lowercased() })
+            var head = "HTTP/1.1 200 OK\r\n"
+            for (name, value) in headers {
+                head += "\(name): \(value)\r\n"
+            }
+            for (name, value) in LocalWebConsoleServer.securityHeaders where !provided.contains(name.lowercased()) {
+                head += "\(name): \(value)\r\n"
+            }
+            // No `Content-Length`, no `Transfer-Encoding`: a stream that simply
+            // stays open is exactly how Server-Sent Events is specified.
+            head += "Date: \(LocalWebConsoleServer.dateHeader(Date()))\r\n"
+            head += "Server: popopx-node-console/1\r\n"
+            head += "\r\n"
+            let prefix = Data(head.utf8)
+            try enqueue([prefix, preamble], bytes: prefix.count + preamble.count)
+        }
+
+        /// Writes one SSE frame and waits for the kernel to take it.
+        func sendFrame(_ frame: Data) async throws {
+            guard streaming, !closed else { throw WEBConsoleError.writerClosed }
+            try enqueue([frame], bytes: frame.count)
+            if writing || backlog > 0 {
+                await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+                    waiters.append(waiter)
+                }
+            }
+            guard !closed else { throw WEBConsoleError.writerClosed }
+        }
+
+        func close() {
+            guard !closed else { return }
+            closed = true
+            queued.removeAll(keepingCapacity: false)
+            backlog = 0
+            releaseWaiters()
+        }
+
+        // MARK: plumbing
+
+        private func enqueue(_ chunks: [Data], bytes: Int) throws {
+            guard !closed else { throw WEBConsoleError.writerClosed }
+            guard backlog + bytes <= Self.backlogLimit else {
+                throw WEBConsoleError.sendFailed("write backlog over \(Self.backlogLimit) bytes")
+            }
+            queued.append(contentsOf: chunks)
+            backlog += bytes
+            drain()
+        }
+
+        private func drain() {
+            guard !writing, !closed, !queued.isEmpty else { return }
+            let payload = queued.reduce(into: Data()) { $0.append($1) }
+            queued.removeAll(keepingCapacity: true)
+            let bytes = payload.count
+            writing = true
+            connection.send(content: payload, completion: .contentProcessed { [weak self] error in
+                // Only a `String` crosses the isolation boundary: `NWError` is a
+                // struct from an external module and is not annotated `Sendable`.
+                let failure = error.map { $0.localizedDescription }
+                guard let self else { return }
+                Task { await self.settled(failure, bytes: bytes) }
+            })
+        }
+
+        private func settled(_ failure: String?, bytes: Int) {
+            writing = false
+            backlog = max(0, backlog - bytes)
+            if failure != nil {
+                // A failed write is a dead client. Record it, wake anyone waiting
+                // on this socket and let the connection actor do the closing.
+                closed = true
+                queued.removeAll(keepingCapacity: false)
+                backlog = 0
+                releaseWaiters()
+                connection.cancel()
+                return
+            }
+            if queued.isEmpty {
+                releaseWaiters()
+            } else {
+                drain()
+            }
+        }
+
+        private func releaseWaiters() {
+            let pending = waiters
+            waiters.removeAll(keepingCapacity: false)
+            for waiter in pending { waiter.resume() }
+        }
+
+        /// Serialises a response. `Content-Type` comes from the envelope so no
+        /// route can contradict itself about what its body is.
+        static func bytes(for response: WEBHTTPResponse) -> [Data] {
+            var head = "HTTP/1.1 \(response.status) \(response.reason)\r\n"
+            for (name, value) in response.headers where name != "Transfer-Encoding" {
+                head += "\(name): \(value)\r\n"
+            }
+            if let type = response.typeHeader {
+                head += "Content-Type: \(type)\r\n"
+            }
+            head += "Date: \(LocalWebConsoleServer.dateHeader(Date()))\r\n"
+            head += "Server: popopx-node-console/1\r\n"
+            head += "\r\n"
+            var chunks = [Data(head.utf8)]
+            if let body = response.body, !response.suppressBody {
+                chunks.append(body)
+            }
+            return chunks
+        }
+    }
+
+    // MARK: - Connection
+
+    /// One accepted socket: read pump, parser, dispatcher, teardown.
+    actor WEBConnection {
+        static let readLength = 64 * 1_024
+        static let idleNanoseconds = UInt64(75 * 1_000_000_000)
+
+        let identifier = UUID()
+        private let connection: NWConnection
+        private let server: LocalWebConsoleServer
+        private let writer: WEBWriter
+        private var parser = WEBWireParser()
+        private var channels: [WEBSSEChannel] = []
+        private var watchdog: Task<Void, Never>?
+        private var open = true
+        private var streaming = false
+        private var tornDown = false
+
+        init(connection: NWConnection, server: LocalWebConsoleServer) {
+            self.connection = connection
+            self.server = server
+            self.writer = WEBWriter(connection: connection)
+        }
+
+        func begin() {
+            connection.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                Task { await self.observe(state) }
+            }
+            connection.start(queue: LocalWebConsoleServer.workQueue)
+            Task { await self.pump() }
+        }
+
+        /// Asks for this socket's teardown (`stop()` path).
+        func shutdown() async {
+            await teardown()
+        }
+
+        func track(_ channel: WEBSSEChannel) {
+            channels.append(channel)
+        }
+
+        func streamEnded(_ identifier: UUID) {
+            channels.removeAll { $0.identifier == identifier }
+        }
+
+        // MARK: read pump
+
+        private func pump() async {
+            while open, !streaming {
+                let data: Data
+                do {
+                    data = try await receive()
+                } catch {
+                    break
+                }
+                cancelWatchdog()
+                if data.isEmpty { break }
+                for event in parser.feed(data) {
+                    switch event {
+                    case .request(let request):
+                        let keepAlive = request.keepAliveWanted
+                        let outcome = await server.serve(request, on: self, writer: writer)
+                        switch outcome {
+                        case .response(let response):
+                            do {
+                                try await writer.send(response)
+                            } catch {
+                                open = false
+                            }
+                            if !keepAlive { open = false }
+                        case .stream:
+                            // This socket is a one-way event pipe now; the page
+                            // opens separate connections for its fetches.
+                            streaming = true
+                        case .nothing:
+                            open = false
+                        }
+                    case .failure(let error):
+                        let response = await server.failure(error, path: "/", keepAlive: false)
+                        try? await writer.send(response)
+                        open = false
+                    }
+                    if !open || streaming { break }
+                }
+            }
+            await teardown()
+        }
+
+        /// One read. `minimumIncompleteLength: 1` means "whatever is there", so a
+        /// request may arrive over dozens of calls and several requests may arrive
+        /// in one — which is why the parser, not this method, decides what a
+        /// request is.
+        private func receive() async throws -> Data {
+            guard open else { throw WEBConsoleError.connectionClosed }
+            armWatchdog()
+            let socket = connection
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, any Error>) in
+                    socket.receive(minimumIncompleteLength: 1, maximumLength: Self.readLength) { data, _, _, error in
+                        if let error {
+                            continuation.resume(throwing: error)
+                        } else {
+                            continuation.resume(returning: data ?? Data())
+                        }
+                    }
+                }
+            } onCancel: {
+                socket.cancel()
+            }
+        }
+
+        private func armWatchdog() {
+            watchdog?.cancel()
+            let socket = connection
+            watchdog = Task { [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: Self.idleNanoseconds)
+                } catch {
+                    return
+                }
+                guard let self else { return }
+                await self.timedOut(socket)
+            }
+        }
+
+        private func timedOut(_ socket: NWConnection) {
+            // A client that sent half a request and walked away is the cheapest
+            // denial of service there is. The budget is 75 idle seconds.
+            socket.cancel()
+        }
+
+        private func cancelWatchdog() {
+            watchdog?.cancel()
+            watchdog = nil
+        }
+
+        private func observe(_ state: NWConnection.State) async {
+            switch state {
+            case .ready, .setup, .preparing, .waiting:
+                break
+            case .failed, .cancelled:
+                await teardown()
+            @unknown default:
+                break
+            }
+        }
+
+        /// Single teardown path. Cancelling the socket releases the pending read,
+        /// which ends the pump, which lands here; `tornDown` makes the re-entry
+        /// harmless, and every owned subscription is closed exactly once.
+        private func teardown() async {
+            guard !tornDown else { return }
+            tornDown = true
+            open = false
+            cancelWatchdog()
+            let live = channels
+            channels.removeAll(keepingCapacity: false)
+            for channel in live { await channel.close() }
+            await writer.close()
+            connection.cancel()
+            await server.connectionEnded(identifier)
+        }
+    }
+
+    // MARK: - Event stream
+
+    /// Owns exactly one browser `EventSource` subscription.
+    ///
+    /// Teardown is the delicate part, so it is done twice on purpose.
+    /// `ConsoleEventHub` frees a subscriber slot in the `onTermination` handler of
+    /// *its* continuation, which runs when the consumer stops pulling. This type
+    /// guarantees that happens: (1) the forwarder task below is the sole consumer
+    /// of `facade.events()`, and cancelling it ends its `for await` loop and drops
+    /// the hub's iterator, firing `onTermination`; and (2) `close()` also
+    /// `finish`es the relay stream this channel owns, which releases the pump.
+    /// `close()` is idempotent and runs on write failure, on back-pressure, on
+    /// socket cancel, on `stop()` — so a continuation can never outlive the socket
+    /// that created it. The relay is bounded, and a `.dropped` yield is treated as
+    /// a dead viewer rather than an excuse to grow memory.
+    actor WEBSSEChannel {
+        static let pendingLimit = 64
+        static let tickNanoseconds = UInt64(max(1, Int(NodeWire.heartbeatInterval)) * 1_000_000_000)
+        static let pingFrame = Data(": ppx heartbeat\n\n".utf8)
+
+        let identifier = UUID()
+        private let writer: WEBWriter
+        private let server: LocalWebConsoleServer
+        private let connection: WEBConnection
+        private var relay: AsyncStream<ConsoleEvent>.Continuation?
+        private var tasks: [Task<Void, Never>] = []
+        private var closed = false
+
+        init(writer: WEBWriter, server: LocalWebConsoleServer, connection: WEBConnection) {
+            self.writer = writer
+            self.server = server
+            self.connection = connection
+        }
+
+        func begin(facade: any NodeConsoleFacade) {
+            guard !closed else { return }
+            let pipe = AsyncStream<ConsoleEvent>.makeStream(
+                bufferingPolicy: .bufferingNewest(Self.pendingLimit)
+            )
+            relay = pipe.continuation
+            let continuation = pipe.continuation
+            let stream = pipe.stream
+            let writer = self.writer
+            let server = self.server
+            let connection = self.connection
+            let identifier = self.identifier
+
+            // facade stream → bounded relay, so a `finish()` is always in our hands.
+            tasks.append(Task {
+                for await event in facade.events() {
+                    switch continuation.yield(event) {
+                    case .enqueued:
+                        continue
+                    case .dropped:
+                        await server.streamDropped(identifier, reason: "back-pressure")
+                        continuation.finish()
+                        return
+                    case .terminated:
+                        return
+                    @unknown default:
+                        continuation.finish()
+                        return
+                    }
+                }
+                continuation.finish()
+            })
+
+            // relay → socket. One task per viewer: a stalled browser costs this
+            // task and nothing else, and the pool keeps serving fetches.
+            tasks.append(Task {
+                var iterator = stream.makeAsyncIterator()
+                while !Task.isCancelled {
+                    guard let event = await iterator.next() else { break }
+                    do {
+                        try await writer.sendFrame(Self.frame(for: event))
+                    } catch {
+                        break
+                    }
+                }
+                await connection.streamEnded(identifier)
+                await server.streamEnded(identifier)
+            })
+
+            // A comment frame on the heartbeat interval proves the pipe is alive
+            // to the browser, to any proxy in front of it, and to us.
+            tasks.append(Task {
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(nanoseconds: Self.tickNanoseconds)
+                    } catch {
+                        return
+                    }
+                    do {
+                        try await writer.sendFrame(Self.pingFrame)
+                    } catch {
+                        return
+                    }
+                }
+            })
+        }
+
+        func close() {
+            guard !closed else { return }
+            closed = true
+            let live = tasks
+            tasks.removeAll(keepingCapacity: false)
+            for task in live { task.cancel() }
+            relay?.finish()
+            relay = nil
+        }
+
+        /// One `event:`/`data:` frame. The channel name is the SSE event type and
+        /// the whole `ConsoleEvent` is the payload, so the page can subscribe per
+        /// channel and still see level, message and timestamp.
+        static func frame(for event: ConsoleEvent) -> Data {
+            var text = "event: \(event.channel.rawValue)\n"
+            if let data = NodeJSON.encodeLine(event) {
+                // Compact JSON cannot contain a raw newline, but scrubbing keeps a
+                // future encoder from being able to break frame boundaries.
+                let line = String(decoding: data, as: UTF8.self)
+                    .replacingOccurrences(of: "\r", with: " ")
+                    .replacingOccurrences(of: "\n", with: " ")
+                text += "data: \(line)\n"
+            }
+            text += "\n"
+            return Data(text.utf8)
+        }
+    }
+}

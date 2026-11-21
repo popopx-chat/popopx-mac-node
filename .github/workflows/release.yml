@@ -1,0 +1,239 @@
+name: Release · POPOPX Mac Node
+
+# POPOPX Mac Node — 自动编译、单元测试、打包 Universal DMG 并发布 GitHub Release。
+# Build, test, package the universal drag-install DMG and publish a GitHub Release.
+#
+# 触发方式 / Triggers:
+#   1) 推送 v* 标签:  git tag v1.0.0 && git push origin v1.0.0
+#   2) Actions 页面手动运行 (workflow_dispatch)，可临时指定版本号
+#
+# Copyright (C) 2026 POPOPX Chat
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 / Version to stamp into Info.plist (e.g. 1.0.0 or v1.0.0). 留空则使用 0.0.0-dev+commit。'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DMG_NAME: POPOPX-Mac-Node-Universal.dmg
+  SHA_NAME: POPOPX-Mac-Node-Universal.dmg.sha256
+  ARTIFACT_NAME: popopx-mac-node-universal-dmg
+  APP_NAME: POPOPX Mac Node
+
+jobs:
+  build-macos:
+    name: Build & package (macOS 15 / Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout · 检出代码（含标签）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select Xcode · 选择稳定版工具链
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Toolchain report · 工具链自检
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          xcodebuild -version || true
+          xcrun --sdk macosx --show-sdk-version
+          swift --version
+
+      - name: Cache SwiftPM · 缓存 .build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ runner.arch }}-${{ hashFiles('Package.swift', '**/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-${{ runner.arch }}-
+            ${{ runner.os }}-spm-
+
+      - name: Build (debug) · 全量编译校验
+        run: swift build
+
+      - name: Test · 单元测试
+        run: swift test
+
+      - name: Resolve version · 解析发布版本号
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          RAW=""
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            RAW="${DISPATCH_VERSION}"
+            if [ -z "${RAW}" ]; then
+              RAW="0.0.0-dev-${SHORT_SHA:0:7}"
+            fi
+          else
+            RAW="${REF_NAME}"
+          fi
+          RAW="${RAW#refs/tags/}"            # 容错：万一带完整 ref 前缀也照样解析
+          TAG="${RAW}"                       # 保留 v 前缀，用作 release tag 名
+          VERSION="${TAG#v}"                 # 去掉 v 前缀，交给 build_dmg.sh 写入 Info.plist
+          # 字符类里的 '-' 必须置于类首/类尾：写成 [.-+] 会被 ERE 当成非法区间而静默失配
+          if ! printf '%s' "${VERSION}" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}([.+-][0-9A-Za-z.+-]*)?$'; then
+            echo "::error::非法版本号 (invalid version): ${VERSION}"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "发布版本 / release version: ${VERSION} (tag ${TAG})"
+
+      - name: Package universal DMG · 打包拖拽安装镜像
+        run: |
+          set -euo pipefail
+          bash Scripts/build_dmg.sh --output dist --version "${TAG}"
+
+      - name: Collect checksum · 采集 sha256
+        id: meta
+        run: |
+          set -euo pipefail
+          test -f "dist/${DMG_NAME}"
+          test -f "dist/${SHA_NAME}"
+          # 校验文件里只允许出现 '<64hex>  <相对文件名>'，绝不能有绝对路径
+          if ! grep -Eq "^[0-9a-f]{64}  ${DMG_NAME//./\\.}\$" "dist/${SHA_NAME}"; then
+            echo "::error::sha256 文件格式异常 (unexpected checksum format)"
+            exit 1
+          fi
+          if grep -a -q -- "${HOME}" "dist/${SHA_NAME}"; then
+            echo "::error::校验文件包含 runner 主目录绝对路径"
+            exit 1
+          fi
+          SHA256="$(awk '{print $1}' "dist/${SHA_NAME}")"
+          SIZE="$(wc -c < "dist/${DMG_NAME}" | tr -d ' ')"
+          echo "sha256=${SHA256}" >> "${GITHUB_OUTPUT}"
+          echo "size_bytes=${SIZE}" >> "${GITHUB_OUTPUT}"
+          echo "SHA-256: ${SHA256}"
+          echo "Size: ${SIZE} bytes"
+
+      - name: Upload artifact · 上传 Actions 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: |
+            dist/${{ env.DMG_NAME }}
+            dist/${{ env.SHA_NAME }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release · 发布正式 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: POPOPX Mac Node ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-dev') }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          files: |
+            dist/${{ env.DMG_NAME }}
+            dist/${{ env.SHA_NAME }}
+          # 这就是本工作流的双语 release 正文模板。action-gh-release@v2 的正式输入名是
+          # `body`（仓库源码里并无 `body_template` 输入；写错名字会被 Actions 忽略并产生
+          # "Unexpected input(s)" 警告，release 正文会静默丢失）。
+          # 按官方文档，当同时提供 body 与 generate_release_notes 时，此处的正文会被
+          # 预置(prepended)在 GitHub 自动生成的 changelog 之前。
+          body: |
+            ## POPOPX Mac Node ${{ steps.version.outputs.version }}
+
+            **零云端 · 无账号 · 无遥测** — 你 Mac 本机就是 POPOPX iOS 客户端「发现」10 大业务的算力与确定性物理执行中枢。
+            **Zero cloud, no account, no telemetry** — your own Mac becomes the local compute and deterministic execution host for the 10 Discover businesses of the POPOPX iOS client.
+
+            ### 一分钟安装 / Install in one minute
+
+            1. 下载 `POPOPX-Mac-Node-Universal.dmg` 与 `POPOPX-Mac-Node-Universal.dmg.sha256`。
+            2. 校验完整性 / verify the download:
+               ```sh
+               shasum -a 256 -c POPOPX-Mac-Node-Universal.dmg.sha256
+               ```
+            3. 双击挂载，把 **POPOPX Mac Node** 拖进 `Applications`。
+            4. 首次启动若被 Gatekeeper 拦下（本版本为 Ad-hoc 签名，未做 Apple 公证）：
+               ```sh
+               xattr -dr com.apple.quarantine "/Applications/POPOPX Mac Node.app"
+               ```
+            5. 启动后应用静默驻留菜单栏（不占 Dock），浏览器自动打开本地控制台 http://127.0.0.1:18920
+            6. 控制台向导第 1 步点「一键自动部署本地 AI 引擎」，第 2 步出示 `PPXNODE1-…` 二维码。
+            7. iOS 端 → 「发现」→「Mac Node 配对」→ 扫一扫，即刻建立端到端加密隧道。
+
+            ### 校验和 / Checksum
+
+            ```
+            ${{ steps.meta.outputs.sha256 }}  POPOPX-Mac-Node-Universal.dmg
+            ```
+
+            ### 下载 / Downloads
+
+            | 文件 File | 说明 Description | 大小 Size |
+            | --- | --- | --- |
+            | `POPOPX-Mac-Node-Universal.dmg` | Universal 二进制（Apple Silicon + Intel），macOS 14+ | ${{ steps.meta.outputs.size_bytes }} bytes |
+            | `POPOPX-Mac-Node-Universal.dmg.sha256` | `shasum -a 256` 校验文件（纯相对文件名，可直接 `-c`） | plain text |
+
+            ### 本版本包含 / What is in this build
+
+            - 菜单栏常驻宿主（SwiftUI `MenuBarExtra`）+ `NWListener` 本地零配置 Web 控制台（仅回环、动态 Token）
+            - `popopx-chat --chat-server-port 5225` 本地信令守护进程与配对公钥白名单
+            - 10 大本地执行引擎 actor 队列：`shadow_cos`、`zero_trust_warroom`、`zerotrace_studio`、`solo_autopilot`、`edge_compute_mesh`、`morning_tv`、`phantom_sentinel`、`chrono_ark`、`health_sentinel`、`creator_paywall_hub`
+            - Apple Silicon 内存自适应引擎选配阶梯（48GB / 64GB / 96GB / 128GB）
+            - 构建产物已通过零绝对开发机路径审计：发布二进制内不含编译机 `$HOME` 前缀
+
+            ### 已知限制 / Known limitations
+
+            - 发布包为 Ad-hoc 签名，未经 Developer ID 公证，首次启动需手动移除 quarantine 属性。
+            - `< 48GB` 统一内存的机器进入轻量推理模式，重型视频任务建议路由到边缘算力共享节点。
+
+            ---
+
+            本仓库全部源码以 **AGPL-3.0** 开源；中继集群、盲签算力点结算、抗合谋隐形指纹 SDK 与 POPOPX 商标需商业授权，
+            详见仓库根目录的 `LICENSE` 与 [LICENSE-COMMERCIAL.md](./LICENSE-COMMERCIAL.md)。
+
+  verify-checksum:
+    name: Verify checksum · 校验产物完整性
+    needs: build-macos
+    runs-on: macos-15
+    timeout-minutes: 15
+
+    steps:
+      - name: Download artifact · 下载待校验产物
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: verify
+
+      - name: Verify · 校验
+        run: |
+          set -euo pipefail
+          test -f "verify/${DMG_NAME}"
+          test -f "verify/${SHA_NAME}"
+          # sha256 sidecar 里记录的是相对文件名，因此必须在该目录内执行 -c
+          ( cd verify && shasum -a 256 -c "${SHA_NAME}" )
+          echo "SHA-256 校验通过 / checksum verified for ${DMG_NAME}"
+          ls -l verify
