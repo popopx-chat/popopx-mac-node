@@ -314,16 +314,29 @@ Run this only **after** check 6 passed. Verify first, unquarantine second — in
 
 ## Open Core licensing
 
-| | License | What you may do |
-| --- | --- | --- |
-| every source file in this repository (engines, SMP gateway, web console, `Scripts/build_dmg.sh`) | **[AGPL-3.0](LICENSE)** | run, study, modify and redistribute freely — with network-service copyleft that also covers hosting it for others |
-| the POPOPX global private SMP/XFTP relay cluster, the blind-signed compute-point settlement protocol, the anti-collusion invisible-fingerprint algorithm SDK, the POPOPX name and trademarks, and the iOS App Store companion distribution | **commercial closed-source license** | see [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md) for the terms |
+One licence covers the whole chain. This repository, the relay servers and the client are three AGPL-3.0 repositories carrying byte-identical licence text:
 
-In one line: **everything executing on your machine is 100% open and auditable; the cross-machine high-availability infrastructure and the brand are what we sell.**
+```sh
+# with the three repositories checked out side by side
+shasum -a 256 LICENSE ../popopxmq/LICENSE ../popopx-chat/LICENSE
+# 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef  — three times
+```
+
+| Scope | License | What that means |
+| --- | --- | --- |
+| every source file here — the 10 engines, the SMP gateway, the web console, the GOP/frequency-domain watermark (`ENGGopWatermark`), the compute-point ledger, `Scripts/build_dmg.sh` | **[AGPL-3.0](LICENSE)** | run, study, modify and redistribute freely — with the network-service copyleft of §13, which also binds anyone hosting a modified node for other people |
+| the SMP/XFTP **relay server** source and the BBS+ (BLS12-381) blind-signature credential code | **AGPL-3.0-only** | [popopxmq](https://github.com/popopx-chat/popopxmq) · its [NOTICE](https://github.com/popopx-chat/popopxmq/blob/master/NOTICE) states: “No further restrictions are imposed on recipients of this work (AGPL-3.0 sections 10 and 12)”. Self-host the fleet, and self-host the credential issuer, if you want |
+| the companion iOS client source | **AGPL-3.0-only** | [popopx-chat](https://github.com/popopx-chat/popopx-chat) |
+| the artwork this fork drew | AGPL-3.0-only, **or CC0-1.0 at your option** | [ASSETS_LICENSE-POPOPX.md](https://github.com/popopx-chat/popopx-chat/blob/master/ASSETS_LICENSE-POPOPX.md) — files byte-identical to upstream’s stay SimpleX Chat Ltd’s, and we cannot release them |
+| the officially hosted relay network and its bandwidth, the official release/update channel, enterprise support with an SLA | **service terms — not code** | [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md) |
+| `POPOPX`, `POPOPX Chat`, the wordmark, the logo and the icons derived from it, `popopx.chat` | **not licensed at all** — a trade mark sits outside any copyright grant | [TRADEMARK-POPOPX.md](https://github.com/popopx-chat/popopx-chat/blob/master/TRADEMARK-POPOPX.md): fork it, ship it, keep our drawings — then rename and re-logo |
+
+In one line: **every byte of code on this chain is AGPL-3.0 and self-hostable; the commercial track buys operation and endorsement, never source.**
 
 - Full AGPL-3.0 text: [`LICENSE`](LICENSE)
-- Bilingual commercial terms, the AGPL §13 network-copyleft ("anti-free-riding") explanation, license tiers and trademark policy: [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md)
-- **Trademark**: the AGPL grant **does not** include rights to the POPOPX name, logo or domains. Fork the code, change things, ship it: fine. Call it POPOPX: not fine.
+- The bilingual boundary, the §13 explainer, the support tiers — and the 2026-11-21 correction that stopped describing the relay servers, the blind signature and the watermarking as closed products: [`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md)
+- **No hidden core.** The credential algorithm is in popopxmq (`src/Popopx/Messaging/Crypto/BBS.hs`, `Crypto/Entitlement.hs`, specified in `protocol/crypto-registry.md`); the watermark and its extraction are here (`ENGGopWatermark`, `TenBusinessEngines.swift:987-1198`). Nothing in the paid scope is a code gate — the paid scope is data centres, on-call, channels and paperwork.
+- **The marks are unregistered**, and the policy conditions nothing about the code: “no sentence here adds a condition on running, studying, modifying or redistributing the source code.” Say “a fork of POPOPX Mac Node”; do not name your build POPOPX.
 
 ---
 
@@ -380,6 +393,6 @@ git tag v1.0.0 && git push origin v1.0.0   # triggers .github/workflows/release.
 
 **Star counts move; red lines don't.** This page deliberately ships no invented download counts, no fake stars, and no "measured in the lab" performance tables — every figure above is labelled an estimate.
 
-Copyright © 2026 POPOPX Chat · Code: [AGPL-3.0](LICENSE) · Brand & relay: [commercial](LICENSE-COMMERCIAL.md)
+Copyright © 2026 POPOPX Chat · Code across all three repositories: [AGPL-3.0](LICENSE) · Hosted relays, official channels and brand: [commercial terms](LICENSE-COMMERCIAL.md)
 
 </div>

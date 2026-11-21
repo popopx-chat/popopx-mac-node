@@ -314,16 +314,29 @@ xattr -dr com.apple.quarantine "/Applications/POPOPX Mac Node.app"
 
 ## Open Core 授权
 
-| | 授权 | 你可以做什么 |
-| --- | --- | --- |
-| 本仓库全部源码（引擎、SMP 网关、Web 控制台、`Scripts/build_dmg.sh`） | **[AGPL-3.0](LICENSE)** | 自由运行、研究、修改、再分发 —— 含网络服务场景下的同源开源义务 |
-| POPOPX 全球私有 SMP/XFTP 中继集群、盲签算力点结算协议、抗合谋隐形指纹算法 SDK、POPOPX 名称与商标、iOS App Store 伴生分发 | **商业闭源授权** | 见 [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md) |
+整条链只有一份许可。本仓库、中继服务端、iOS 客户端是**三个 AGPL-3.0 仓库，带着逐字节相同的许可原文**：
 
-一句话：**你机器上跑的东西 100% 开源可审计；跨机器的高可用基建与品牌，是我们卖的东西。**
+```sh
+# 三个仓库并排 checkout 时执行
+shasum -a 256 LICENSE ../popopxmq/LICENSE ../popopx-chat/LICENSE
+# 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef —— 三个文件，同一个摘要
+```
+
+| 范围 | 授权 | 这意味着什么 |
+| --- | --- | --- |
+| 本仓库全部源码 —— 10 大引擎、SMP 网关、Web 控制台、GOP/频域隐形水印（`ENGGopWatermark`）、算力点记账、`Scripts/build_dmg.sh` | **[AGPL-3.0](LICENSE)** | 自由运行、研究、修改、再分发；§13 的网络服务同源义务一并生效 —— 把改动过的节点提供给别人用，就要提供你那份对应源码 |
+| SMP/XFTP **中继服务端源码**，以及 BBS+（BLS12-381）盲签凭证代码 | **AGPL-3.0-only** | [popopxmq](https://github.com/popopx-chat/popopxmq)，其 [NOTICE](https://github.com/popopx-chat/popopxmq/blob/master/NOTICE) 原文：“No further restrictions are imposed on recipients of this work (AGPL-3.0 sections 10 and 12)”。中继网络与凭证签发方，你都可以自建 |
+| 伴生 iOS 客户端源码 | **AGPL-3.0-only** | [popopx-chat](https://github.com/popopx-chat/popopx-chat) |
+| 本 fork 自己绘制的图形资产 | AGPL-3.0-only，**或由你选择 CC0-1.0** | [ASSETS_LICENSE-POPOPX.md](https://github.com/popopx-chat/popopx-chat/blob/master/ASSETS_LICENSE-POPOPX.md) —— 与上游逐字节相同的文件仍属 SimpleX Chat Ltd，我们无权放行 |
+| 官方托管的中继网络与带宽、官方发行与更新通道、带 SLA 的企业支持 | **服务条款 —— 不是代码** | [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md) |
+| `POPOPX`、`POPOPX Chat`、wordmark、logo 及其派生图标、`popopx.chat` | **完全不授权** —— 商标在著作权许可之外 | [TRADEMARK-POPOPX.md](https://github.com/popopx-chat/popopx-chat/blob/master/TRADEMARK-POPOPX.md)：可以 fork、可以分发、可以留着我们画的图 —— 但必须改名换标 |
+
+一句话：**这条链上的每一字节代码都开源、都可自建；商业那一轨买的是运营与背书，从来不是源码。**
 
 - 完整 AGPL-3.0 正文：[`LICENSE`](LICENSE)
-- 商业条款、AGPL §13“反白嫖传染条款”说明、授权档位与商标政策：[`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md)
-- **商标**：AGPL 授权**不包含** POPOPX 名称、标志与域名的使用权。拿走源码改一改自己上线，可以；叫自己 POPOPX，不行。
+- 双语边界、§13 同源义务说明、支持档位，以及 2026-11-21 那次纠正 —— 不再把中继服务端、盲签算法与水印实现说成闭源产品：[`LICENSE-COMMERCIAL.md`](LICENSE-COMMERCIAL.md)
+- **没有隐藏核心。** 凭证算法在 popopxmq（`src/Popopx/Messaging/Crypto/BBS.hs`、`Crypto/Entitlement.hs`，参数与套件见 `protocol/crypto-registry.md`）；水印与逆向解出在本仓库（`ENGGopWatermark`，`TenBusinessEngines.swift:987-1198`）。付费范围里没有任何一道源码门槛 —— 那一轨卖的是机房、值班、发行通道与合规文件。
+- **这些标志尚未注册**，而且那份政策对代码不作任何规定：“no sentence here adds a condition on running, studying, modifying or redistributing the source code.” 你可以说“POPOPX Mac Node 的一个 fork”，不可以把你的构建物命名为 POPOPX。
 
 ---
 
@@ -380,6 +393,6 @@ git tag v1.0.0 && git push origin v1.0.0   # 触发 .github/workflows/release.ym
 
 **Star history 会变，红线不会。** 本页刻意不放伪造的下载量、星标数或“实验室实测性能表” —— 所有性能数字都标了「估算值」。
 
-Copyright © 2026 POPOPX Chat · 代码：[AGPL-3.0](LICENSE) · 品牌与中继：[商业授权](LICENSE-COMMERCIAL.md)
+Copyright © 2026 POPOPX Chat · 三个仓库的代码全部：[AGPL-3.0](LICENSE) · 托管中继、官方发行通道与品牌：[商业条款](LICENSE-COMMERCIAL.md)
 
 </div>

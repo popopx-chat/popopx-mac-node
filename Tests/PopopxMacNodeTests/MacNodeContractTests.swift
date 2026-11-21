@@ -12,6 +12,7 @@
 //  rather than exact values, and every sandbox they create is removed again.
 //
 
+import CryptoKit
 import Foundation
 import XCTest
 @testable import PopopxMacNode
@@ -1141,6 +1142,77 @@ final class MacNodeContractTests: XCTestCase {
         XCTAssertGreaterThan(chinese.hanziCount, 1_000, "README.zh-CN.md is not Chinese")
         XCTAssertTrue(english.text.contains("[简体中文](./README.zh-CN.md)"), "no way from English to Chinese")
         XCTAssertTrue(chinese.text.contains("[English](./README.md)"), "no way from Chinese to English")
+    }
+
+    /// The licence boundary is a claim about three repositories, and two of them are not in this
+    /// checkout — so what can be proven here is the shape of the claim: no document may sell the
+    /// relay servers, the blind signature or the watermark as closed code outside the section that
+    /// records that wording as retracted, both sibling repositories must be named by URL, and the
+    /// digest printed on the page must be the digest of the `LICENSE` file it describes.
+    func testTheLicenseBoundarySellsServicesNotCode() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let names = ["LICENSE-COMMERCIAL.md", "README.md", "README.zh-CN.md"]
+        var texts: [String: String] = [:]
+        for name in names {
+            texts[name] = try String(contentsOf: root.appendingPathComponent(name), encoding: .utf8)
+        }
+
+        let closedWords = ["闭源", "closed-source", "closed source"]
+        let codeNouns = ["中继", "relay", "盲签", "blind", "指纹", "fingerprint", "水印", "watermark", "结算", "settlement"]
+        // The commercial terms quote the retracted wording on purpose, inside its own section.
+        let retractionHeadings = ["本文件修正了什么", "What this document corrected"]
+        let retractionTells = [
+            "纠正", "误称", "旧表述", "为什么是错的", "correction", "corrected", "Former wording", "Why it was wrong"
+        ]
+        for name in names {
+            let text = try XCTUnwrap(texts[name])
+            var insideRetraction = false
+            for (offset, line) in text.components(separatedBy: "\n").enumerated() {
+                if line.hasPrefix("## ") {
+                    insideRetraction = retractionHeadings.contains { line.contains($0) }
+                }
+                let lowered = line.lowercased()
+                guard closedWords.contains(where: { lowered.contains($0) }) else { continue }
+                guard codeNouns.contains(where: { lowered.contains($0) }) else { continue }
+                XCTAssert(
+                    insideRetraction || retractionTells.contains { line.contains($0) },
+                    "\(name):\(offset + 1) offers source as a closed product: \(line)"
+                )
+            }
+            XCTAssertTrue(text.contains("popopxmq"), "\(name) never names the relay repository")
+            XCTAssertTrue(
+                text.contains("https://github.com/popopx-chat/popopx-chat"),
+                "\(name) never links the client repository"
+            )
+            XCTAssertTrue(text.contains("TRADEMARK-POPOPX.md"), "\(name) never points at the trademark policy")
+            XCTAssertFalse(text.contains("Brand & relay:"), "\(name) files the relay source under the brand column")
+            XCTAssertFalse(text.contains("品牌与中继"), "\(name) files the relay source under the brand column")
+        }
+
+        let commercial = try XCTUnwrap(texts["LICENSE-COMMERCIAL.md"])
+        XCTAssertTrue(
+            commercial.contains("not registered") && commercial.contains("尚未注册"),
+            "the policy states the marks are unregistered; both language halves must say so, not claim a registration"
+        )
+        XCTAssertTrue(
+            commercial.contains("第 13 条") && commercial.contains("section 13"),
+            "the AGPL §13 explainer has to survive every rewrite of this file"
+        )
+
+        let license = try Data(contentsOf: root.appendingPathComponent("LICENSE"))
+        let digest = SHA256.hash(data: license).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(
+            digest, "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+            "LICENSE is no longer the AGPL-3.0 text these documents describe"
+        )
+        XCTAssertEqual(license.filter { $0 == 0x0A }.count, 661, "the documents quote a 661-line licence")
+        for name in names {
+            XCTAssertTrue(
+                try XCTUnwrap(texts[name]).contains(digest),
+                "\(name) prints a licence digest that is not this file's"
+            )
+        }
     }
 
     func testContainmentRejectsTraversalAndSiblings() {
