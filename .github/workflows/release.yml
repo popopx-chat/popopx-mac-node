@@ -214,8 +214,8 @@ jobs:
 
             ---
 
-            本仓库全部源码以 **AGPL-3.0** 开源；中继集群、盲签算力点结算、抗合谋隐形指纹 SDK 与 POPOPX 商标需商业授权，
-            详见仓库根目录的 `LICENSE` 与 [LICENSE-COMMERCIAL.md](./LICENSE-COMMERCIAL.md)。
+            本仓库全部源码以 **GNU AGPL-3.0-only** 开源（FSF 原文未改动），覆盖整个栈：节点本体、SMP/XFTP 中继服务端、盲签算力点结算与抗合谋隐形指纹的算法源码全部在许可证内，可自行部署，无需商业授权。
+            商业条款只保留三项：官方托管中继网络与带宽、POPOPX 品牌与商标资产、官方发行通道与企业 SLA 支持；详见仓库根目录的 `LICENSE` 与 [LICENSE-COMMERCIAL.md](https://github.com/popopx-chat/popopx-mac-node/blob/main/LICENSE-COMMERCIAL.md)。
 
   verify-checksum:
     name: Verify checksum · 校验产物完整性
