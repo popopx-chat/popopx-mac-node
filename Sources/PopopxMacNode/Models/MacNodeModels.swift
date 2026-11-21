@@ -66,9 +66,10 @@ public enum NodeWire {
     /// Flag that turns the daemon into a WebSocket server (`short 'p'`).
     public static let chatServerPortFlag = "--chat-server-port"
 
-    /// Our fork's executable is `popopx-chat`; `simplex-chat` is probed as a
-    /// fallback for users who installed upstream.
-    public static let chatDaemonCandidates: [String] = ["popopx-chat", "simplex-chat"]
+    /// The only daemon this node drives is our fork's `popopx-chat`. An upstream
+    /// build is never probed: it speaks a different wire, so resolving it would
+    /// turn a visible "missing dependency" into an unexplainable handshake failure.
+    public static let chatDaemonCandidates: [String] = ["popopx-chat"]
 
     /// Connection-request scheme actually emitted by the fork
     /// (`ServiceScheme.hs:23` — `SSPopopx -> "popopx:"`).

@@ -143,7 +143,7 @@ The rule at the top of the diagram is the whole point of this project: **there i
 
 | Port | Bind address | Purpose |
 | --- | --- | --- |
-| `5225` | `127.0.0.1` | local `popopx-chat` (upstream `simplex-chat`) WebSocket daemon, `--chat-server-port 5225` |
+| `5225` | `127.0.0.1` | local `popopx-chat` WebSocket daemon, `--chat-server-port 5225` |
 | `11434` | `127.0.0.1` | local Ollama, if installed |
 | `18920` | `127.0.0.1` | zero-config web console, dynamic token |
 
@@ -276,7 +276,7 @@ Expect: every line starts with `127.0.0.1`; no external listener and no ESTABLIS
 
 ```sh
 lsof -nP -p "$(pgrep -x PopopxMacNodeApp)" -i
-lsof -nP -p "$(pgrep -x popopx-chat || pgrep -x simplex-chat)" -i
+lsof -nP -p "$(pgrep -x popopx-chat)" -i
 ```
 
 Expect: under those PIDs you should only see `127.0.0.1` listeners and loopback ESTABLISHED pairs (5225 / 11434 / 18920). Any non-loopback address should make you suspicious — this is your own packet-level evidence, not our claim.

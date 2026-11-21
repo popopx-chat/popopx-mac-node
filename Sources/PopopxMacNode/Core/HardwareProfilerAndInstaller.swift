@@ -304,11 +304,11 @@ public actor HardwareProfiler {
             ))
         }
 
-        // The chat daemon is reported once, under whichever name actually resolves.
-        // `popopx-chat` is the executable of our own fork (popopx-chat.cabal:607);
-        // `simplex-chat` is kept as a fallback because upstream Homebrew formula
-        // still installs that name, and users who built it themselves must not see
-        // a false "missing dependency".
+        // The chat daemon is reported once, under the name that resolves.
+        // `popopx-chat` is the executable of our own fork (popopx-chat.cabal:607)
+        // and the only candidate probed: an upstream install would answer a version
+        // line here and then fail every command later, which is worse than an
+        // honest "missing dependency".
         let configured = config.simplexChatBinaryPath
         let resolved = Self.resolveChatBinary(configured: configured)
         var chatVersion: String?

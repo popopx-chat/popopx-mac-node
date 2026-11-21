@@ -19,7 +19,7 @@
 //  These come from the `popopx-chat` / `popopxmq` sources, not from upstream
 //  SimpleX folklore:
 //
-//  * The binary is `popopx-chat` (older builds `simplex-chat`) started with
+//  * The binary is `popopx-chat` started with
 //    `--chat-server-port <N>`. There is **no default port** — without the flag
 //    nothing binds, so we always pass `NodeWire.simplexControlPort`.
 //  * We never pass `-e/--execute` (it runs one command and exits) and never pass
@@ -300,8 +300,9 @@ enum SBChatWire {
     /// literal but means the web console, so it is deliberately not reused here.
     static let loopbackHost = "127.0.0.1"
 
-    /// Probed in order; the fork ships `popopx-chat`, older builds `simplex-chat`.
-    static let binaryNames = ["popopx-chat", "simplex-chat"]
+    /// The fork's own executable and nothing else, so a resident daemon is always
+    /// one this node can speak to.
+    static let binaryNames = ["popopx-chat"]
 
     /// A link becomes a command-line argument, so it must stay short and free of
     /// anything a shell or a Haskell argument parser could mis-handle.

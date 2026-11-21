@@ -143,7 +143,7 @@ bash Scripts/build_dmg.sh --skip-build --output dist --version 1.0.0
 
 | 端口 | 绑定地址 | 用途 |
 | --- | --- | --- |
-| `5225` | `127.0.0.1` | 本地 `popopx-chat`（上游 `simplex-chat`）WebSocket 守护进程，`--chat-server-port 5225` |
+| `5225` | `127.0.0.1` | 本地 `popopx-chat` WebSocket 守护进程，`--chat-server-port 5225` |
 | `11434` | `127.0.0.1` | 本地 Ollama（若已安装） |
 | `18920` | `127.0.0.1` | 零配置网页控制台，动态 Token |
 
@@ -261,7 +261,7 @@ sudo netstat -anp tcp | grep 18920
 
 ```sh
 lsof -nP -p "$(pgrep -x PopopxMacNodeApp)" -i
-lsof -nP -p "$(pgrep -x popopx-chat || pgrep -x simplex-chat)" -i
+lsof -nP -p "$(pgrep -x popopx-chat)" -i
 ```
 
 期望：这些进程名下只应出现 `127.0.0.1` 的 LISTEN 与本机回环 ESTABLISHED（5225 / 11434 / 18920）。出现任何非回环地址都应当让你警觉 —— 那是你自己抓包验证的证据，不是我们的声明。

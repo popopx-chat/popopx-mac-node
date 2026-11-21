@@ -1102,7 +1102,7 @@ var I18N = {
   daemonStarting: { zh: "守护进程启动中", en: "Daemon starting" },
   daemonRunning: { zh: "守护进程运行中", en: "Daemon running" },
   daemonDegraded: { zh: "守护进程降级", en: "Daemon degraded" },
-  daemonMissing: { zh: "缺少 simplex-chat 可执行文件", en: "simplex-chat binary missing" },
+  daemonMissing: { zh: "缺少 popopx-chat 可执行文件", en: "popopx-chat binary missing" },
   accepted: { zh: "已接受指令", en: "Accepted" },
   rejected: { zh: "已拒绝指令", en: "Rejected" },
   delivered: { zh: "已回传结果", en: "Delivered" },

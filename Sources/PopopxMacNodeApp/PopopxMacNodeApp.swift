@@ -700,8 +700,8 @@ struct MenuBarContent: View {
         case .degraded: return label("SMP 降级 · \(bridge.lastError ?? "")",
                                      "SMP degraded · \(bridge.lastError ?? "")")
         case .starting: return label("SMP 启动中…", "SMP starting…")
-        case .missingBinary: return label("未安装 popopx-chat / simplex-chat",
-                                          "popopx-chat / simplex-chat not installed")
+        case .missingBinary: return label("未安装 popopx-chat",
+                                          "popopx-chat not installed")
         case .stopped: return label("SMP 已停止", "SMP stopped")
         }
     }
