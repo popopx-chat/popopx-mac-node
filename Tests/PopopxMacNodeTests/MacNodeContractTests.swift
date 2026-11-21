@@ -1097,6 +1097,52 @@ final class MacNodeContractTests: XCTestCase {
         XCTAssertEqual(AppPaths.bundleName, "PopopxMacNode")
     }
 
+    /// `README.md` and `README.zh-CN.md` are one document in two languages, so the
+    /// split is only safe while they stay in lockstep. Structure, links, the
+    /// architecture diagram and the engine matrix are compared against each other
+    /// rather than against literals, and each file is checked to stay in its own
+    /// script. Adding an engine to `EngineKind` without documenting it in both
+    /// languages fails here, as does translating one section and forgetting the other.
+    func testTheTwoReadmeLanguagesStayInLockstep() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()        // Tests/PopopxMacNodeTests
+            .deletingLastPathComponent()        // Tests
+            .deletingLastPathComponent()        // repository root
+        let english = try ReadmeProbe(url: root.appendingPathComponent("README.md"))
+        let chinese = try ReadmeProbe(url: root.appendingPathComponent("README.zh-CN.md"))
+
+        XCTAssertEqual(english.levelTwoCount, 10, "the document has ten top-level sections")
+        XCTAssertEqual(english.levelTwoCount, chinese.levelTwoCount, "one README gained or lost a section")
+        XCTAssertEqual(english.levelThreeCount, 9, "one build guide plus eight self-audit checks")
+        XCTAssertEqual(english.levelThreeCount, chinese.levelThreeCount, "the audit guide no longer mirrors")
+        XCTAssertEqual(english.fenceCount, chinese.fenceCount, "the two documents no longer show the same commands")
+        XCTAssertEqual(english.tableRowCount, chinese.tableRowCount, "the tables must keep the same rows")
+        XCTAssertEqual(english.dividerCount, chinese.dividerCount)
+        XCTAssertEqual(english.badgeCount, chinese.badgeCount, "the badge row must be the same in both languages")
+        XCTAssertEqual(english.linkTargets, chinese.linkTargets, "one language links where the other does not")
+        XCTAssertGreaterThan(english.diagram.count, 1_500, "the architecture diagram is missing from README.md")
+        XCTAssertEqual(english.diagram, chinese.diagram, "the architecture diagram must stay byte-identical")
+        XCTAssertEqual(english.throughputRows, 5, "the memory ladder has exactly five bands")
+        XCTAssertEqual(english.throughputRows, chinese.throughputRows, "the ladder was edited in one language only")
+
+        for kind in EngineKind.displayOrder {
+            XCTAssertTrue(english.text.contains("`\(kind.rawValue)`"), "README.md does not document \(kind.rawValue)")
+            XCTAssertTrue(chinese.text.contains("`\(kind.rawValue)`"), "README.zh-CN.md does not document \(kind.rawValue)")
+            XCTAssertTrue(english.text.contains(kind.displayNameEn), "README.md is missing the name of \(kind.rawValue)")
+            XCTAssertTrue(chinese.text.contains(kind.displayNameZh), "README.zh-CN.md is missing the name of \(kind.rawValue)")
+        }
+
+        // Each document stays in its own language. The only Han in the English file is
+        // the name of the other language, because a switcher has to spell it out.
+        XCTAssertTrue(
+            english.hanziLines.allSatisfy { $0.contains("./README.zh-CN.md") },
+            "README.md carries prose the Chinese document owns: \(english.hanziLines)"
+        )
+        XCTAssertGreaterThan(chinese.hanziCount, 1_000, "README.zh-CN.md is not Chinese")
+        XCTAssertTrue(english.text.contains("[简体中文](./README.zh-CN.md)"), "no way from English to Chinese")
+        XCTAssertTrue(chinese.text.contains("[English](./README.md)"), "no way from Chinese to English")
+    }
+
     func testContainmentRejectsTraversalAndSiblings() {
         let root = AppPaths.root
         XCTAssertTrue(AppPaths.isContained(root))
@@ -1292,5 +1338,54 @@ final class MacNodeContractTests: XCTestCase {
         return calendar.date(from: DateComponents(
             year: year, month: month, day: day, hour: parts[0], minute: parts[1], second: 0
         ))
+    }
+}
+
+/// A structural read of one Markdown document: the counts a translated twin has to
+/// match, plus the script census that proves each file stayed in its own language.
+private struct ReadmeProbe {
+    let text: String
+    let lines: [String]
+
+    init(url: URL) throws {
+        text = try String(contentsOf: url, encoding: .utf8)
+        lines = text.components(separatedBy: "\n")
+    }
+
+    var levelTwoCount: Int { lines.filter { $0.hasPrefix("## ") }.count }
+    var levelThreeCount: Int { lines.filter { $0.hasPrefix("### ") }.count }
+    var fenceCount: Int { stripped.filter { $0.hasPrefix("```") }.count / 2 }
+    var tableRowCount: Int { stripped.filter { $0.hasPrefix("|") }.count }
+    var dividerCount: Int { stripped.filter { $0 == "---" }.count }
+    var badgeCount: Int { text.components(separatedBy: "img.shields.io").count - 1 }
+    var throughputRows: Int { lines.filter { $0.contains("tok/s") }.count }
+    var hanziLines: [String] { lines.filter { $0.unicodeScalars.contains(where: Self.isHanzi) } }
+    var hanziCount: Int { text.unicodeScalars.filter(Self.isHanzi).count }
+
+    /// The fenced `text` block holding the architecture diagram, verbatim.
+    var diagram: String {
+        guard let opened = text.range(of: "```text\n"),
+              let closed = text.range(of: "\n```", range: opened.upperBound..<text.endIndex)
+        else { return "" }
+        return String(text[opened.upperBound..<closed.lowerBound])
+    }
+
+    var linkTargets: Set<String> {
+        guard let regex = try? NSRegularExpression(pattern: "\\]\\(([^)\\s]+)") else { return [] }
+        let scan = NSRange(text.startIndex..<text.endIndex, in: text)
+        var found: Set<String> = []
+        for match in regex.matches(in: text, range: scan) {
+            guard let range = Range(match.range(at: 1), in: text) else { continue }
+            found.insert(String(text[range]))
+        }
+        return found
+    }
+
+    private var stripped: [String] { lines.map { $0.trimmingCharacters(in: .whitespaces) } }
+
+    /// The CJK Unified Ideographs block only: box-drawing characters, arrows and the
+    /// full-width punctuation of a Chinese document must not count as Han.
+    private static func isHanzi(_ scalar: Unicode.Scalar) -> Bool {
+        (0x4E00...0x9FFF).contains(scalar.value)
     }
 }
