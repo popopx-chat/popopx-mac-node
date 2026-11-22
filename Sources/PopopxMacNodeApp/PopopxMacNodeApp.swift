@@ -33,7 +33,13 @@ import Darwin
 /// into the same binary and reached through these flags.
 @main
 enum PopopxMacNodeMain {
-    static func main() async {
+    /// Synchronous, and it has to stay that way. `App.main()` blocks forever, so an
+    /// async entry point would park the main actor inside a job that never
+    /// finishes: the menu bar still paints, but every `Task` its buttons start —
+    /// rescan, pairing QR, engine toggles, Quit — is queued behind that job and
+    /// never runs. The node therefore bootstraps from inside the run loop instead
+    /// of before it.
+    static func main() {
         let arguments = CommandLine.arguments
 
         if arguments.contains("--version") || arguments.contains("-v") {
@@ -54,16 +60,18 @@ enum PopopxMacNodeMain {
 
         let headless = arguments.contains("--headless")
         let model = NodeModel.current(headless: headless)
-        await model.bootstrap()
 
         if headless {
-            await model.runHeadless()
-            return
+            Task {
+                await model.bootstrap()
+                await model.runHeadless()
+            }
+            // `dispatchMain()` keeps the main queue draining, which is what the
+            // main-actor work above and the SIGINT/SIGTERM sources both need.
+            dispatchMain()
         }
 
-        await MainActor.run {
-            PopopxMacNodeApp.main()
-        }
+        PopopxMacNodeApp.main()
     }
 
     private static let usage = """
@@ -657,6 +665,8 @@ final class NodeAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        guard let model else { return }
+        Task { await model.bootstrap() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

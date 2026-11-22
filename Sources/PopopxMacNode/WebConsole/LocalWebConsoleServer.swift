@@ -3273,8 +3273,11 @@ public actor LocalWebConsoleServer {
         }
         parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: port)
 
-        let listener = try NWListener(using: parameters, on: port)
-        listener.newConnectionLimit = Self.maxConnections
+        // The port rides in `requiredLocalEndpoint` alone. Handing the same port to
+        // `NWListener(using:on:)` as well is rejected with POSIX `EINVAL` (22), and
+        // the pinned endpoint is the one half of the loopback guarantee this type
+        // actually enforces, so the argument goes rather than the pin.
+        let listener = try NWListener(using: parameters)
         listener.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             Task { await self.noteListener(state) }
@@ -3433,6 +3436,16 @@ public actor LocalWebConsoleServer {
             connection.cancel()
             return
         }
+        // The cap is counted here, not by `NWListener.newConnectionLimit`: that
+        // property stops handing out sockets once it has seen `maxConnections`
+        // connections over the life of the listener rather than at one time, so a
+        // console configured for 64 went permanently deaf at its 64th socket — the
+        // browser's own reloads included. `connections` holds the handlers that are
+        // live right now, and `connectionEnded` is what empties it.
+        guard connections.count < Self.maxConnections else {
+            connection.cancel()
+            return
+        }
         let handler = WEBConnection(connection: connection, server: self)
         connections[handler.identifier] = handler
         await handler.begin()
@@ -3540,13 +3553,15 @@ public actor LocalWebConsoleServer {
                 // hands it out (to the owner's own browser), the token dies with
                 // the process, `no-referrer` stops it travelling onward and the
                 // page fetches nothing remote. See `url`.
+                let banner = Data("redirecting to the tokenised console".utf8)
                 return WEBHTTPResponse(status: 302,
                                        reason: "Found",
                                        typeHeader: "text/plain; charset=utf-8",
                                        headers: Self.securityHeaders
                                            + [("Cache-Control", "no-store")]
+                                           + [("Content-Length", String(banner.count))]
                                            + [("Location", "\(ConsoleRoute.index)?\(NodeWire.consoleTokenQuery)=\(token)")],
-                                       body: Data("redirecting to the tokenised console".utf8))
+                                       body: banner)
             }
             guard authorized(request) else {
                 throw WEBConsoleError.unauthorized
@@ -4156,7 +4171,6 @@ public actor LocalWebConsoleServer {
         private var queued: [Data] = []
         private var backlog = 0
         private var writing = false
-        private var headSent = false
         private var streaming = false
         private var waiters: [CheckedContinuation<Void, Never>] = []
         private var closed = false
@@ -4169,17 +4183,20 @@ public actor LocalWebConsoleServer {
         var isStreaming: Bool { streaming }
 
         /// A complete response: status line, headers, body.
+        ///
+        /// A keep-alive socket carries several of these, one per request, and the
+        /// actor queues a whole response in one step, so two replies can never
+        /// interleave head over body. Only an event stream ends the conversation:
+        /// once the socket is `text/event-stream` no further response head is legal.
         func send(_ response: WEBHTTPResponse) throws {
-            guard !closed, !headSent else { throw WEBConsoleError.writerClosed }
-            headSent = true
+            guard !closed, !streaming else { throw WEBConsoleError.writerClosed }
             let chunks = Self.bytes(for: response)
             try enqueue(chunks, bytes: chunks.reduce(0) { $0 + $1.count })
         }
 
         /// Switches the socket to `text/event-stream`.
         func openStream(headers: [(String, String)], preamble: Data) throws {
-            guard !closed, !headSent else { throw WEBConsoleError.writerClosed }
-            headSent = true
+            guard !closed, !streaming else { throw WEBConsoleError.writerClosed }
             streaming = true
             let provided = Set(headers.map { $0.0.lowercased() })
             var head = "HTTP/1.1 200 OK\r\n"
@@ -4216,6 +4233,24 @@ public actor LocalWebConsoleServer {
             queued.removeAll(keepingCapacity: false)
             backlog = 0
             releaseWaiters()
+        }
+
+        /// Drains what is already queued, then closes.
+        ///
+        /// The socket is cancelled by the connection actor right after this
+        /// returns, and `NWConnection.cancel` discards bytes the kernel has not
+        /// taken yet. Without this handoff a `Connection: close` response can be
+        /// replaced by a reset, which is how a client ends up with a clean
+        /// end-of-stream and no reply at all.
+        func finish() async {
+            guard !closed else { return }
+            while writing || !queued.isEmpty {
+                await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+                    waiters.append(waiter)
+                }
+                if closed { return }
+            }
+            close()
         }
 
         // MARK: plumbing
@@ -4451,7 +4486,7 @@ public actor LocalWebConsoleServer {
             let live = channels
             channels.removeAll(keepingCapacity: false)
             for channel in live { await channel.close() }
-            await writer.close()
+            await writer.finish()
             connection.cancel()
             await server.connectionEnded(identifier)
         }
