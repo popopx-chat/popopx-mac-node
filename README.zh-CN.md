@@ -86,7 +86,7 @@ bash Scripts/build_dmg.sh   # 一键产出可分发的 Universal DMG + sha256
 #          dist/POPOPX-Mac-Node-Universal.dmg.sha256
 
 # 只重打包、不重编译：
-bash Scripts/build_dmg.sh --skip-build --output dist --version 1.0.1 --build 2
+bash Scripts/build_dmg.sh --skip-build --output dist --version 1.0.2 --build 3
 ```
 
 `Scripts/build_dmg.sh` 不依赖任何 Xcode 工程文件：它自己组装 `.app` Bundle、生成 `Info.plist`、用刚编译出来的二进制渲染品牌图标、Ad-hoc 签名、`hdiutil` 打包，最后**审计产物里有没有泄漏开发机绝对路径** —— 泄漏就直接让发布失败。常用参数：`--output <dir>`、`--version <x.y.z>`、`--build <n>`（让 CFBundleVersion 走独立构建号）、`--single-arch <arm64|x86_64>`、`--skip-build`、`--no-sign`、`--no-strip`。
@@ -405,7 +405,7 @@ bash Scripts/build_dmg.sh --output dist --version 0.0.0-dev
 发布：
 
 ```sh
-git tag v1.0.1 && git push origin v1.0.1   # 触发 .github/workflows/release.yml
+git tag v1.0.2 && git push origin v1.0.2   # 触发 .github/workflows/release.yml
 ```
 
 ---
