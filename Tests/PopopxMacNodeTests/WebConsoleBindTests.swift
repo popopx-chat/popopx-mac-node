@@ -33,6 +33,32 @@ private struct NoTrafficFacade: NodeConsoleFacade {
     func openInFinder(path: String) async {}
 }
 
+/// A facade whose event stream the test drives by hand, so a frame can be pushed
+/// at a chosen moment instead of waiting on the node's own 20-second heartbeat.
+private struct PushableFacade: NodeConsoleFacade {
+    let stream: AsyncStream<ConsoleEvent>
+    let continuation: AsyncStream<ConsoleEvent>.Continuation
+
+    init() {
+        let pipe = AsyncStream<ConsoleEvent>.makeStream()
+        stream = pipe.stream
+        continuation = pipe.continuation
+    }
+
+    func events() -> AsyncStream<ConsoleEvent> { stream }
+    func snapshot() async -> ConsoleSnapshot { fatalError("the event route does not read the snapshot") }
+    func startInstall() async {}
+    func cancelInstall() async {}
+    func setEngineEnabled(_ kind: EngineKind, enabled: Bool) async {}
+    func rotatePairing() async -> PairingOffer? { nil }
+    func pairingQR(pixelSize: Int) async -> QRAsset? { nil }
+    func revokePairing(publicKey: String) async {}
+    func updateSettings(_ settings: NodeSettings) async -> NodeSettings { settings }
+    func submitWireCommand(_ text: String) async -> CommandResult { fatalError("the event route does not run commands") }
+    func invokeEngine(_ kind: EngineKind, action: String, payload: [String: JSONValue]) async -> CommandResult { fatalError("the event route does not run engines") }
+    func openInFinder(path: String) async {}
+}
+
 /// A raw loopback HTTP/1.1 client.
 ///
 /// `URLSession` is the wrong instrument for these cases: it pools sockets,
@@ -94,6 +120,14 @@ private final class WireClient {
         }
         guard consume(Int(headers["content-length"] ?? "0") ?? 0) else { return nil }
         return WireResponse(status: status, headers: headers)
+    }
+
+    /// The next SSE frame on this socket, or `nil` when the console ended the
+    /// stream first. Frames are delimited by the blank line, and a stream has no
+    /// `Content-Length`, so this is what proves the pipe is still open.
+    func eventFrame() -> String? {
+        guard let frame = read(until: Data("\n\n".utf8)) else { return nil }
+        return String(decoding: frame.dropLast(2), as: UTF8.self)
     }
 
     func hangUp() {
@@ -202,5 +236,61 @@ final class WebConsoleBindTests: XCTestCase {
 
         XCTAssertEqual(statuses, [302, 302, 302], "a keep-alive socket stopped being answered")
         XCTAssertEqual(framed, [true, true, true], "a body without Content-Length cannot be framed")
+    }
+
+    func test_eventStreamStaysOpenAndCarriesFrames() async throws {
+        // A console that answers requests can still have a dead live channel. The
+        // read pump used to fall into `teardown()` the moment a socket became an
+        // event pipe, which cancelled the channel `openEvents` had just built: the
+        // browser received the `retry:` preamble, then an end of stream, and the
+        // page reported 「实时通道已中断」 while `/api/health` still answered 200.
+        // So the stream is held open here and pushed two frames through it, because
+        // a preamble that arrives on a socket that is then closed proves nothing.
+        let facade = PushableFacade()
+        let server = LocalWebConsoleServer(facade: facade, port: 19003)
+        try await server.start()
+        let client = try WireClient(port: 19003)
+        let token = await server.token
+        try client.send("GET /api/events?t=\(token) HTTP/1.1\r\nHost: 127.0.0.1:19003\r\nAccept: text/event-stream\r\n\r\n")
+
+        guard let head = client.respond() else {
+            XCTFail("the event route never answered")
+            client.hangUp()
+            await server.stop()
+            return
+        }
+        XCTAssertEqual(head.status, 200, "the event route is not a redirect and not a refusal")
+        XCTAssertTrue(head.headers["content-type"]?.contains("text/event-stream") == true,
+                      "a stream the browser is not told about is a stream it will not follow")
+        let preamble = client.eventFrame()
+        facade.continuation.yield(ConsoleEvent(channel: .system, message: "the pipe is still open"))
+        let first = client.eventFrame()
+        facade.continuation.yield(ConsoleEvent(channel: .engine, message: "and it carries more than one frame"))
+        let second = client.eventFrame()
+        // `streamCount` is the number `/api/health` prints as `viewers`, and it is
+        // also what the per-socket cap releases from, so a stream that opens without
+        // being registered is a stream that costs a socket forever.
+        let watching = await server.streamCount
+        // Reclaiming the slot: the next frame written to a socket whose reader has
+        // gone is what fails, and that failure is what frees the channel. A node
+        // with nothing to say notices only on its 20-second heartbeat, so the loop
+        // keeps pushing until it does.
+        client.hangUp()
+        var released = -1
+        for attempt in 0..<40 {
+            released = await server.streamCount
+            if released == 0 { break }
+            facade.continuation.yield(ConsoleEvent(channel: .system, message: "reclaim probe \(attempt)"))
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        await server.stop()
+
+        XCTAssertEqual(preamble, "retry: 3000", "a preamble is the whole stream once the pump tears it down")
+        XCTAssertTrue(first?.hasPrefix("event: system") == true, "the pushed event never left the node")
+        XCTAssertTrue(first?.contains("the pipe is still open") == true, "the frame reached the socket without its message")
+        XCTAssertTrue(second?.hasPrefix("event: engine") == true,
+                      "a stream that delivered one frame is not yet a stream that stays open")
+        XCTAssertEqual(watching, 1, "the stream that delivered frames was not counted as a viewer")
+        XCTAssertEqual(released, 0, "a viewer that hung up left its channel behind, and the socket cap counts from there")
     }
 }

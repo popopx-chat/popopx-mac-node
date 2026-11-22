@@ -4340,6 +4340,7 @@ public actor LocalWebConsoleServer {
         private let writer: WEBWriter
         private var parser = WEBWireParser()
         private var channels: [WEBSSEChannel] = []
+        private var streamWaiters: [CheckedContinuation<Void, Never>] = []
         private var watchdog: Task<Void, Never>?
         private var open = true
         private var streaming = false
@@ -4371,6 +4372,15 @@ public actor LocalWebConsoleServer {
 
         func streamEnded(_ identifier: UUID) {
             channels.removeAll { $0.identifier == identifier }
+            if channels.isEmpty { releaseStreamWaiters() }
+        }
+
+        /// Wakes the parked read pump once this socket carries no event pipe.
+        private func releaseStreamWaiters() {
+            guard !streamWaiters.isEmpty else { return }
+            let waiting = streamWaiters
+            streamWaiters.removeAll(keepingCapacity: false)
+            for waiter in waiting { waiter.resume() }
         }
 
         // MARK: read pump
@@ -4411,6 +4421,20 @@ public actor LocalWebConsoleServer {
                         open = false
                     }
                     if !open || streaming { break }
+                }
+            }
+            if streaming {
+                // An event pipe has no further reads, but the pump is the only task
+                // that decides when the socket is let go. Falling into `teardown()`
+                // the moment `streaming` was set cancelled the channel that
+                // `openEvents` had just built, so the browser received the `retry:`
+                // preamble and an immediate end of stream — which is what the page
+                // reports as a broken live channel. Park until the last channel on
+                // this socket says it is done.
+                while !channels.isEmpty {
+                    await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+                        streamWaiters.append(waiter)
+                    }
                 }
             }
             await teardown()
