@@ -34,7 +34,8 @@ BUNDLE_ID="chat.popopx.node"
 VOL_NAME="POPOPX Mac Node"
 UNIVERSAL_DMG_BASENAME="POPOPX-Mac-Node-Universal"
 MIN_MACOS="14.0"
-DEFAULT_VERSION="1.0.0"
+DEFAULT_VERSION="1.0.1"
+DEFAULT_BUILD="2"                            # CFBundleVersion 的仓库默认值；发新版本时与 DEFAULT_VERSION 一起递增
 CONSOLE_URL="http://127.0.0.1:18920"
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,8 @@ OUTPUT_DIR=""                                # 解析后强制为绝对路径
 VERSION="${DEFAULT_VERSION}"
 VERSION_SHORT="${DEFAULT_VERSION}"           # 数字核心，写入 CFBundleShortVersionString
 VERSION_BUILD="${DEFAULT_VERSION}"           # 完整串（含 -rc1/-dev 后缀），写入 CFBundleVersion
+BUILD_NUMBER="${DEFAULT_BUILD}"              # CFBundleVersion 的构建号；--build 覆盖，只在纯正式版本时生效
+BUILD_EXPLICIT=false                         # 只有显式传 --build 时，构建号才压过版本的 -rc/-dev 后缀
 SKIP_BUILD=false
 SKIP_STRIP=false
 NO_SIGN=false
@@ -87,6 +90,9 @@ ${SCRIPT_NAME} — 构建 POPOPX Mac Node 通用拖拽安装包 / build the Univ
     --version <x.y.z>          写入 Info.plist 的版本号；接受 1.0.0 / v1.0.0 / v1.2.0-rc1
                                （默认: ${DEFAULT_VERSION}；数字核心进 CFBundleShortVersionString，
                                 完整串进 CFBundleVersion）
+    --build <n>                覆盖 CFBundleVersion 为独立的构建号（默认: ${DEFAULT_BUILD}）
+                               不带 --version 后缀时生效；--version 带 -rc1/-dev 后缀则仍写完整串，
+                               除非显式传入 --build。校验：只接受 [0-9A-Za-z.+-]+
     --single-arch <arch>       只构建单架构：arm64 | x86_64（默认: Universal 双架构）
     --skip-build               不编译，直接复用已有 .build/release 产物重新打包
     --no-sign                  跳过 codesign Ad-hoc 签名（仅供本地调试）
@@ -132,6 +138,7 @@ parse_args() {
             -h|--help)      usage; exit 0 ;;
             --output)       need_value "$@"; OUTPUT_DIR="$2"; shift 2 ;;
             --version)      need_value "$@"; VERSION="$2"; shift 2 ;;
+            --build)        need_value "$@"; BUILD_NUMBER="$2"; BUILD_EXPLICIT=true; shift 2 ;;
             --single-arch)  need_value "$@"; SINGLE_ARCH="$2"; shift 2 ;;
             --skip-build)   SKIP_BUILD=true; shift ;;
             --no-sign)      NO_SIGN=true; shift ;;
@@ -159,6 +166,17 @@ normalize_and_validate() {
     fi
     VERSION_SHORT="${BASH_REMATCH[1]}"
     VERSION_BUILD="$raw"
+    local suffix="${BASH_REMATCH[3]}"
+
+    # CFBundleVersion 允许任意标识串，所以构建号可以独立于版本号推进。
+    # 但 -rc1/-dev 这类后缀只有 CFBundleVersion 能表达（CFBundleShortVersionString
+    # 只收纯数字），所以默认构建号不覆盖带后缀的版本；显式 --build 仍然照办。
+    if [[ -n "$BUILD_NUMBER" ]] && { $BUILD_EXPLICIT || [[ -z "$suffix" ]]; }; then
+        if [[ ! "$BUILD_NUMBER" =~ ^[0-9A-Za-z.+-]+$ ]]; then
+            die "--build 格式非法 (invalid build number): '${BUILD_NUMBER}'，应形如 2 / 17 / 2-rc1"
+        fi
+        VERSION_BUILD="$BUILD_NUMBER"
+    fi
 
     if [[ -n "$SINGLE_ARCH" ]]; then
         case "$SINGLE_ARCH" in

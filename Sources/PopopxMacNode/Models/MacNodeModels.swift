@@ -154,7 +154,7 @@ public struct NodeVersion: Codable, Sendable, Equatable, CustomStringConvertible
         self.channel = channel
     }
 
-    public static let current = NodeVersion(major: 1, minor: 0, patch: 0)
+    public static let current = NodeVersion(major: 1, minor: 0, patch: 1)
 
     /// Anything that must survive a restart but may legitimately change.
     public static let schemaRevision = 3

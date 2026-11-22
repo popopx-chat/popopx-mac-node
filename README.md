@@ -93,10 +93,10 @@ bash Scripts/build_dmg.sh   # one command -> distributable Universal DMG + sha25
 #            dist/POPOPX-Mac-Node-Universal.dmg.sha256
 
 # repackage without recompiling:
-bash Scripts/build_dmg.sh --skip-build --output dist --version 1.0.0
+bash Scripts/build_dmg.sh --skip-build --output dist --version 1.0.1 --build 2
 ```
 
-`Scripts/build_dmg.sh` needs no Xcode project: it assembles the `.app` bundle, generates `Info.plist`, renders the brand icon with the binary it just built, ad-hoc signs, packs with `hdiutil`, and finally **audits the artifacts for leaked developer machine paths** — a leak fails the release. Flags: `--output <dir>`, `--version <x.y.z>`, `--single-arch <arm64|x86_64>`, `--skip-build`, `--no-sign`, `--no-strip`.
+`Scripts/build_dmg.sh` needs no Xcode project: it assembles the `.app` bundle, generates `Info.plist`, renders the brand icon with the binary it just built, ad-hoc signs, packs with `hdiutil`, and finally **audits the artifacts for leaked developer machine paths** — a leak fails the release. Flags: `--output <dir>`, `--version <x.y.z>`, `--build <n>` (CFBundleVersion on its own counter), `--single-arch <arm64|x86_64>`, `--skip-build`, `--no-sign`, `--no-strip`.
 
 ---
 
@@ -427,7 +427,7 @@ The non-negotiables:
 Releasing:
 
 ```sh
-git tag v1.0.0 && git push origin v1.0.0   # triggers .github/workflows/release.yml
+git tag v1.0.1 && git push origin v1.0.1   # triggers .github/workflows/release.yml
 ```
 
 ---
