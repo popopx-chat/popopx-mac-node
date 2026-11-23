@@ -714,8 +714,20 @@ submit_wait() {
         printf '%s\n' "$(cat "${WORK}/notary-wait.log" 2>/dev/null || true)" >&2
         warn "notarytool wait exited non-zero for ${id}; reading its final state"
     fi
-    status=$(xcrun notarytool info "$id" --keychain-profile "$NOTARY_PROFILE" 2>&1 \
-        | sed -n 's/^status:[[:space:]]*\(.*\)$/\1/p' | head -n 1 | tr -d '\r')
+    # notarytool prints its fields indented by two spaces, so a "^status:" anchor
+    # matches nothing and an Accepted submission reads as "no status". JSON is the
+    # stable shape; the text form is only a fallback, parsed with the indentation
+    # tolerated. Both paths swallow their own exit status because a failed
+    # substitution under set -e would abort before the diagnostic below.
+    status=$(xcrun notarytool info "$id" --keychain-profile "$NOTARY_PROFILE" \
+        --output-format json 2>/dev/null \
+        | sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | head -n 1 || true)
+    if [[ -z "$status" ]]; then
+        status=$(xcrun notarytool info "$id" --keychain-profile "$NOTARY_PROFILE" 2>&1 \
+            | sed -n 's/^[[:space:]]*status:[[:space:]]*\(.*\)$/\1/p' \
+            | head -n 1 | tr -d '\r' || true)
+    fi
     if [[ -z "$status" ]]; then
         die "notarytool info reported no status for submission ${id}"
     fi
