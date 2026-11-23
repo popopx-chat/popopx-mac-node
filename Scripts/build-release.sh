@@ -162,9 +162,9 @@ Implementation notes:
     * The hardened runtime is applied here, at signing time. SwiftPM has no
       ENABLE_HARDENED_RUNTIME build setting; that knob belongs to xcodebuild, and
       this repository has no Xcode project.
-    * A notarization ticket lives in a resource fork, which a .app directory does
-      not have on APFS. Stage 4 tries the bundle, reports what happened, and
-      stage 5 staples the DMG - the artifact users actually download.
+    * A stapled ticket is stored inside a bundle as Contents/CodeResources, so
+      stage 4 staples the .app itself and the ZIP keeps that ticket through a
+      plain unzip. Stage 5 staples the DMG as well: both containers carry it.
 USAGE
 }
 
@@ -777,8 +777,11 @@ notarize_app_step() {
 }
 
 staple_app() {
-    # A .app directory has no resource fork to hold a ticket, so on APFS this
-    # usually fails. The DMG in stage 5 is the artifact that really gets stapled.
+    # The ticket goes into the bundle as Contents/CodeResources - a plain file,
+    # not a resource fork or an xattr - so it survives cp -R and a plain unzip,
+    # which is what makes the ZIP distributable offline. Measured on the 2026-11-23
+    # notarized build; a failure here is still tolerated because stage 5 staples
+    # the DMG independently.
     if xcrun stapler staple "$APP_PATH" >/dev/null 2>&1; then
         if xcrun stapler validate "$APP_PATH" >/dev/null 2>&1; then
             info "ticket stapled into the bundle and validated"
@@ -787,8 +790,8 @@ staple_app() {
             warn "stapler reported success but validate failed on the bundle; relying on the DMG ticket"
         fi
     else
-        info "the bundle itself cannot hold a ticket (expected for a .app directory on APFS)"
-        dim "Gatekeeper checks notarization online for a ZIP download; the DMG carries the offline ticket"
+        info "the bundle did not take a ticket"
+        dim "not fatal: stage 5 staples the DMG, and that carries the offline ticket"
     fi
     return 0
 }
