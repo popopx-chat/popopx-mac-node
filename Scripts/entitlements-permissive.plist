@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  POPOPX Mac Node - Developer ID entitlements (PERMISSIVE variant).
+
+  Not the default. Scripts/entitlements.plist is what a release is normally
+  sealed with; this file exists so the wider key set can be applied on purpose
+  and visibly, through the entitlements flag of build-release.sh.
+
+  When it is the right file: a build that embeds a JVM, DotNet or ML inference
+  runtime, a Haskell RTS with an executable JIT zone, or any third-party library
+  mapped into this process through dlopen that is not signed by the same Team.
+  Each key below exists to unblock exactly one of those.
+
+  The cost, stated plainly:
+    allow-jit                          opens an executable memory map the system
+                                       cannot tell apart from injected code
+    allow-unsigned-executable-memory   disables W^X for this process
+    disable-library-validation         lets an unsigned or independently signed
+                                       library run inside the app address space
+  Together they remove most of what the hardened runtime buys, so a review of
+  the code that needs them should accompany any release sealed with this file.
+
+  These keys apply to this process only. They relax nothing for the external
+  popopx-chat, smp-server and xftp-server binaries, which the app launches as
+  separate processes from PATH under their own signatures.
+
+  Keep this comment free of a double hyphen: it is illegal inside XML, plutil
+  -lint accepts it anyway, and codesign's AMFI parser rejects the file.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

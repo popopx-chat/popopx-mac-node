@@ -52,6 +52,8 @@ SKIP_STRIP=false
 NO_SIGN=false
 SINGLE_ARCH=""                               # 空 = Universal 双架构
 DMG_BASENAME="${UNIVERSAL_DMG_BASENAME}"     # 单架构时被改写
+EMIT_APP_DIR=""                              # --emit-app: 只组装并导出未签名 bundle
+EMIT_ONLY=false                              # 由 EMIT_APP_DIR 推导，见 normalize_and_validate
 
 BUILD_PATH_TAKEN="n/a"
 SIGN_STATE="n/a"
@@ -97,6 +99,11 @@ ${SCRIPT_NAME} — 构建 POPOPX Mac Node 通用拖拽安装包 / build the Univ
     --skip-build               不编译，直接复用已有 .build/release 产物重新打包
     --no-sign                  跳过 codesign Ad-hoc 签名（仅供本地调试）
     --no-strip                 保留调试符号（DWARF 会带出编译机绝对路径，慎用）
+    --emit-app <dir>           Assemble, strip and audit the bundle, then export the
+                               UNSIGNED .app into <dir> and stop: no ad-hoc signature,
+                               no DMG. Handover seam for build-release.sh, which needs
+                               an unsigned bundle to apply Developer ID + hardened
+                               runtime. Keeps Info.plist generation single-sourced.
     -h, --help                 显示本帮助
 
 示例 / Examples:
@@ -143,6 +150,7 @@ parse_args() {
             --skip-build)   SKIP_BUILD=true; shift ;;
             --no-sign)      NO_SIGN=true; shift ;;
             --no-strip)     SKIP_STRIP=true; shift ;;
+            --emit-app)     need_value "$@"; EMIT_APP_DIR="$2"; shift 2 ;;
             --)             shift; break ;;
             *)              usage >&2; die "未知参数 (unknown option): $1" ;;
         esac
@@ -183,6 +191,35 @@ normalize_and_validate() {
             arm64|x86_64) DMG_BASENAME="POPOPX-Mac-Node-${SINGLE_ARCH}" ;;
             *) die "--single-arch 只支持 arm64 或 x86_64 (got: ${SINGLE_ARCH})" ;;
         esac
+    fi
+
+    # --emit-app: handover mode for Developer ID signing (used by build-release.sh).
+    # Assembly, strip and the privacy audit still run; ad-hoc signing and the DMG
+    # do not, because the caller has to seal the bundle with its own identity.
+    if [[ -n "$EMIT_APP_DIR" ]]; then
+        if [[ -n "$OUTPUT_DIR" ]]; then
+            warn "--emit-app 忽略 --output（本模式只导出 bundle，不产出镜像）"
+        fi
+        case "$EMIT_APP_DIR" in
+            /*) : ;;
+            *)  EMIT_APP_DIR="$(pwd)/${EMIT_APP_DIR}" ;;
+        esac
+        EMIT_APP_DIR="${EMIT_APP_DIR%/}"
+        if [[ -z "$EMIT_APP_DIR" || "$EMIT_APP_DIR" == "/" ]]; then
+            die "--emit-app 需要一个非根目录 (refusing --emit-app /)"
+        fi
+        if [[ "$EMIT_APP_DIR" == "$PACKAGE_ROOT" ]]; then
+            die "--emit-app 不能是仓库根目录 (refusing --emit-app ${PACKAGE_ROOT})"
+        fi
+        case "$EMIT_APP_DIR" in
+            */"${APP_BUNDLE_NAME}")
+                die "--emit-app 应指向容纳 bundle 的目录，而非 bundle 自身 (pass the parent directory, not ${APP_BUNDLE_NAME})" ;;
+        esac
+        if [[ -e "$EMIT_APP_DIR" && ! -d "$EMIT_APP_DIR" ]]; then
+            die "--emit-app 路径不是目录 (not a directory): ${EMIT_APP_DIR}"
+        fi
+        EMIT_ONLY=true
+        TOTAL_STEPS=7
     fi
 
     if [[ -z "$OUTPUT_DIR" ]]; then
@@ -541,10 +578,9 @@ PLIST
 
 # ---------------------------------------------------------------------------
 # [5/8] 剥离调试符号 + Ad-hoc 签名
+# 剥离独立成函数：--emit-app 模式只剥离、不签名，签名交给上层发布脚本。
 # ---------------------------------------------------------------------------
-sign_step() {
-    step 5 "剥离调试符号并执行 Ad-hoc 代码签名"
-
+strip_binary() {
     if $SKIP_STRIP; then
         warn "--no-strip：保留 DWARF 调试符号，产物极可能包含编译机绝对路径，下一步审计会硬失败"
     elif command -v strip >/dev/null 2>&1; then
@@ -554,6 +590,18 @@ sign_step() {
         info "strip -S -x 完成"
     else
         warn "未找到 strip 工具，跳过剥离"
+    fi
+    return 0
+}
+
+sign_step() {
+    step 5 "剥离调试符号并执行 Ad-hoc 代码签名"
+    strip_binary
+
+    if $EMIT_ONLY; then
+        SIGN_STATE="unsigned (--emit-app: sealing deferred to the caller)"
+        info "跳过 Ad-hoc 签名：上层脚本会用 Developer ID 封装这个 bundle"
+        return 0
     fi
 
     if $NO_SIGN; then
@@ -757,6 +805,40 @@ checksum_and_report_step() {
 }
 
 # ---------------------------------------------------------------------------
+# [7/7] --emit-app: 导出未签名 bundle / export the unsigned bundle
+# ---------------------------------------------------------------------------
+emit_app_step() {
+    step 7 "导出未签名 Bundle 到 ${EMIT_APP_DIR}"
+    mkdir -p "$EMIT_APP_DIR" || die "无法创建 --emit-app 目录: $EMIT_APP_DIR"
+    local target="${EMIT_APP_DIR}/${APP_BUNDLE_NAME}"
+    # 有界删除：只允许替换本脚本自己命名的 <APP_BUNDLE_NAME> 目录，其余一律拒绝。
+    if [[ -e "$target" ]]; then
+        case "$target" in
+            *.app) if [[ ! -d "$target" ]]; then
+                       die "拒绝覆盖非 bundle 路径 (not a directory): ${target}"
+                   fi ;;
+            *)     die "拒绝覆盖意外路径 (refusing to overwrite): ${target}" ;;
+        esac
+        rm -rf -- "$target" || die "无法替换已有 bundle: ${target}"
+    fi
+    # ditto 保留权限与符号链接语义；bundle 在此仍是未签名状态。
+    ditto "$APP_DIR" "$target" || die "拷贝 bundle 失败: ${target}"
+    if [[ ! -x "${target}/Contents/MacOS/${EXEC_NAME}" ]]; then
+        die "导出的 bundle 缺少可执行文件: ${target}/Contents/MacOS/${EXEC_NAME}"
+    fi
+    if [[ ! -f "${target}/Contents/Info.plist" ]] \
+        || ! plutil -lint "${target}/Contents/Info.plist" >/dev/null; then
+        die "导出的 bundle Info.plist 缺失或未通过 plutil -lint: ${target}"
+    fi
+    info "bundle: ${target}"
+    dim "CFBundleShortVersionString = $(plutil -extract CFBundleShortVersionString raw "${target}/Contents/Info.plist" 2>/dev/null || echo '?')"
+    dim "CFBundleVersion            = $(plutil -extract CFBundleVersion raw "${target}/Contents/Info.plist" 2>/dev/null || echo '?')"
+    dim "lipo -archs                = $(describe_archs "${target}/Contents/MacOS/${EXEC_NAME}")"
+    dim "signature                  = none (verify with: codesign -dvv '${target}')"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 main() {
@@ -778,6 +860,10 @@ main() {
     info "version      : ${VERSION_BUILD}  (CFBundleShortVersionString ${VERSION_SHORT})"
     info "target       : ${target_label}"
     info "scratch      : ${WORK}"
+    if $EMIT_ONLY; then
+        info "mode         : emit UNSIGNED bundle for Developer ID signing -> ${EMIT_APP_DIR}"
+        dim  "no ad-hoc signature and no DMG in this mode; the caller notarizes and packages"
+    fi
     dim  "swift: $(swift --version 2>&1 | head -n 1 || echo 'unavailable')"
     dim  "macOS: $(sw_vers -productVersion 2>/dev/null || echo unknown) ($(uname -m))"
 
@@ -786,6 +872,12 @@ main() {
     bundle_step
     sign_step
     binary_audit_step
+    if $EMIT_ONLY; then
+        # 未签名 bundle 交给上层：dmg_step / checksum_and_report_step 都不执行，
+        # 因为镜像必须从 Developer ID 签名并装订票据后的 bundle 重新制作。
+        emit_app_step
+        return 0
+    fi
     dmg_step
     checksum_and_report_step
 }
