@@ -201,6 +201,46 @@ enum WEBConsoleHTML {
         "{code:\"\(jsLiteral(item.rawValue))\",name:\"\(jsLiteral(item.nativeName))\",catalog:\"\(jsLiteral(item.catalogKey))\"}"
     }.joined(separator: ",") + "]"
 
+    /// The model picker is generated from `ModelCatalog` rather than retyped in
+    /// JavaScript, so the page can never offer a model the node will not resolve,
+    /// and the copy travels as the same `Zh`/`Hant`/`En` triple the snapshot uses
+    /// for engine names. Numbers stay numbers: the thresholds are the same integers
+    /// `LLMModelOption.admission(memoryGB:)` compares against.
+    static let modelRegistryJavaScript: String = {
+        /// One object literal per entry. Joining the fields alone would emit
+        /// `models:[a:1,b:2,...]`, which is a syntax error and takes the entire
+        /// console script down with it.
+        func entry(_ fields: [String]) -> String { "{" + fields.joined(separator: ",") + "}" }
+        let models = ModelCatalog.options.map { option in
+            entry([
+                "id:\"\(jsLiteral(option.id))\"",
+                "ref:\"\(jsLiteral(option.ollamaRef))\"",
+                "name:\"\(jsLiteral(option.displayName))\"",
+                "quant:\"\(jsLiteral(option.quantization))\"",
+                "params:\(option.parameterBillions.map { String($0) } ?? "null")",
+                "weight:\(option.weightGigabytes)",
+                "ctx:\(option.contextOverheadGB)",
+                "rec:\(option.recommendedMemoryGB)",
+                "co:\(option.coResidentMemoryGB)",
+                "swap:\(option.swapWarningMemoryGB)",
+                "pull:\"\(jsLiteral(option.pullCommand(for: option.ollamaRef)))\"",
+                "hint:\"\(jsLiteral(option.ggufCreateHint ?? ""))\"",
+                "noteZh:\"\(jsLiteral(option.noteZh))\"",
+                "noteHant:\"\(jsLiteral(TraditionalChinese.render(option.noteZh)))\"",
+                "noteEn:\"\(jsLiteral(option.noteEn))\""
+            ])
+        }
+        let admission = ModelAdmission.allCases.map { verdict in
+            entry([
+                "key:\"\(verdict.rawValue)\"",
+                "zh:\"\(jsLiteral(verdict.titleZh))\"",
+                "hant:\"\(jsLiteral(TraditionalChinese.render(verdict.titleZh)))\"",
+                "en:\"\(jsLiteral(verdict.titleEn))\""
+            ])
+        }
+        return "{models:[\(models.joined(separator: ","))],admission:[\(admission.joined(separator: ","))]}"
+    }()
+
     /// The Traditional Chinese console is the page's own Simplified column, run
     /// through Apple's `Hans-Hant` transform. One hand-written table per script
     /// would drift the moment a key were added to only one of them; deriving it
@@ -229,6 +269,7 @@ enum WEBConsoleHTML {
         rawDocument
             .replacingOccurrences(of: "/*PPX_LANGS*/[]", with: localeRegistryJavaScript)
             .replacingOccurrences(of: "/*PPX_HANT*/{}", with: traditionalCatalogJavaScript)
+            .replacingOccurrences(of: "/*PPX_MODELS*/{models: [],admission: []}", with: modelRegistryJavaScript)
             // Last, so the generated Traditional rows carry the real scheme too.
             .replacingOccurrences(of: "/*PPX_SCHEME*/", with: NodeWire.invitationScheme)
     }()
@@ -781,6 +822,12 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
         <div class="panel__head"><h3 data-i18n="planTitle"></h3><span class="tag tag--accent" id="plan-llm">—</span></div>
         <div class="tscroll"><table class="table" id="ladder"></table></div>
         <p class="field__note" id="plan-note" style="margin-top:8px"></p>
+        <hr class="hair">
+        <span class="field__label" data-i18n="modelTitle"></span>
+        <select id="model-select" onchange="PPX.modelPick()"></select>
+        <div class="engine__meta" id="model-live"></div>
+        <p class="field__note" id="model-note"></p>
+        <button class="btn btn--mini" id="model-copy" onclick="PPX.modelCopy()" hidden></button>
       </section>
 
       <section class="panel">
@@ -1066,6 +1113,18 @@ var I18N = {
   heavyLocal: { zh: "重型视频本机渲染", en: "Heavy video renders locally" },
   heavyMesh: { zh: "重型视频转边缘算力", en: "Heavy video routed to mesh" },
   noPlan: { zh: "节点尚未给出模型方案。", en: "The node has not produced a model plan yet." },
+  modelTitle: { zh: "模型管理", en: "Model management" },
+  modelDefault: { zh: "默认 · 按内存档位", en: "Default · by memory tier" },
+  modelResident: { zh: "常驻估算", en: "Estimated resident" },
+  modelAdmission: { zh: "内存准入", en: "Memory admission" },
+  modelGguf: { zh: "自定义 GGUF", en: "Custom GGUF" },
+  modelCopyPull: { zh: "复制拉取命令", en: "Copy pull command" },
+  modelSwapWarn: { zh: "本机内存低于阈值，预计触发内存交换；节点已拒绝本机重载任务，避免 OOM 卡死。", en: "This Mac is at or under the swap line: heavy local jobs are refused rather than risk an OOM hang." },
+  modelSwitched: { zh: "本地模型已切换", en: "Local model switched" },
+  modelSwitchFailed: { zh: "模型切换失败", en: "Could not switch the local model" },
+  modelUnpinned: { zh: "已回到内存档位默认", en: "Back to the hardware tier" },
+  modelPinnedNote: { zh: "已固定，不再随内存档位变化", en: "Pinned — it no longer follows the memory tier" },
+  modelUnknown: { zh: "该模型不在目录内，内存数字仍是本档位的估算值。", en: "This model is not in the catalog, so the memory figures are still the tier's own estimate." },
   qrTitle: { zh: "配对二维码", en: "Pairing QR" },
   qrSub: { zh: "iOS 端「发现 → Mac Node 配对」扫一扫；同一网络内即可建立端到端加密隧道。", en: "Scan it from iOS · Discover → Mac Node pairing. The encrypted tunnel comes up on the same network." },
   qr: { zh: "二维码", en: "QR code" },
@@ -1271,6 +1330,14 @@ var LOCALES = /*PPX_LANGS*/[];
 
 var HANT = /*PPX_HANT*/{};
 
+/* The local model list is generated from `ModelCatalog`, so the picker can never
+   name a reference the node will not resolve. Nothing machine-dependent is in it:
+   the page stays byte-identical on every launch, which is what makes the CSP
+   defensible. The verdicts are computed here from the emitted thresholds because
+   a static document cannot know this Mac's memory; the authoritative verdict for
+   the model actually running arrives on the snapshot as `plan.rationale`. */
+var MODELS = /*PPX_MODELS*/{models: [],admission: []};
+
 function localeEntry(code) {
   for (var i = 0; i < LOCALES.length; i += 1) { if (LOCALES[i].code === code) { return LOCALES[i]; } }
   return null;
@@ -1360,6 +1427,7 @@ var S = {
   devOpen: false,
   rawText: "",
   copyable: {},
+  modelPull: "",
   qrNonce: 0,
   engineKeys: "",
   engineRows: {},
@@ -1998,6 +2066,82 @@ function renderLadder() {
   setText("plan-llm", String(plan.llmRef || "—"));
   setText("plan-note", plan.rationale ? t("planNote") + " · " + String(plan.rationale) : t("noPlan"));
   if (plan.ollamaModelPull) { S.copyable.pull = String(plan.ollamaModelPull); }
+  renderModelPicker();
+}
+function modelById(id) {
+  var list = (MODELS && MODELS.models) || [];
+  for (var index = 0; index < list.length; index += 1) { if (list[index].id === id) { return list[index]; } }
+  return null;
+}
+/// Matches a reference the node resolved, which may carry a tag the catalog does
+/// not know (`inkling-2-mini:q4_k_m` from `config/model_refs.json`), so the base
+/// model name is the fallback key.
+function modelByRef(ref) {
+  var list = (MODELS && MODELS.models) || [];
+  var base = String(ref || "").split(":")[0];
+  for (var index = 0; index < list.length; index += 1) {
+    if (list[index].ref === ref || String(list[index].ref).split(":")[0] === base) { return list[index]; }
+  }
+  return null;
+}
+function admissionKey(model, memoryGB) {
+  if (memoryGB >= model.co) { return "coResident"; }
+  if (memoryGB >= model.rec) { return "recommended"; }
+  if (memoryGB > model.swap) { return "constrained"; }
+  return "swapWarning";
+}
+function admissionLabel(key) {
+  var list = (MODELS && MODELS.admission) || [];
+  var field = { zh: "zh", zhHant: "hant" }[catalogFor(S.lang)] || "en";
+  for (var index = 0; index < list.length; index += 1) {
+    if (list[index].key === key) { return String(list[index][field] || list[index].en || key); }
+  }
+  return key;
+}
+function renderModelPicker() {
+  var select = el("model-select");
+  if (!select) { return; }
+  var snap = S.snap, plan = snap.plan || {}, hardware = snap.hardware || {}, settings = snap.settings || {};
+  var memoryGB = Number(hardware.memoryGB) || 0;
+  var pinned = String(settings.llmModelOverride || "");
+  var list = (MODELS && MODELS.models) || [];
+  clear(select);
+  select.appendChild(h("option", { value: "", text: t("modelDefault") + (pinned ? "" : "  ·  " + String(plan.llmRef || "")) }));
+  list.forEach(function (model) {
+    var label = model.name + " · " + model.quant + " · ~" + (Number(model.weight) + Number(model.ctx)) + " GB";
+    select.appendChild(h("option", { value: String(model.id), text: label }));
+  });
+  // The pin is normally an id, but an owner who edited settings.json by hand may
+  // have written the tagged reference instead, so both forms select the row.
+  select.value = (modelById(pinned) || modelByRef(pinned) || {}).id || "";
+  var live = el("model-live");
+  var active = modelByRef(plan.llmRef);
+  clear(live);
+  if (!memoryGB) { setText("model-note", t("noPlan")); el("model-copy").hidden = true; return; }
+  if (!active) {
+    // A pin the catalog does not know. The node still runs it, so the pull command
+    // stays copyable and the note says plainly that no estimate exists for it.
+    if (pinned) { live.appendChild(h("span", { cls: "tag tag--accent", text: t("modelPinnedNote") })); }
+    setText("model-note", t("modelUnknown"));
+    S.modelPull = String(plan.ollamaModelPull || "");
+    var ghost = el("model-copy");
+    ghost.hidden = !S.modelPull;
+    ghost.textContent = t("modelCopyPull");
+    return;
+  }
+  var verdict = admissionKey(active, memoryGB);
+  var tagClass = verdict === "swapWarning" ? "tag--bad" : (verdict === "constrained" ? "tag--warn" : "tag--ok");
+  live.appendChild(h("span", { cls: "tag " + tagClass, text: t("modelAdmission") + " · " + admissionLabel(verdict) }));
+  live.appendChild(h("span", { cls: "tag", text: t("modelResident") + " · " + active.weight + " + " + active.ctx + " ≈ " + (Number(active.weight) + Number(active.ctx)) + " GB" }));
+  if (pinned) { live.appendChild(h("span", { cls: "tag tag--accent", text: t("modelPinnedNote") })); }
+  var note = snapshotField(active, "note");
+  if (verdict === "swapWarning") { note = note + " · " + t("modelSwapWarn"); }
+  if (active.hint) { note = note + " · " + t("modelGguf") + " " + active.hint; }
+  setText("model-note", note);
+  S.modelPull = String(plan.ollamaModelPull || active.pull || "");
+  var copy = el("model-copy");
+  copy.hidden = false;
+  copy.textContent = t("modelCopyPull");
 }
 var STATE_ICON = { pending: "todo", running: "run", done: "done", skipped: "todo", failed: "wait" };
 function renderChecklist() {
@@ -3071,6 +3215,26 @@ var PPX = {
   },
   installStart: doInstallStart,
   installCancel: doInstallCancel,
+  /* Pinning a model is a settings write, not a new route: the same document the
+     save bar posts carries `llmModelOverride`, and the node answers with the
+     snapshot it just applied, so the picker settles on what the engines will
+     actually run rather than on what was clicked. */
+  modelPick: function () {
+    var select = el("model-select");
+    if (!select || !S.snap || !S.snap.settings) { return; }
+    if (S.dirty) { toast("warn", t("langSaveHint")); return; }
+    var model = modelById(select.value);
+    var next = clone(S.snap.settings);
+    next.llmModelOverride = model ? String(model.ref) : "";
+    api(ROUTE.settings, { method: "POST", json: next }).then(function () {
+      toast("ok", next.llmModelOverride ? t("modelSwitched") + " · " + next.llmModelOverride : t("modelUnpinned"));
+      return refreshSnapshot(true);
+    }).catch(function (error) {
+      fail("modelSwitchFailed", error);
+      refreshSnapshot(true);
+    });
+  },
+  modelCopy: function () { copyText(S.modelPull); },
   logFilter: function () {
     S.logFilter = el("log-filter").value;
     rebuildLog();

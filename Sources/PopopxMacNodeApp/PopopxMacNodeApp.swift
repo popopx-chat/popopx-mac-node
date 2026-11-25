@@ -250,11 +250,14 @@ public actor NodeConsole: NodeConsoleFacade {
         async let events = hub.replay()
 
         let current = await settings.current()
+        let hardware = await profile
         let backlog = await events
         return ConsoleSnapshot(
             node: await identity,
-            hardware: await profile,
-            plan: await plan,
+            hardware: hardware,
+            // The ladder the page paints is the ladder the engines will run, so it
+            // has to carry the owner's model selection rather than only the tier.
+            plan: (await plan).applying(selection: current.llmModelOverride, memoryGB: hardware.memoryGB),
             load: await load,
             toolchain: await toolchain,
             install: await install,
@@ -570,6 +573,26 @@ final class NodeModel: ObservableObject {
         Task { _ = await console?.rotatePairing() }
     }
 
+    /// Pins the local language model to a catalog id (any reference the catalog
+    /// recognises works), or clears the pin with an empty string so the node goes
+    /// back to the hardware tier. Same settings document the console edits, so the
+    /// two halves of the UI cannot disagree.
+    func setLLMModel(_ selection: String) {
+        Task {
+            guard let console else { return }
+            var document = await SettingsStore.shared.current()
+            document.llmModelOverride = selection.trimmingCharacters(in: .whitespacesAndNewlines)
+            _ = await console.updateSettings(document)
+            await ConsoleEventHub.shared.publish(
+                .install,
+                document.llmModelOverride.isEmpty
+                    ? "本地模型回到内存档位 / local model back to the hardware tier"
+                    : "本地模型切换为 \(document.llmModelOverride) / local model set to \(document.llmModelOverride)",
+                level: .notice
+            )
+        }
+    }
+
     func setLaunchAtLogin(_ enabled: Bool) {
         do {
             if enabled {
@@ -751,6 +774,64 @@ struct MenuBarContent: View {
                             set: { model.setEngine(descriptor.kind, enabled: $0) }
                         )
                     )
+                }
+            } else {
+                Text(label("加载中…", "Loading…")).disabled(true)
+            }
+        }
+
+        Menu(label("本地模型", "Local Model")) {
+            if let snapshot = model.snapshot {
+                let memoryGB = snapshot.hardware.memoryGB
+                Picker(label("语言模型", "Language model"), selection: Binding(
+                    get: { snapshot.settings.llmModelOverride },
+                    set: { model.setLLMModel($0) }
+                )) {
+                    Text(label("默认 · 按内存档位", "Default · by memory tier")).tag("")
+                    ForEach(ModelCatalog.options) { option in
+                        // The catalog id, not the Ollama reference: it is the token
+                        // `settings.json` stores and the key `model_refs.json` maps.
+                        Text(option.displayName).tag(option.id)
+                    }
+                }
+                Divider()
+                if let option = ModelCatalog.option(matching: snapshot.plan.llmRef) {
+                    let verdict = option.admission(memoryGB: memoryGB)
+                    LabeledContent(
+                        label("常驻估算", "Estimated resident"),
+                        value: "\(option.weightGigabytes) GB + \(option.contextOverheadGB) GB ≈ \(option.estimatedResidentGB) GB"
+                    )
+                    LabeledContent(
+                        label("内存准入", "Memory admission"),
+                        value: language.text(zh: verdict.titleZh, en: verdict.titleEn)
+                    )
+                    Text(option.pullCommand(for: snapshot.plan.llmRef))
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                    if let hint = option.ggufCreateHint {
+                        Text(hint)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    if !verdict.permitsLocalLoad {
+                        Text(label(
+                            "预计触发内存交换，节点已拒绝本机重载任务。",
+                            "Swap is expected here, so heavy local jobs are refused."
+                        ))
+                        .foregroundStyle(.orange)
+                    }
+                } else {
+                    // A pin the catalog has never seen: the node still runs it, so
+                    // name it and say where the numbers come from.
+                    Text(snapshot.plan.llmRef)
+                        .font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled)
+                    Text(label(
+                        "该模型不在目录内，内存数字仍是本档位的估算值。",
+                        "This model is not in the catalog, so the figures are still the tier's estimate."
+                    ))
+                    .foregroundStyle(.secondary)
                 }
             } else {
                 Text(label("加载中…", "Loading…")).disabled(true)

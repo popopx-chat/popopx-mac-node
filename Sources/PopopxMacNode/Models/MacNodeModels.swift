@@ -643,7 +643,7 @@ public struct ModelPlan: Codable, Sendable, Equatable {
     public var tier: ComputeTier
     public var llmRef: String
     public var llmQuantization: String
-    public var llmParameterBillions: Double
+    public var llmParameterBillions: Double?
     public var videoRef: String
     public var videoPrecision: String
     public var videoBackend: String
@@ -659,7 +659,7 @@ public struct ModelPlan: Codable, Sendable, Equatable {
         tier: ComputeTier,
         llmRef: String,
         llmQuantization: String,
-        llmParameterBillions: Double,
+        llmParameterBillions: Double?,
         videoRef: String,
         videoPrecision: String,
         videoBackend: String,
@@ -750,6 +750,365 @@ public struct ModelPlan: Codable, Sendable, Equatable {
             )
         }
     }
+
+    /// Memory the desktop session keeps whatever the model needs. The three
+    /// figures are the ones `recommend(memoryGB:)` already subtracts, pulled here
+    /// so the ladder and a re-drawn plan cannot drift apart.
+    public var systemFloorGB: Int {
+        switch tier {
+        case .flagship: return 12
+        case .high: return 10
+        case .light: return 8
+        }
+    }
+
+    /// The most this machine may let one model hold, after the desktop floor.
+    public func residentCeilingGB(memoryGB: Int) -> Int {
+        max(1, memoryGB - systemFloorGB)
+    }
+
+    /// Re-draws the plan around a model the owner picked in the console.
+    ///
+    /// Only the language model and the memory it may hold change; the video and
+    /// audio choices stay with the hardware tier, because a 16 GB Mac does not
+    /// gain memory by asking for a 20 GB model.
+    ///
+    /// A pin the catalog has never heard of still re-points the plan, because
+    /// `ENGOllama.resolvedModel` honours it and the console must not name a model
+    /// the engine will not ask for; its memory figures stay with the tier, since
+    /// nothing can estimate an unknown footprint. Anything that is not a plain
+    /// reference is dropped, so a typo degrades to the ladder rather than to a null
+    /// model.
+    ///
+    /// `overrides`/`environment` are injectable so a test can pin a reference
+    /// without editing the machine's `config/model_refs.json`.
+    public func applying(selection raw: String, memoryGB: Int, overrides: ModelRefOverrides? = nil, environment: [String: String]? = nil) -> ModelPlan {
+        let trimmed = raw.trimmedWireReference
+        guard !trimmed.isEmpty else { return self }
+        var next = self
+        guard let option = ModelCatalog.option(matching: trimmed) else {
+            guard ModelRefOverrides.isValid(trimmed) else { return self }
+            next.llmRef = trimmed
+            next.llmQuantization = "—"
+            next.llmParameterBillions = nil
+            next.ollamaModelPull = "ollama pull \(trimmed)"
+            next.rationale = "\(trimmed) is not in the model catalog, so these memory figures still come from the \(tier.titleEn) tier."
+            return next
+        }
+        let ref = ModelRefOverrides.resolve(option: option, submitted: trimmed, environment: environment, file: overrides)
+        next.llmRef = ref
+        next.llmQuantization = option.quantization
+        next.llmParameterBillions = option.parameterBillions
+        next.expectedResidentGB = min(option.estimatedResidentGB, residentCeilingGB(memoryGB: memoryGB))
+        next.ollamaModelPull = option.pullCommand(for: ref)
+        next.rationale = option.memoryNote(ref: ref, memoryGB: memoryGB)
+        return next
+    }
+}
+
+// MARK: - Model catalog
+
+/// How much of this Mac one model may be given, decided from unified memory alone.
+///
+/// The verdict is an admission gate, not a measurement: it comes from the weight
+/// footprint the catalog declares, so it is stable across launches and cannot be
+/// talked out of by a momentary spike in `vm_stat`.
+public enum ModelAdmission: String, Codable, Sendable, CaseIterable {
+    /// Enough memory to hold the model alongside ordinary media and system work.
+    case coResident
+    /// Enough memory for the model as the node's main load.
+    case recommended
+    /// Above the swap line, below the recommendation: short contexts only.
+    case constrained
+    /// At or below the swap line — compression and paging are expected and the box
+    /// can hang. The node refuses heavy local jobs here.
+    case swapWarning
+
+    /// `false` only for `swapWarning`: refuse rather than risk an OOM hang.
+    public var permitsLocalLoad: Bool { self != .swapWarning }
+
+    public var titleZh: String {
+        switch self {
+        case .coResident: return "可并行运行"
+        case .recommended: return "达到推荐内存"
+        case .constrained: return "低于推荐值"
+        case .swapWarning: return "内存交换预警"
+        }
+    }
+
+    public var titleEn: String {
+        switch self {
+        case .coResident: return "Safe alongside other work"
+        case .recommended: return "Meets the recommended memory"
+        case .constrained: return "Below the recommendation"
+        case .swapWarning: return "Memory swap warning"
+        }
+    }
+}
+
+/// One local LLM the node can drive through the loopback Ollama daemon.
+///
+/// The memory figures cover weights plus the key/value cache of a 4096-token
+/// context (the `ENGOllama.generate` default), which is what the render gate has
+/// to reserve. They are estimates from the published quantisation size, not lab
+/// measurements, and the console says so.
+public struct LLMModelOption: Codable, Sendable, Equatable, Identifiable {
+    /// Stable key, and the default Ollama model name. Also the override lookup key.
+    public var id: String
+    public var displayName: String
+    /// The model half of the Ollama reference (`inkling-2-mini`).
+    public var ollamaModel: String
+    /// The tag half of the default reference. Empty means untagged, which is what
+    /// a plain `ollama pull inkling-2-mini` installs.
+    public var defaultTag: String
+    public var quantization: String
+    /// `nil` where the node has no published parameter count to assert — a
+    /// hand-imported GGUF is sized by its file, not by its architecture.
+    public var parameterBillions: Double?
+    public var weightGigabytes: Int
+    public var contextOverheadGB: Int
+    public var recommendedMemoryGB: Int
+    public var coResidentMemoryGB: Int
+    /// A machine with this much memory or less is warned, not admitted.
+    public var swapWarningMemoryGB: Int
+    /// Shown when the reference arrives from `ollama create` rather than the hub.
+    public var ggufCreateHint: String?
+    public var noteZh: String
+    public var noteEn: String
+
+    public init(
+        id: String,
+        displayName: String,
+        ollamaModel: String,
+        defaultTag: String,
+        quantization: String,
+        parameterBillions: Double?,
+        weightGigabytes: Int,
+        contextOverheadGB: Int,
+        recommendedMemoryGB: Int,
+        coResidentMemoryGB: Int,
+        swapWarningMemoryGB: Int,
+        ggufCreateHint: String? = nil,
+        noteZh: String,
+        noteEn: String
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.ollamaModel = ollamaModel
+        self.defaultTag = defaultTag
+        self.quantization = quantization
+        self.parameterBillions = parameterBillions
+        self.weightGigabytes = weightGigabytes
+        self.contextOverheadGB = contextOverheadGB
+        self.recommendedMemoryGB = recommendedMemoryGB
+        self.coResidentMemoryGB = coResidentMemoryGB
+        self.swapWarningMemoryGB = swapWarningMemoryGB
+        self.ggufCreateHint = ggufCreateHint
+        self.noteZh = noteZh
+        self.noteEn = noteEn
+    }
+
+    /// The reference sent to Ollama when nothing overrides it.
+    public var ollamaRef: String {
+        defaultTag.isEmpty ? ollamaModel : "\(ollamaModel):\(defaultTag)"
+    }
+
+    public var estimatedResidentGB: Int { weightGigabytes + contextOverheadGB }
+
+    public func admission(memoryGB: Int) -> ModelAdmission {
+        if memoryGB >= coResidentMemoryGB { return .coResident }
+        if memoryGB >= recommendedMemoryGB { return .recommended }
+        if memoryGB > swapWarningMemoryGB { return .constrained }
+        return .swapWarning
+    }
+
+    public func pullCommand(for ref: String) -> String { "ollama pull \(ref)" }
+
+    /// The line the console shows under the picker: the estimate, whether this Mac
+    /// clears it, and how to bring in a GGUF the hub does not carry.
+    public func memoryNote(ref: String, memoryGB: Int) -> String {
+        let verdict = admission(memoryGB: memoryGB)
+        var note = "\(weightGigabytes) GB weights + \(contextOverheadGB) GB context ≈ \(estimatedResidentGB) GB resident; " +
+            "\(memoryGB) GB machine → \(verdict.titleEn.lowercased()) " +
+            "(recommended ≥ \(recommendedMemoryGB) GB, co-resident ≥ \(coResidentMemoryGB) GB). " +
+            "Pull with \(pullCommand(for: ref))."
+        if let ggufCreateHint { note += " Custom GGUF: \(ggufCreateHint)." }
+        return note
+    }
+}
+
+/// Every local model the console may offer. `Qwen3.8` stays the default on all
+/// three tiers, so an install that never pulled anything else keeps working.
+public enum ModelCatalog {
+    public static let qwen38_27b_q8 = LLMModelOption(
+        id: "qwen3.8-27b-q8_0",
+        displayName: "Qwen3.8-27B · Q8_0",
+        ollamaModel: "qwen3.8",
+        defaultTag: "27b-q8_0",
+        quantization: "Q8_0",
+        parameterBillions: 27,
+        weightGigabytes: 29,
+        contextOverheadGB: 6,
+        recommendedMemoryGB: 96,
+        coResidentMemoryGB: 96,
+        swapWarningMemoryGB: 47,
+        noteZh: "旗舰档默认：全精度 LTX-2.5 与 Q8_0 27B 同时常驻。",
+        noteEn: "Flagship default: the full-precision LTX-2.5 graph and a Q8_0 27B stay resident together."
+    )
+
+    public static let qwen38_27b_q4 = LLMModelOption(
+        id: "qwen3.8-27b-q4_k_m",
+        displayName: "Qwen3.8-27B · Q4_K_M",
+        ollamaModel: "qwen3.8",
+        defaultTag: "27b-q4_k_m",
+        quantization: "Q4_K_M",
+        parameterBillions: 27,
+        weightGigabytes: 17,
+        contextOverheadGB: 5,
+        recommendedMemoryGB: 48,
+        coResidentMemoryGB: 64,
+        swapWarningMemoryGB: 23,
+        noteZh: "量化档默认：8-bit LTX 与 Q4_K_M 27B 在 48–95 GB 之间共存。",
+        noteEn: "Quantised default: an 8-bit LTX graph and a Q4_K_M 27B share the 48-95 GB band."
+    )
+
+    public static let qwen38_9b_q4 = LLMModelOption(
+        id: "qwen3.8-9b-q4_k_m",
+        displayName: "Qwen3.8-9B · Q4_K_M",
+        ollamaModel: "qwen3.8",
+        defaultTag: "9b-q4_k_m",
+        quantization: "Q4_K_M",
+        parameterBillions: 9,
+        weightGigabytes: 6,
+        contextOverheadGB: 3,
+        recommendedMemoryGB: 16,
+        coResidentMemoryGB: 32,
+        swapWarningMemoryGB: 11,
+        noteZh: "轻量档默认：短任务本机完成，重型视频交给边缘算力。",
+        noteEn: "Light default: short jobs stay local, heavy video goes to the mesh."
+    )
+
+    /// 20 GB of Q4_K_M weights. The node publishes no parameter count for it, so
+    /// `parameterBillions` stays nil rather than guessing one into the interface.
+    public static let inkling2Mini = LLMModelOption(
+        id: "inkling-2-mini",
+        displayName: "Inkling-2-Mini",
+        ollamaModel: "inkling-2-mini",
+        defaultTag: "",
+        quantization: "Q4_K_M",
+        parameterBillions: nil,
+        weightGigabytes: 20,
+        contextOverheadGB: 4,
+        recommendedMemoryGB: 32,
+        coResidentMemoryGB: 48,
+        swapWarningMemoryGB: 24,
+        ggufCreateHint: "ollama create inkling-2-mini:q4_k_m -f Inkling-2-Mini.Modelfile",
+        noteZh: "可选本地模型：约 20 GB 权重，建议 32 GB 起步；48 GB 起可与常规多媒体、系统服务并行；24 GB 及以下触发内存交换预警，节点将拒绝本机重载任务，以免 OOM 卡死。",
+        noteEn: "Optional local model: about 20 GB of weights, 32 GB recommended. From 48 GB it runs alongside ordinary media and system services; at 24 GB or below it raises a swap warning and the node refuses heavy local jobs rather than risk an OOM hang."
+    )
+
+    /// The order the console lists them in.
+    public static let options: [LLMModelOption] = [
+        qwen38_27b_q8, qwen38_27b_q4, qwen38_9b_q4, inkling2Mini
+    ]
+
+    public static func option(id: String) -> LLMModelOption? {
+        options.first { $0.id == id }
+    }
+
+    /// Matches a submitted Ollama reference against the catalog. A tagged
+    /// reference whose tag the catalog does not list (`inkling-2-mini:q4_k_m`, the
+    /// form an override produces) still resolves through its base model name, so
+    /// the admission verdict follows the weights rather than the spelling.
+    public static func option(matching ref: String) -> LLMModelOption? {
+        let trimmed = ref.trimmedWireReference
+        guard !trimmed.isEmpty else { return nil }
+        if let exact = options.first(where: { $0.ollamaRef == trimmed }) { return exact }
+        if let byID = option(id: trimmed) { return byID }
+        let base = trimmed.components(separatedBy: ":").first ?? trimmed
+        return options.first { $0.ollamaModel == base || $0.ollamaModel == trimmed }
+    }
+}
+
+// MARK: - Model reference overrides
+
+/// Maps a catalog id to the reference actually imported on this machine.
+///
+/// A hand-built GGUF lands as `inkling-2-mini:q4_k_m` while the catalog still
+/// says `inkling-2-mini`. Rather than fork the catalog per site, the owner writes
+/// one line into `config/model_refs.json` or sets `POPOPX_OLLAMA_REF_INKLING_2_MINI`,
+/// and the node asks for the tag that exists locally.
+public struct ModelRefOverrides: Codable, Sendable, Equatable {
+    /// `POPOPX_OLLAMA_REF_<ID>`: the id uppercased, every non-alphanumeric `_`.
+    public static let envPrefix = "POPOPX_OLLAMA_REF_"
+
+    public var refs: [String: String]
+
+    public init(refs: [String: String] = [:]) {
+        self.refs = refs
+    }
+
+    public static func envKey(forID id: String) -> String {
+        let folded = id.uppercased().map { $0.isLetter || $0.isNumber ? $0 : Character("_") }
+        return envPrefix + String(folded)
+    }
+
+    /// A reference reaches `ollama` as one argument-vector element, so a control
+    /// character cannot break out into a shell — but a leading `-` would still be
+    /// read as a flag, and `registry:5000/ns/model` is not a local tag at all: it
+    /// is an address, and Ollama would go and fetch from it. Odd values are dropped,
+    /// which falls back to the catalog default.
+    public static func isValid(_ ref: String) -> Bool {
+        guard !ref.isEmpty, ref.count <= 128, !ref.hasPrefix("-") else { return false }
+        guard !ref.contains(".."), !ref.hasPrefix("/"), !ref.hasSuffix("/"), !ref.contains("//") else { return false }
+        // At most one namespace separator, and no colon ahead of it. `library/x:tag`
+        // is still a model name; `http://host/x` and `host:5000/x/y` are not.
+        if let slash = ref.firstIndex(of: "/") {
+            guard !ref[ref.index(after: slash)...].contains("/") else { return false }
+            guard !ref[..<slash].contains(":") else { return false }
+        }
+        let allowed = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-:/")
+        return ref.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    /// Reads `AppPaths.modelRefsFile`. An unreadable or malformed file means "no
+    /// overrides", so a bad edit cannot stop the node from reaching its models.
+    public static func load(from url: URL = AppPaths.modelRefsFile) -> ModelRefOverrides {
+        guard let data = try? Data(contentsOf: url),
+              let document = NodeJSON.decode(ModelRefOverrides.self, from: data) else {
+            return ModelRefOverrides()
+        }
+        return ModelRefOverrides(refs: document.refs.filter { isValid($0.value) })
+    }
+
+    /// env → config file → the reference the caller already had.
+    public static func resolve(
+        option: LLMModelOption,
+        submitted: String? = nil,
+        environment: [String: String]? = nil,
+        file: ModelRefOverrides? = nil
+    ) -> String {
+        let submittedRef = (submitted ?? "").trimmedWireReference
+        // A catalog id is a user-interface token, not an Ollama name — the menu bar
+        // and the console both submit it. Only a reference the daemon could actually
+        // resolve may fall back, so an id maps to its catalog reference.
+        let resolvedFallback = submittedRef.isEmpty || submittedRef == option.id ? option.ollamaRef : submittedRef
+        let env = environment ?? ProcessInfo.processInfo.environment
+        if let fromEnv = env[envKey(forID: option.id)]?.trimmedWireReference, isValid(fromEnv) {
+            return fromEnv
+        }
+        let overrides = file ?? load()
+        if let fromFile = overrides.refs[option.id]?.trimmedWireReference, isValid(fromFile) {
+            return fromFile
+        }
+        return resolvedFallback
+    }
+}
+
+extension String {
+    /// Trims the surrounding whitespace a copied-and-pasted reference arrives with.
+    var trimmedWireReference: String { trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
 /// Live load numbers shown next to the static hardware profile.
@@ -1798,18 +2157,22 @@ public enum TraditionalChinese {
     /// shipped `zh` copy with the same probe `MacNodeContractTests` runs, not a
     /// guess at what the converter might get wrong.
     ///
-    /// Auditing the shipped Chinese surface once — 278 console catalog rows and
+    /// Auditing the shipped Chinese surface once — 289 console catalog rows and
     /// 19 menu labels converted and read back, with the 10 engine names and the
-    /// checklist titles covered by `MacNodeContractTests` — found exactly one
-    /// systematic error: the converter answers 启 with the variant 啓, while the
+    /// checklist titles covered by `MacNodeContractTests` — found one systematic
+    /// error: the converter answers 启 with the variant 啓, while the
     /// standard Traditional form, the one macOS's own Traditional UI uses, is 啟
-    /// (啟動, 開啟, 啟用). Word-dependent characters that would need a fix-up
-    /// (皇**后**, **后**妃, 天**后**, 头**发**, 面**粉**, 台**风**) do not occur in
-    /// this copy, and the words that do occur convert the way a Traditional
-    /// reader expects: 复制→複製, 控制/限制→unchanged, 平台→平台, 界面→界面,
-    /// 里面→這裡, 空闲→空閒, 恢复→恢復, 剩余→剩餘.
+    /// (啟動, 開啟, 啟用). The second entry came with the model catalog: 内存准入
+    /// is the standard Simplified term for admission control, and 准 survives the
+    /// converter untouched because it is a valid Traditional character in its own
+    /// right (批准) — but "admission" is written 準入. Word-dependent characters
+    /// that would need a further fix-up (皇**后**, **后**妃, 天**后**, 头**发**,
+    /// 面**粉**, 台**风**) do not occur in this copy, and the words that do occur
+    /// convert the way a Traditional reader expects: 复制→複製, 控制/限制→unchanged,
+    /// 平台→平台, 界面→界面, 里面→這裡, 空闲→空閒, 恢复→恢復, 剩余→剩餘.
     public static let fixUps: [(wrong: String, right: String)] = [
-        ("啓", "啟")
+        ("啓", "啟"),
+        ("准入", "準入")
     ]
 }
 
@@ -2338,6 +2701,9 @@ public enum AppPaths {
     public static var quarantine: URL { root.appendingPathComponent("quarantine", isDirectory: true) }
 
     public static var settingsFile: URL { config.appendingPathComponent("settings.json") }
+    /// Optional `{ "refs": { "<catalog id>": "<ollama reference>" } }` document:
+    /// the tag actually imported when it is not the one the catalog ships with.
+    public static var modelRefsFile: URL { config.appendingPathComponent("model_refs.json") }
     public static var pairedDevicesFile: URL { pairing.appendingPathComponent("devices.json") }
     public static var nodeKeyFile: URL { pairing.appendingPathComponent("node.key") }
     public static var offerFile: URL { pairing.appendingPathComponent("offer.json") }

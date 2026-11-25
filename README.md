@@ -216,6 +216,23 @@ The rules verbatim, as they appear in the product spec:
 - `48 GB – 64 GB` → **LTX-2.5 MLX 8-bit quantised + Qwen3.8-27B (Q4_K_M)**
 - `< 48 GB` → **lightweight inference mode**, heavy video jobs are surfaced and routed to the Edge Compute Mesh
 
+### Optional model: Inkling-2-Mini
+
+The ladder above is the **default**, and nothing about it changes for a Mac that never pulls anything else. The catalog additionally offers **`Inkling-2-Mini`** as an optional local model, selectable from the menu bar's `Local Model` menu or the console's model panel.
+
+| Unified memory | Admission | What the node does |
+| --- | --- | --- |
+| `>= 48 GB` | safe alongside other work | runs beside ordinary media and system services |
+| `32 GB – 47 GB` | meets the recommendation | loads it; the desktop memory floor gets thin |
+| `25 GB – 31 GB` | constrained | loads it, refuses a second heavy local job |
+| `<= 24 GB` | memory-swap warning | **refuses the load** rather than risk an OOM hang |
+
+Roughly **20 GB of weights**, about 24 GB resident once the context window is counted, and **32 GB of unified memory is the recommendation**. Selecting the model shows that estimate, the `ollama pull inkling-2-mini` hint and, for a hand-imported GGUF, the `ollama create inkling-2-mini:q4_k_m -f Inkling-2-Mini.Modelfile` instruction.
+
+The tag a local import actually landed under is machine-local, so the reference is overridable without editing the catalog: `config/model_refs.json` (`{"refs": {"inkling-2-mini": "inkling-2-mini:q4_k_m"}}`), or the `POPOPX_OLLAMA_REF_INKLING_2_MINI` environment variable, which wins. A value that is not a plain local reference — no registry host, no path traversal — is dropped and the catalog default is kept.
+
+Selecting a model rewrites the `model` field of the request body and nothing else: Ollama calls still go to `http://127.0.0.1:11434`, the reference never becomes part of the URL, and no model request or telemetry leaves the machine.
+
 ---
 
 ## Languages and localisation

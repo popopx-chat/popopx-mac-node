@@ -470,6 +470,9 @@ final class MacNodeContractTests: XCTestCase {
         let step = InstallStep(id: "brew", titleZh: "Homebrew 包管理器", titleEn: "Homebrew package manager")
         XCTAssertEqual(step.titleHant, "Homebrew 包管理器", "this step title has no character that changes script")
         shipped.append(("step.brew", step.titleHant))
+        for option in ModelCatalog.options {
+            shipped.append(("model.\(option.id).note", TraditionalChinese.render(option.noteZh)))
+        }
 
         XCTAssertGreaterThan(shipped.count, 250, "the audit covered only \(shipped.count) strings")
         for entry in shipped {
@@ -478,11 +481,12 @@ final class MacNodeContractTests: XCTestCase {
             // Word-dependent mappings the character-wise converter cannot know.
             // None of these words occurs in this copy today; if one appears, the
             // fix-up table has to earn it.
-            for wrong in ["皇後", "天後", "幹淨", "頭髮", "一瞭", "係統", "檯風"] {
+            for wrong in ["皇後", "天後", "幹淨", "頭髮", "一瞭", "係統", "檯風", "內存准入"] {
                 XCTAssertFalse(entry.text.contains(wrong), "\(entry.where) converted to \(wrong)")
             }
         }
         // The words the audit did find, proved in the direction a reader expects.
+        XCTAssertEqual(TraditionalChinese.render("内存准入"), "內存準入", "admission is written 準入; 准 alone is 批准")
         XCTAssertEqual(TraditionalChinese.render("复制配对码"), "複製配對碼")
         XCTAssertEqual(TraditionalChinese.render("启动守护进程"), "啟動守護進程")
         XCTAssertEqual(TraditionalChinese.render("空闲算力"), "空閒算力")
@@ -617,6 +621,372 @@ final class MacNodeContractTests: XCTestCase {
         XCTAssertEqual(intel.tier, .light)
     }
 
+    // MARK: Inkling-2-Mini catalog
+
+    /// The catalog entry is the published spec, written down once. A number
+    /// changing here means the shipped ladder moved, not that a helper was edited.
+    func testInklingCatalogEntryIsThePublishedSpec() throws {
+        guard let inkling = ModelCatalog.option(id: "inkling-2-mini") else {
+            return XCTFail("inkling-2-mini is missing from the catalog")
+        }
+        XCTAssertEqual(inkling.displayName, "Inkling-2-Mini")
+        XCTAssertEqual(inkling.ollamaModel, "inkling-2-mini")
+        XCTAssertEqual(inkling.ollamaRef, "inkling-2-mini", "no tag until an override supplies the imported GGUF's")
+        XCTAssertEqual(inkling.quantization, "Q4_K_M")
+        XCTAssertNil(inkling.parameterBillions, "a hand-imported GGUF has no published parameter count; inventing one leaks into the plan rationale")
+        XCTAssertEqual(inkling.weightGigabytes, 20)
+        XCTAssertEqual(inkling.contextOverheadGB, 4)
+        XCTAssertEqual(inkling.estimatedResidentGB, 24)
+        XCTAssertEqual(inkling.recommendedMemoryGB, 32)
+        XCTAssertEqual(inkling.coResidentMemoryGB, 48)
+        XCTAssertEqual(inkling.swapWarningMemoryGB, 24)
+        XCTAssertEqual(inkling.pullCommand(for: "inkling-2-mini"), "ollama pull inkling-2-mini")
+        XCTAssertTrue(inkling.ggufCreateHint?.hasPrefix("ollama create inkling-2-mini:") == true,
+                      "the console must show how a hand-imported GGUF is registered")
+
+        // Lookup accepts the spellings an owner actually pastes: the bare model,
+        // the catalog id, and the tagged reference a local import lands as.
+        for ref in ["inkling-2-mini", "inkling-2-mini:q4_k_m", "  inkling-2-mini  "] {
+            XCTAssertEqual(ModelCatalog.option(matching: ref)?.id, "inkling-2-mini", ref)
+        }
+        XCTAssertEqual(ModelCatalog.option(matching: "qwen3.8-27b-q8_0")?.ollamaRef, "qwen3.8:27b-q8_0")
+        XCTAssertNil(ModelCatalog.option(matching: "llama3.2:3b"))
+        XCTAssertNil(ModelCatalog.option(matching: "   "))
+    }
+
+    /// The memory bands are the load-bearing part of the feature: 48 GB may run
+    /// beside other services, 32 GB is the recommendation, 24 GB or less must
+    /// refuse rather than hand the machine to the compressor.
+    func testInklingAdmissionBandsMatchTheMemoryLadder() throws {
+        guard let inkling = ModelCatalog.option(id: "inkling-2-mini") else {
+            return XCTFail("inkling-2-mini is missing from the catalog")
+        }
+        for memory in [48, 64, 96, 512] {
+            XCTAssertEqual(inkling.admission(memoryGB: memory), .coResident, "\(memory) GB runs alongside multimedia")
+        }
+        for memory in [32, 36, 47] {
+            XCTAssertEqual(inkling.admission(memoryGB: memory), .recommended, "\(memory) GB meets the recommendation")
+        }
+        for memory in [25, 31] {
+            XCTAssertEqual(inkling.admission(memoryGB: memory), .constrained, "\(memory) GB is under the recommendation")
+        }
+        for memory in [8, 16, 24] {
+            let verdict = inkling.admission(memoryGB: memory)
+            XCTAssertEqual(verdict, .swapWarning, "\(memory) GB must warn, not load")
+            XCTAssertFalse(verdict.permitsLocalLoad)
+        }
+        // Only the warning refuses. A 25 GB machine is cramped, not doomed.
+        XCTAssertTrue(ModelAdmission.coResident.permitsLocalLoad)
+        XCTAssertTrue(ModelAdmission.recommended.permitsLocalLoad)
+        XCTAssertTrue(ModelAdmission.constrained.permitsLocalLoad)
+    }
+
+    /// Every model carries its own three bands, and no shipped entry refuses the
+    /// memory it recommends for itself.
+    func testNoCatalogModelRefusesItsOwnMemoryBand() throws {
+        for option in ModelCatalog.options {
+            XCTAssertGreaterThanOrEqual(option.coResidentMemoryGB, option.recommendedMemoryGB, option.id)
+            XCTAssertGreaterThanOrEqual(option.recommendedMemoryGB, option.swapWarningMemoryGB, option.id)
+            XCTAssertGreaterThanOrEqual(option.estimatedResidentGB, option.weightGigabytes, option.id)
+            XCTAssertTrue(option.admission(memoryGB: option.recommendedMemoryGB).permitsLocalLoad, option.id)
+            XCTAssertFalse(option.admission(memoryGB: option.swapWarningMemoryGB).permitsLocalLoad, option.id)
+            XCTAssertFalse(option.noteZh.isEmpty && option.noteEn.isEmpty, option.id)
+        }
+    }
+
+    /// Pinning a model rewrites the language half of the plan and nothing else:
+    /// the video and audio choices stay with the hardware tier, and the resident
+    /// estimate is clamped to what the machine can actually hold.
+    func testApplyingAnInklingSelectionRedrawsThePlanNotTheTier() throws {
+        let clean = ModelRefOverrides()
+        let flagship = ModelPlan.recommend(memoryGB: 128)
+        let picked = flagship.applying(selection: "inkling-2-mini", memoryGB: 128, overrides: clean, environment: [:])
+        XCTAssertEqual(picked.llmRef, "inkling-2-mini")
+        XCTAssertEqual(picked.llmQuantization, "Q4_K_M")
+        XCTAssertNil(picked.llmParameterBillions)
+        XCTAssertEqual(picked.expectedResidentGB, 24)
+        XCTAssertEqual(picked.ollamaModelPull, "ollama pull inkling-2-mini")
+        XCTAssertTrue(picked.rationale.contains("20 GB weights"), picked.rationale)
+        XCTAssertTrue(picked.rationale.contains("ollama pull inkling-2-mini"), picked.rationale)
+        XCTAssertTrue(picked.rationale.contains("Custom GGUF:"), picked.rationale)
+        XCTAssertEqual(picked.tier, flagship.tier)
+        XCTAssertEqual(picked.videoRef, flagship.videoRef)
+        XCTAssertEqual(picked.videoPrecision, flagship.videoPrecision)
+        XCTAssertEqual(picked.audioSampleRateHz, flagship.audioSampleRateHz)
+        XCTAssertEqual(picked.routeHeavyVideoToMesh, flagship.routeHeavyVideoToMesh)
+        XCTAssertEqual(picked.ltxWeightsHint, flagship.ltxWeightsHint)
+
+        // 48 GB keeps a 38 GB ceiling and 36 GB a 28 GB one, so the 24 GB estimate
+        // survives unclamped — the recommendation working, no silently shrunk model.
+        let high = ModelPlan.recommend(memoryGB: 48)
+        XCTAssertEqual(high.residentCeilingGB(memoryGB: 48), 38)
+        XCTAssertEqual(high.applying(selection: "inkling-2-mini", memoryGB: 48, overrides: clean, environment: [:]).expectedResidentGB, 24)
+        let mid = ModelPlan.recommend(memoryGB: 36)
+        XCTAssertEqual(mid.applying(selection: "inkling-2-mini", memoryGB: 36, overrides: clean, environment: [:]).expectedResidentGB, 24)
+
+        // Clamping keeps the promise under the machine even when the model is too
+        // big for it; the admission verdict, not this number, is what refuses.
+        let light = ModelPlan.recommend(memoryGB: 16)
+        let squeezed = light.applying(selection: "inkling-2-mini", memoryGB: 16, overrides: clean, environment: [:])
+        XCTAssertEqual(squeezed.expectedResidentGB, 16 - light.systemFloorGB)
+        XCTAssertGreaterThan(squeezed.expectedResidentGB, 0)
+        XCTAssertLessThan(squeezed.expectedResidentGB, 16)
+
+        // An untouched band still names its own parameter count.
+        XCTAssertEqual(light.llmParameterBillions, 9)
+
+        // A pin that is not a reference at all degrades to the ladder, never to a
+        // null model.
+        for junk in ["", "   ", "../etc/passwd", "-tags"] {
+            XCTAssertEqual(high.applying(selection: junk, memoryGB: 48, overrides: clean, environment: [:]), high, junk)
+        }
+
+        // A plain reference the catalog has never heard of still re-points the plan,
+        // because `resolvedModel` honours it and the console must not name a model
+        // the engine will not ask for. Its memory figures stay with the tier.
+        let off = high.applying(selection: "mybox:custom", memoryGB: 48, overrides: clean, environment: [:])
+        XCTAssertEqual(off.llmRef, "mybox:custom")
+        XCTAssertEqual(off.ollamaModelPull, "ollama pull mybox:custom")
+        XCTAssertNil(off.llmParameterBillions)
+        XCTAssertEqual(off.expectedResidentGB, high.expectedResidentGB, "an unknown footprint keeps the tier's own figure")
+        XCTAssertEqual(off.videoRef, high.videoRef)
+        XCTAssertTrue(off.rationale.contains("not in the model catalog"), off.rationale)
+    }
+
+    /// The two halves of the UI pin a model in different spellings — the menu bar
+    /// writes the catalog id, a hand-edited `settings.json` may hold the Ollama
+    /// reference. Either must land on the same reference on the wire, or an id would
+    /// be sent to the daemon as a model name it has never heard of.
+    func testCatalogIdAndReferencePinTheSameModel() throws {
+        let clean = ModelRefOverrides()
+        let base = ModelPlan.recommend(memoryGB: 128)
+        for option in ModelCatalog.options {
+            let byID = base.applying(selection: option.id, memoryGB: 128, overrides: clean, environment: [:])
+            let byRef = base.applying(selection: option.ollamaRef, memoryGB: 128, overrides: clean, environment: [:])
+            XCTAssertEqual(byID.llmRef, option.ollamaRef, option.id)
+            XCTAssertEqual(byID, byRef, option.id)
+            XCTAssertEqual(byID.ollamaModelPull, "ollama pull \(option.ollamaRef)", option.id)
+        }
+    }
+
+    /// `settings.llmModelOverride` and the plan must agree on which reference
+    /// reaches Ollama, or the console shows one model and the engine pulls another.
+    func testResolvedModelAndThePlanAgreeOnTheReference() throws {
+        func settings(pinned: String) -> NodeSettings {
+            var document = NodeSettings()
+            document.llmModelOverride = pinned
+            return document
+        }
+        let clean = ModelRefOverrides()
+        let flagship = ModelPlan.recommend(memoryGB: 128)
+            .applying(selection: "inkling-2-mini", memoryGB: 128, overrides: clean, environment: [:])
+        XCTAssertEqual(
+            ENGOllama.resolvedModel(settings: settings(pinned: "inkling-2-mini"), plan: flagship, overrides: clean, environment: [:]),
+            flagship.llmRef
+        )
+        // An empty pin keeps the ladder's own default.
+        XCTAssertEqual(
+            ENGOllama.resolvedModel(settings: settings(pinned: ""), plan: flagship, overrides: clean, environment: [:]),
+            flagship.llmRef
+        )
+        // A pin outside the catalog is honoured verbatim, so an owner can still name
+        // a model this build has never heard of — and the plan follows it, or the
+        // console would show one model while the engine asked for another.
+        let offCatalog = flagship.applying(selection: "mybox:custom", memoryGB: 128, overrides: clean, environment: [:])
+        XCTAssertEqual(
+            ENGOllama.resolvedModel(settings: settings(pinned: "mybox:custom"), plan: offCatalog, overrides: clean, environment: [:]),
+            offCatalog.llmRef
+        )
+        XCTAssertEqual(offCatalog.llmRef, "mybox:custom")
+        // The default stays on the Qwen3.8 series at every band edge, so an install
+        // that never pulled Inkling is untouched by this feature.
+        for memory in [12, 16, 32, 36, 48, 64, 95, 96, 128, 192, 256, 512] {
+            let plan = ModelPlan.recommend(memoryGB: memory)
+            XCTAssertTrue(plan.llmRef.hasPrefix("qwen3.8:"), "\(memory) GB default moved off Qwen3.8: \(plan.llmRef)")
+            XCTAssertEqual(
+                ENGOllama.resolvedModel(settings: settings(pinned: ""), plan: plan, overrides: clean, environment: [:]),
+                plan.llmRef, "\(memory) GB"
+            )
+        }
+    }
+
+    /// The tag of a hand-imported GGUF is machine-local. Environment wins over the
+    /// config file, and a value that is not a plain reference is dropped so a stray
+    /// flag or registry path cannot reach Ollama.
+    func testModelRefOverridesResolveEnvThenFileThenCatalog() throws {
+        let inkling = try XCTUnwrap(ModelCatalog.option(id: "inkling-2-mini"))
+        let fromFile = ModelRefOverrides(refs: ["inkling-2-mini": "inkling-2-mini:file_tag"])
+
+        XCTAssertEqual(
+            ModelRefOverrides.resolve(option: inkling, submitted: "inkling-2-mini", environment: [:], file: ModelRefOverrides()),
+            "inkling-2-mini", "no override keeps the catalog reference"
+        )
+        XCTAssertEqual(
+            ModelRefOverrides.resolve(option: inkling, submitted: "inkling-2-mini", environment: [:], file: fromFile),
+            "inkling-2-mini:file_tag"
+        )
+        XCTAssertEqual(
+            ModelRefOverrides.resolve(option: inkling, submitted: "inkling-2-mini",
+                                     environment: [ModelRefOverrides.envKey(forID: inkling.id): "inkling-2-mini:q4_k_m"],
+                                     file: fromFile),
+            "inkling-2-mini:q4_k_m", "environment outranks the file"
+        )
+        // An unrelated environment key changes nothing.
+        XCTAssertEqual(
+            ModelRefOverrides.resolve(option: inkling, submitted: "inkling-2-mini",
+                                     environment: ["POPOPX_OLLAMA_REF_QWEN3_8_9B_Q4_K_M": "qwen3.8:9b-q4_k_m"],
+                                     file: fromFile),
+            "inkling-2-mini:file_tag"
+        )
+        // An invalid override falls through instead of poisoning the reference.
+        XCTAssertEqual(
+            ModelRefOverrides.resolve(option: inkling, submitted: "inkling-2-mini",
+                                     environment: [ModelRefOverrides.envKey(forID: inkling.id): "-rm -rf"],
+                                     file: ModelRefOverrides()),
+            "inkling-2-mini"
+        )
+        XCTAssertEqual(ModelRefOverrides.envKey(forID: "inkling-2-mini"), "POPOPX_OLLAMA_REF_INKLING_2_MINI")
+        XCTAssertEqual(ModelRefOverrides.envKey(forID: "qwen3.8-27b-q8_0"), "POPOPX_OLLAMA_REF_QWEN3_8_27B_Q8_0")
+        XCTAssertEqual(AppPaths.modelRefsFile.lastPathComponent, "model_refs.json")
+    }
+
+    /// What counts as a reference. Everything else falls back to the catalog
+    /// default, because the value is interpolated into the Ollama body and the pull
+    /// command shown to the owner.
+    func testModelReferenceValidation() throws {
+        for good in ["inkling-2-mini", "inkling-2-mini:q4_k_m", "qwen3.8:9b-q4_k_m", "Model_1.2-3", "library/inkling-2-mini:q4_k_m"] {
+            XCTAssertTrue(ModelRefOverrides.isValid(good), good)
+        }
+        for bad in ["", "-tags", "../etc/passwd", "ghcr.io/", "http://evil.example/x", "evil.example:5000/inkling", "library/inkling/extra", "a b", "a\nb", "é", String(repeating: "x", count: 129)] {
+            XCTAssertFalse(ModelRefOverrides.isValid(bad), bad)
+        }
+    }
+
+    /// The `/api/generate` payload: one closed JSON object, no streaming, and no
+    /// empty `system` key the daemon would read as a blank directive.
+    func testOllamaRequestBodySerialisesTheSelectedModel() throws {
+        let json = ENGOllama.requestBody(model: "inkling-2-mini:q4_k_m", prompt: "hello\nworld")
+        guard case .object(let body) = json else { return XCTFail("request body is not an object") }
+        XCTAssertEqual(body["model"], .string("inkling-2-mini:q4_k_m"))
+        XCTAssertEqual(body["prompt"], .string("hello\nworld"))
+        XCTAssertEqual(body["stream"], .bool(false), "an SMP card needs one complete reply, not a stream")
+        XCTAssertNil(body["system"], "an empty system prompt is omitted, not sent as \"\"")
+        guard case .object(let options)? = body["options"] else { return XCTFail("options missing") }
+        XCTAssertEqual(options["num_ctx"], .int(4096))
+        XCTAssertEqual(options["num_predict"], .int(-1))
+        XCTAssertEqual(options["temperature"], .double(0.35))
+
+        let text = json.serialized()
+        XCTAssertTrue(text.contains("\"model\":\"inkling-2-mini:q4_k_m\""), text)
+        XCTAssertTrue(text.contains("\"stream\":false"), text)
+        XCTAssertFalse(text.contains("system"), text)
+
+        // The context floor holds, and a system prompt is only sent when set.
+        let withSystem = ENGOllama.requestBody(model: "m", prompt: "", system: "You are terse.", contextTokens: 1)
+        guard case .object(let second) = withSystem,
+              case .object(let secondOptions)? = second["options"] else { return XCTFail("body is not an object") }
+        XCTAssertEqual(second["system"], .string("You are terse."))
+        XCTAssertEqual(secondOptions["num_ctx"], .int(512))
+    }
+
+    /// Task 2's safety boundary: the model identity is the only thing that changes.
+    /// The request still goes to the loopback literal over plain http, and a
+    /// reference never becomes part of the address.
+    func testModelSelectionCannotMoveTheRequestOffLoopback() throws {
+        XCTAssertEqual(ENGOllama.host, "127.0.0.1:11434")
+        XCTAssertEqual(ENGOllama.baseURL.scheme, "http")
+        XCTAssertEqual(ENGOllama.baseURL.host, "127.0.0.1")
+        XCTAssertEqual(ENGOllama.baseURL.port, Int(NodeWire.ollamaPort))
+
+        let clean = ModelRefOverrides()
+        for option in ModelCatalog.options {
+            let ref = ModelRefOverrides.resolve(option: option, submitted: option.ollamaRef, environment: [:], file: clean)
+            let url = ENGOllama.baseURL.appendingPathComponent("api/generate")
+            XCTAssertEqual(url.host, "127.0.0.1", ref)
+            XCTAssertEqual(url.absoluteString, "http://127.0.0.1:11434/api/generate")
+            XCTAssertFalse(url.absoluteString.contains(ref), "the reference stays in the body: \(ref)")
+            XCTAssertTrue(ENGOllama.requestBody(model: ref, prompt: "ping").serialized().contains("\"model\":\"\(ref)\""), ref)
+        }
+    }
+
+    /// The console's model list is generated from the catalog the engine reads. An
+    /// unreplaced placeholder would silently render an empty picker, so the shipped
+    /// document is asserted on values, not keys.
+    func testModelCatalogPlaceholdersAreReplaced() throws {
+        let registry = WEBConsoleHTML.modelRegistryJavaScript
+        let document = WEBConsoleHTML.document
+        XCTAssertFalse(document.contains("/*PPX_MODELS*/"), "the model registry placeholder was left in")
+        XCTAssertFalse(document.contains("{models: [],admission: []}"), "the model registry default survived")
+        XCTAssertTrue(document.contains(registry), "the registry is built but never substituted")
+        XCTAssertTrue(document.contains("ref:\"inkling-2-mini\""))
+        // Counted on the registry itself: the document is minified JS and a `ref:"`
+        // substring could arrive from unrelated code (`href:"`).
+        XCTAssertEqual(registry.components(separatedBy: "ref:\"").count - 1, ModelCatalog.options.count)
+        // Structural gate: a generated registry that is not valid JavaScript kills
+        // the whole console script, and every substring assertion above would still
+        // pass. Entries must be object literals, and the delimiters must balance.
+        XCTAssertTrue(registry.hasPrefix("{models:[{"), String(registry.prefix(24)))
+        XCTAssertTrue(registry.contains("],admission:[{"), String(registry.suffix(40)))
+        XCTAssertEqual(
+            registry.components(separatedBy: "},{").count - 1,
+            ModelCatalog.options.count - 1 + ModelAdmission.allCases.count - 1,
+            "registry entries are not separated object literals"
+        )
+        XCTAssertEqual(registry.filter { $0 == "{" }.count, registry.filter { $0 == "}" }.count, "unbalanced braces")
+        XCTAssertEqual(registry.filter { $0 == "[" }.count, registry.filter { $0 == "]" }.count, "unbalanced brackets")
+        XCTAssertEqual(registry.filter { $0 == "\"" }.count % 2, 0, "an unterminated string literal")
+        for option in ModelCatalog.options {
+            XCTAssertTrue(document.contains("\"\(option.displayName)\""), option.id)
+            XCTAssertTrue(document.contains(option.noteZh), option.id)
+            XCTAssertTrue(document.contains(option.noteEn), option.id)
+        }
+        for verdict in ModelAdmission.allCases {
+            XCTAssertTrue(document.contains(verdict.titleZh), verdict.rawValue)
+            XCTAssertTrue(document.contains(verdict.titleEn), verdict.rawValue)
+        }
+        XCTAssertEqual(registry.components(separatedBy: "key:\"").count - 1, ModelAdmission.allCases.count)
+    }
+
+    /// Every inline handler the model panel wires up must exist on the exported
+    /// object: a renamed function is a silent `undefined` in the browser, never a
+    /// build error, and the picker would simply stop responding.
+    func testInlineConsoleHandlersExistOnTheExportedObject() throws {
+        let document = WEBConsoleHTML.document
+        guard let start = document.range(of: "var PPX = {"),
+              let end = document.range(of: "window.PPX = PPX;", range: start.lowerBound..<document.endIndex) else {
+            return XCTFail("the PPX export block is gone")
+        }
+        let exports = String(document[start.lowerBound..<end.lowerBound])
+        var checked = 0
+        for attribute in ["onclick=\"PPX.", "onchange=\"PPX."] {
+            for chunk in document.components(separatedBy: attribute).dropFirst() {
+                let name = chunk.prefix { $0.isLetter || $0.isNumber }
+                checked += 1
+                XCTAssertFalse(name.isEmpty, "\(attribute) reaches no function name")
+                XCTAssertTrue(
+                    exports.contains("\(name):") || exports.contains("\(name)("),
+                    "PPX.(\(name)) is wired in the markup but never exported"
+                )
+            }
+        }
+        XCTAssertGreaterThan(checked, 10, "the handler census found almost nothing; the attributes changed spelling")
+        XCTAssertTrue(document.contains("onchange=\"PPX.modelPick()\""), "no model picker handler")
+        XCTAssertTrue(document.contains("onclick=\"PPX.modelCopy()\""), "no pull-command copy handler")
+    }
+
+    /// A Traditional reader gets the model notes too: the `zhHant` column is the
+    /// derived one, so an added note cannot be missing from it.
+    func testShippedModelRegistryCarriesTraditionalNotes() throws {
+        let registry = WEBConsoleHTML.modelRegistryJavaScript
+        for option in ModelCatalog.options {
+            let converted = TraditionalChinese.render(option.noteZh)
+            XCTAssertNotEqual(converted, option.noteZh, "no Traditional column for \(option.id)")
+            XCTAssertTrue(registry.contains(converted), option.id)
+        }
+        for verdict in ModelAdmission.allCases {
+            XCTAssertTrue(registry.contains(TraditionalChinese.render(verdict.titleZh)), verdict.rawValue)
+        }
+    }
     // MARK: Numbers and text
 
     func testByteCountHumanizing() {
@@ -1115,7 +1485,7 @@ final class MacNodeContractTests: XCTestCase {
 
         XCTAssertEqual(english.levelTwoCount, 11, "the document has eleven top-level sections")
         XCTAssertEqual(english.levelTwoCount, chinese.levelTwoCount, "one README gained or lost a section")
-        XCTAssertEqual(english.levelThreeCount, 10, "one build guide, the daemon install guide, plus eight self-audit checks")
+        XCTAssertEqual(english.levelThreeCount, 11, "one build guide, the daemon install guide, the optional-model note, plus eight self-audit checks")
         XCTAssertEqual(english.levelThreeCount, chinese.levelThreeCount, "the audit guide no longer mirrors")
         XCTAssertEqual(english.fenceCount, chinese.fenceCount, "the two documents no longer show the same commands")
         XCTAssertEqual(english.tableRowCount, chinese.tableRowCount, "the tables must keep the same rows")

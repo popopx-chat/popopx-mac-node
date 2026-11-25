@@ -468,17 +468,16 @@ public enum ENGOllama {
         return models.compactMap { $0["name"]?.stringValue }
     }
 
-    /// POSTs `/api/generate`. Throws `NodeFailure` so callers surface a readable
-    /// refusal instead of an empty card.
-    public static func generate(
+    /// The `/api/generate` payload, assembled in one place so the document the
+    /// unit tests serialise is the one that goes on the wire. `stream = false`
+    /// keeps the reply in a single JSON object, which is what an SMP card needs.
+    public static func requestBody(
         model: String,
         prompt: String,
         system: String = "",
         temperature: Double = 0.35,
-        contextTokens: Int = 4096,
-        timeout: TimeInterval = 180
-    ) async throws -> Reply {
-        guard !model.isEmpty else { throw NodeFailure.invalidPayload("empty model reference") }
+        contextTokens: Int = 4096
+    ) -> JSONValue {
         var body: [String: JSONValue] = [
             "model": .string(model),
             "prompt": .string(prompt),
@@ -490,13 +489,33 @@ public enum ENGOllama {
             ])
         ]
         if !system.isEmpty { body["system"] = .string(system) }
+        return .object(body)
+    }
+
+    /// POSTs `/api/generate`. Throws `NodeFailure` so callers surface a readable
+    /// refusal instead of an empty card.
+    public static func generate(
+        model: String,
+        prompt: String,
+        system: String = "",
+        temperature: Double = 0.35,
+        contextTokens: Int = 4096,
+        timeout: TimeInterval = 180
+    ) async throws -> Reply {
+        guard !model.isEmpty else { throw NodeFailure.invalidPayload("empty model reference") }
 
         var request = URLRequest(url: baseURL.appendingPathComponent("api/generate"))
         request.httpMethod = "POST"
         request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("close", forHTTPHeaderField: "Connection")
-        request.httpBody = Data(JSONValue.object(body).serialized().utf8)
+        request.httpBody = Data(requestBody(
+            model: model,
+            prompt: prompt,
+            system: system,
+            temperature: temperature,
+            contextTokens: contextTokens
+        ).serialized().utf8)
 
         let data: Data
         let response: URLResponse
@@ -530,10 +549,18 @@ public enum ENGOllama {
     }
 
     /// Respects `NodeSettings.llmModelOverride` when the owner pinned a model in
-    /// the console, otherwise the hardware-derived ladder from `ModelPlan`.
-    public static func resolvedModel(settings: NodeSettings, plan: ModelPlan) -> String {
-        let override = settings.llmModelOverride.trimmingCharacters(in: .whitespacesAndNewlines)
-        return override.isEmpty ? plan.llmRef : override
+    /// the console, otherwise the hardware-derived ladder from `ModelPlan` — then
+    /// remaps whichever reference through `config/model_refs.json` or
+    /// `POPOPX_OLLAMA_REF_*`, because the tag that exists locally is not always the
+    /// one the catalog ships.
+    ///
+    /// `overrides`/`environment` are injectable so a test can pin a reference
+    /// without reading this machine's `config/model_refs.json`.
+    public static func resolvedModel(settings: NodeSettings, plan: ModelPlan, overrides: ModelRefOverrides? = nil, environment: [String: String]? = nil) -> String {
+        let override = settings.llmModelOverride.trimmedWireReference
+        let chosen = override.isEmpty ? plan.llmRef : override
+        guard let option = ModelCatalog.option(matching: chosen) else { return chosen }
+        return ModelRefOverrides.resolve(option: option, submitted: chosen, environment: environment, file: overrides)
     }
 }
 
@@ -2456,12 +2483,15 @@ public actor TenBusinessEngines: NodeEngines {
         return profile
     }
 
+    /// The tier ladder, re-drawn around whatever model the owner selected. The
+    /// render gate reserves against `expectedResidentGB`, so a 20 GB model pinned on
+    /// a 16 GB machine is admitted at the machine's ceiling and refused by the
+    /// catalog's swap verdict — not silently allowed to page the desktop to death.
     private func modelPlan() async -> ModelPlan {
-        if let cachedPlan { return cachedPlan }
         let profile = await hardwareProfile()
-        let plan = ModelPlan.recommend(for: profile)
-        cachedPlan = plan
-        return plan
+        let tierPlan = cachedPlan ?? ModelPlan.recommend(for: profile)
+        let pinned = await settings.current().llmModelOverride
+        return tierPlan.applying(selection: pinned, memoryGB: profile.memoryGB)
     }
 
     /// The mesh memory ceiling recomputed from the same 0.55 factor
@@ -2482,7 +2512,17 @@ public actor TenBusinessEngines: NodeEngines {
     /// GB a job asks the gate to have free before it may start. Half the
     /// resident stack is enough for a heavy render because the weights are
     /// mapped read-only and pageable; text work asks for a flat floor.
+    ///
+    /// When the selected model's own catalog verdict is `swapWarning`, this returns
+    /// one GB more than the machine has, which is the single value `ENGRenderGate`
+    /// already turns into an immediate `nil` reservation instead of a queue that
+    /// never drains. The engines then reach their existing `memoryRefusal` path: an
+    /// honest "this Mac cannot hold it" beats paging the desktop to a hang.
     private func requirementGB(for weight: ENGRenderGate.Weight, plan: ModelPlan) -> Int {
+        if let option = ModelCatalog.option(matching: plan.llmRef),
+           !option.admission(memoryGB: ENGSysMemory.totalGB).permitsLocalLoad {
+            return ENGSysMemory.totalGB + 1
+        }
         switch weight {
         case .light: return 4
         case .heavy: return max(6, min(24, plan.expectedResidentGB / 2))

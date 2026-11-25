@@ -209,6 +209,23 @@ bash Scripts/build_dmg.sh --skip-build --output dist --version 1.0.2 --build 3
 - `48 GB – 64 GB` → **LTX-2.5 MLX 8-bit 量化版 + Qwen3.8-27B（Q4_K_M）**
 - `< 48 GB` → **轻量推理模式**，重型视频任务自动提示路由至「边缘算力共享节点」
 
+### 可选模型：Inkling-2-Mini
+
+上面的阶梯是**默认档**：没有拉取其他模型的 Mac，行为完全不变。模型目录另外把 **`Inkling-2-Mini`** 作为可选本地模型列出，可在菜单栏「本地模型」或控制台的模型面板里切换。
+
+| 统一内存 | 准入判定 | 节点行为 |
+| --- | --- | --- |
+| `>= 48 GB` | 可并行运行 | 与常规多媒体、系统服务同时驻留 |
+| `32 GB – 47 GB` | 达到推荐内存 | 可加载，桌面内存余量偏薄 |
+| `25 GB – 31 GB` | 低于推荐值 | 可加载，但拒绝第二个本机重任务 |
+| `<= 24 GB` | 内存交换预警 | **拒绝本机加载**，以免 OOM 卡死 |
+
+约 **20 GB 权重**，连同上下文窗口常驻约 24 GB，**建议 32 GB 统一内存起步**。选中该模型后，界面会给出这份内存估算、`ollama pull inkling-2-mini` 指令，以及手工导入 GGUF 时的 `ollama create inkling-2-mini:q4_k_m -f Inkling-2-Mini.Modelfile` 说明。
+
+本地导入实际落地的 tag 是机器相关的，因此不改目录也能覆盖引用：写 `config/model_refs.json`（`{"refs": {"inkling-2-mini": "inkling-2-mini:q4_k_m"}}`），或用优先级更高的环境变量 `POPOPX_OLLAMA_REF_INKLING_2_MINI`。不是合法本地引用的值（注册表主机、路径穿越）一律丢弃，回落到目录默认引用。
+
+切换模型只改写请求体里的 `model` 字段：Ollama 调用仍然只发往 `http://127.0.0.1:11434`，引用不会进入 URL，任何模型请求与遥测都不会离开本机。
+
 ---
 
 ## 语言与本地化
