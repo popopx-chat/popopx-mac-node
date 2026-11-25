@@ -216,7 +216,10 @@ final class MacNodeContractTests: XCTestCase {
     func testConsoleRoutesAreUniqueAndWellFormed() {
         let routes = ConsoleRoute.all
         XCTAssertEqual(Set(routes).count, routes.count, "a duplicate route would shadow a handler")
-        XCTAssertEqual(routes.count, 13)
+        // 13 console routes plus the two privacy-bridge routes the SPA posts to
+        // (`/api/privacy/authorize`, `/api/privacy/decision`). The tool surface under
+        // `/v1/tools/` is prefixed, not literal, so it stays out of `all`.
+        XCTAssertEqual(routes.count, 15)
         for route in routes {
             XCTAssertTrue(route.hasPrefix("/"), route)
             XCTAssertFalse(route.contains(".."), route)
@@ -224,6 +227,16 @@ final class MacNodeContractTests: XCTestCase {
         }
         for required in [ConsoleRoute.index, ConsoleRoute.health, ConsoleRoute.pairingQR, ConsoleRoute.commandInject] {
             XCTAssertTrue(routes.contains(required), "\(required) missing from `all`")
+        }
+        // The page is written against the same path table: a `ROUTE` literal the
+        // dispatcher does not know compiles fine and answers 404 in the browser, which
+        // is the kind of bug only this side of the wire can catch.
+        let page = WEBConsoleHTML.document
+        let called = jsIdentifierGroups(in: page, pattern: ": \"(/(?:api|v1)/[A-Za-z0-9/._-]+)\"")
+        XCTAssertFalse(called.isEmpty, "the JS route table changed shape; the scan finds nothing")
+        for path in called {
+            XCTAssertTrue(routes.contains(path) || path.hasPrefix(ConsoleRoute.toolPrefix),
+                          "\(path) is called by the page but not routed")
         }
     }
 
@@ -291,6 +304,10 @@ final class MacNodeContractTests: XCTestCase {
         referenced.formUnion(jsIdentifierGroups(in: page, pattern: "\\bt\\(\"([A-Za-z][A-Za-z0-9]*)\"\\)"))
         referenced.formUnion(jsIdentifierGroups(in: page, pattern: "\\bfail\\(\"([A-Za-z][A-Za-z0-9]*)\""))
         referenced.formUnion(jsIdentifierGroups(in: page, pattern: "data-i18n(?:-ph|-aria)?=\"([A-Za-z][A-Za-z0-9]*)\""))
+        // The field builders take a label key and call `t()` with a variable, which the
+        // scan above cannot see, so their first argument is collected separately.
+        referenced.formUnion(jsIdentifierGroups(in: page,
+            pattern: "\\b(?:checkField|numField|textField|urlField|secretField|statCard)\\(\"([A-Za-z][A-Za-z0-9]*)\""))
         XCTAssertGreaterThan(referenced.count, 100, "the reference scan found \(referenced.count) keys; the call shape changed")
 
         let missing = referenced.subtracting(declared)

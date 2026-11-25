@@ -69,6 +69,7 @@ private enum WireError: Error { case setup(String) }
 private struct WireResponse {
     let status: Int
     let headers: [String: String]
+    var body: String = ""
 }
 
 private final class WireClient {
@@ -118,8 +119,8 @@ private final class WireClient {
             headers[line[..<colon].lowercased()] = line[line.index(after: colon)...]
                 .trimmingCharacters(in: .whitespaces)
         }
-        guard consume(Int(headers["content-length"] ?? "0") ?? 0) else { return nil }
-        return WireResponse(status: status, headers: headers)
+        guard let taken = consume(Int(headers["content-length"] ?? "0") ?? 0) else { return nil }
+        return WireResponse(status: status, headers: headers, body: String(decoding: taken, as: UTF8.self))
     }
 
     /// The next SSE frame on this socket, or `nil` when the console ended the
@@ -147,15 +148,17 @@ private final class WireClient {
         }
     }
 
-    private func consume(_ bytes: Int) -> Bool {
+    private func consume(_ bytes: Int) -> Data? {
+        var taken = Data()
         var remaining = bytes
         while remaining > 0 {
-            let taken = min(remaining, buffer.count)
-            buffer.removeFirst(taken)
-            remaining -= taken
-            if remaining > 0, !fill() { return false }
+            let chunk = min(remaining, buffer.count)
+            taken.append(contentsOf: buffer.prefix(chunk))
+            buffer.removeFirst(chunk)
+            remaining -= chunk
+            if remaining > 0, !fill() { return nil }
         }
-        return true
+        return taken
     }
 
     private func fill() -> Bool {
@@ -292,5 +295,196 @@ final class WebConsoleBindTests: XCTestCase {
                       "a stream that delivered one frame is not yet a stream that stays open")
         XCTAssertEqual(watching, 1, "the stream that delivered frames was not counted as a viewer")
         XCTAssertEqual(released, 0, "a viewer that hung up left its channel behind, and the socket cap counts from there")
+    }
+}
+
+// MARK: - The console decision route
+
+/// Records the `domain / id / verb` triples the console forwards, which is the whole
+/// contract of `/api/privacy/decision`: the page names a proposal and the node decides
+/// what that names.
+private final class DecisionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: [String] = []
+    var status = 200
+    var message = "已执行 / applied"
+
+    func note(domain: String, id: String, verb: String) {
+        lock.lock(); seen.append("\(domain)|\(id)|\(verb)"); lock.unlock()
+    }
+
+    var all: [String] { lock.lock(); defer { lock.unlock() }; return seen }
+}
+
+private struct PrivacyConsoleFacade: NodeConsoleFacade {
+    let box: DecisionBox
+
+    func snapshot() async -> ConsoleSnapshot { PrivacyConsoleFacade.stubSnapshot() }
+    func events() -> AsyncStream<ConsoleEvent> { AsyncStream { $0.finish() } }
+
+    func privacyDecision(domain: String, id: String, verb: String) async -> PrivacyToolResponse {
+        box.note(domain: domain, id: id, verb: verb)
+        return PrivacyToolResponse(ok: box.status == 200, status: box.status,
+                                   fields: ["message": .string(box.message)])
+    }
+
+    func startInstall() async {}
+    func cancelInstall() async {}
+    func setEngineEnabled(_ kind: EngineKind, enabled: Bool) async {}
+    func rotatePairing() async -> PairingOffer? { nil }
+    func pairingQR(pixelSize: Int) async -> QRAsset? { nil }
+    func revokePairing(publicKey: String) async {}
+    func updateSettings(_ settings: NodeSettings) async -> NodeSettings { settings }
+    func submitWireCommand(_ text: String) async -> CommandResult {
+        fatalError("the decision route does not run commands")
+    }
+    func invokeEngine(_ kind: EngineKind, action: String, payload: [String: JSONValue]) async -> CommandResult {
+        fatalError("the decision route does not run engines")
+    }
+    func openInFinder(path: String) async {}
+
+    static func stubSnapshot() -> ConsoleSnapshot {
+        let profile = MacHardwareProfile(
+            chipName: "M4 Pro", modelIdentifier: "Mac16,7", cpuArchitecture: "arm64",
+            logicalCPUCount: 14, physicalCPUCount: 14, performanceCoreCount: 10,
+            efficiencyCoreCount: 4, memoryTotal: ByteCount(48 * 1024 * 1024 * 1024),
+            freeDisk: ByteCount(512 * 1024 * 1024 * 1024),
+            totalDisk: ByteCount(1024 * 1024 * 1024 * 1024),
+            systemVolumeName: "Macintosh HD",
+            operatingSystem: "macOS 26.1", kernelVersion: "27.0.0", serialMasked: "•••••••4"
+        )
+        return ConsoleSnapshot(
+            node: NodeIdentity(nodeId: "test-node", publicKey: "test-key", displayName: "Test Node"),
+            hardware: profile,
+            plan: ModelPlan.recommend(for: profile),
+            load: SystemLoad(cpuLoadPercent: 12, memoryUsed: ByteCount(8 * 1024 * 1024 * 1024),
+                             memoryPressure: .nominal, activeProcessCount: 240),
+            toolchain: [],
+            install: InstallState(),
+            bridge: BridgeStatus(daemon: .running),
+            pairing: nil,
+            pairedDevices: [],
+            descriptors: [],
+            engines: [],
+            settings: NodeSettings(),
+            mesh: MeshSummary(),
+            recentResults: [],
+            lockdowns: [],
+            vaults: [],
+            consoleURL: "http://127.0.0.1:18920/"
+        )
+    }
+}
+
+extension WebConsoleBindTests {
+    /// One console, one request, one reply. `token: nil` sends the request without a
+    /// bearer, which is the case that must never reach the ledger.
+    private func post(port: UInt16, path: String, body: String, token: String?) -> WireResponse? {
+        guard let client = try? WireClient(port: port) else { return nil }
+        defer { client.hangUp() }
+        var request = "POST \(path) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n"
+            + "Content-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n"
+        if let token { request += "\(NodeWire.consoleTokenHeader): \(token)\r\n" }
+        request += "Connection: close\r\n\r\n\(body)"
+        guard (try? client.send(request)) != nil else { return nil }
+        return client.respond()
+    }
+
+    private func request(port: UInt16, method: String, path: String, token: String?) -> WireResponse? {
+        guard let client = try? WireClient(port: port) else { return nil }
+        defer { client.hangUp() }
+        var line = "\(method) \(path) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n"
+        if let token { line += "\(NodeWire.consoleTokenHeader): \(token)\r\n" }
+        line += "Connection: close\r\n\r\n"
+        guard (try? client.send(line)) != nil else { return nil }
+        return client.respond()
+    }
+
+    func test_privacyDecisionNeedsTheBearerToken() async throws {
+        let box = DecisionBox()
+        let server = LocalWebConsoleServer(facade: PrivacyConsoleFacade(box: box), port: 19007)
+        try await server.start()
+        let token = await server.token
+        let anonymous = post(port: 19007, path: ConsoleRoute.privacyDecision,
+                             body: "{\"domain\":\"calendar\",\"id\":\"ppx-pr-1\",\"verb\":\"approve\"}",
+                             token: nil)
+        let wrong = post(port: 19007, path: ConsoleRoute.privacyDecision,
+                         body: "{\"domain\":\"calendar\",\"id\":\"ppx-pr-1\",\"verb\":\"approve\"}",
+                         token: token + "deadbeef")
+        await server.stop()
+
+        XCTAssertEqual(anonymous?.status, 401, "an unauthenticated loopback call is not the operator")
+        XCTAssertEqual(wrong?.status, 401, "a near-miss token must fail the same way")
+        XCTAssertEqual(box.all, [], "a refused call must not have reached the node at all")
+    }
+
+    func test_privacyDecisionAnswersNothingToGET() async throws {
+        let box = DecisionBox()
+        let server = LocalWebConsoleServer(facade: PrivacyConsoleFacade(box: box), port: 19008)
+        try await server.start()
+        let token = await server.token
+        let got = request(port: 19008, method: "GET", path: ConsoleRoute.privacyDecision, token: token)
+        let preflight = request(port: 19008, method: "OPTIONS", path: ConsoleRoute.privacyDecision, token: token)
+        await server.stop()
+
+        XCTAssertEqual(got?.status, 405, "a decision is a write; a navigation must not perform one")
+        XCTAssertEqual(preflight?.status, 405, "another document's preflight is not an approval")
+        XCTAssertEqual(box.all, [])
+    }
+
+    func test_privacyDecisionRefusesEveryMalformedTriple() async throws {
+        let box = DecisionBox()
+        let server = LocalWebConsoleServer(facade: PrivacyConsoleFacade(box: box), port: 19009)
+        try await server.start()
+        let token = await server.token
+        // Each of these is a value the page cannot produce, so a caller that sends one
+        // is not the page: an id that could traverse, a verb that is not approve or
+        // reject, a namespace the ledger has no table for, and a body missing a field.
+        let bodies = [
+            "{\"domain\":\"calendar\",\"id\":\"../../etc/passwd\",\"verb\":\"approve\"}",
+            "{\"domain\":\"calendar\",\"id\":\"ppx-pr-1\",\"verb\":\"delete\"}",
+            "{\"domain\":\"secrets\",\"id\":\"ppx-pr-1\",\"verb\":\"approve\"}",
+            "{\"domain\":\"calendar\",\"verb\":\"approve\"}",
+            "{\"domain\":\"calendar\",\"id\":\"\",\"verb\":\"approve\"}",
+            "not json"
+        ]
+        var statuses: [Int] = []
+        for body in bodies {
+            statuses.append(post(port: 19009, path: ConsoleRoute.privacyDecision,
+                                 body: body, token: token)?.status ?? 0)
+        }
+        await server.stop()
+
+        XCTAssertEqual(statuses, [Int](repeating: 400, count: bodies.count),
+                       "a malformed triple must be refused before the node is asked, got \(statuses)")
+        XCTAssertEqual(box.all, [], "nothing malformed reached the ledger")
+    }
+
+    func test_privacyDecisionForwardsThePagesTripleAndRefreshesThePanel() async throws {
+        let box = DecisionBox()
+        let server = LocalWebConsoleServer(facade: PrivacyConsoleFacade(box: box), port: 19010)
+        try await server.start()
+        let token = await server.token
+        let accepted = post(port: 19010, path: ConsoleRoute.privacyDecision,
+                            body: "{\"domain\":\"calendar\",\"id\":\"ppx-pr-7\",\"verb\":\"approve\"}",
+                            token: token)
+        box.status = 409
+        box.message = "提案已过期（15 分钟）/ proposal expired"
+        let stale = post(port: 19010, path: ConsoleRoute.privacyDecision,
+                         body: "{\"domain\":\"workspace\",\"id\":\"ppx-pr-8\",\"verb\":\"reject\"}",
+                         token: token)
+        await server.stop()
+
+        // The route's job is the triple and nothing else: the receipt the ledger
+        // demands is minted inside the node, so it is absent from this request body.
+        XCTAssertEqual(box.all, ["calendar|ppx-pr-7|approve", "workspace|ppx-pr-8|reject"])
+        XCTAssertEqual(accepted?.status, 200)
+        XCTAssertTrue(accepted?.body.contains("已执行") == true,
+                      "the panel paints this string, got \(accepted?.body ?? "nil")")
+        XCTAssertTrue(accepted?.body.contains("\"privacy\"") == true,
+                      "the reply must carry a fresh snapshot or the panel keeps a spent card on screen")
+        XCTAssertEqual(stale?.status, 200, "a refused decision is still an answered request")
+        XCTAssertTrue(stale?.body.contains("\"status\":409") == true,
+                      "the engine's verdict travels in `status` so the panel can tell 409 from 403: \(stale?.body ?? "nil")")
     }
 }

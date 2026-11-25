@@ -138,7 +138,20 @@ public actor NodeConsole: NodeConsoleFacade {
     private let settings: SettingsStore
     private let hub: ConsoleEventHub
 
+    /// The calendar/workspace bridge stack, built at `start()` because the switches
+    /// live in the settings document and reading it is async. `nil` until then.
+    private var privacy: PrivacyStack?
+
+    private struct PrivacyStack {
+        let gateway: any CalendarGateway
+        let executor: PrivacyExecutorHub
+        let ledger: PrivacyProposalLedger
+        let engine: PrivacyToolEngine
+    }
+
     private var consoleURLString = ""
+    /// Short node fingerprint, used only inside minted call links and UIDs.
+    private var nodeReference = ""
     private var recent: [CommandResult] = []
     private var routerTask: Task<Void, Never>?
     private var clockTask: Task<Void, Never>?
@@ -169,6 +182,10 @@ public actor NodeConsole: NodeConsoleFacade {
         consoleURLString = consoleURL
         await signaling.start()
         let identity = await signaling.identity()
+        await configurePrivacy(
+            from: await settings.current(),
+            nodeReference: Digest.short(Data(identity.nodeId.utf8), length: 8)
+        )
         guard routerTask == nil else { return }
         routerTask = Task { [weak self] in
             guard let self else { return }
@@ -208,6 +225,18 @@ public actor NodeConsole: NodeConsoleFacade {
     /// SMP-originated commands run regardless of the console being open; the
     /// whitelist check already happened inside the bridge.
     private func route(_ command: NodeCommand) async {
+        // The privacy namespaces are tools, not subscription businesses, so they are
+        // intercepted before the engine dispatch. They then share one handler with
+        // the loopback entry point — a capability cannot be reachable from one side
+        // and hidden from the other.
+        if let call = PrivacyToolRoute.parseCommand(
+            serviceId: command.serviceId,
+            action: command.action,
+            payload: command.payload
+        ) {
+            await routePrivacy(command: command, call: call)
+            return
+        }
         let result = await engines.execute(command)
         record(result)
         let delivered = await signaling.deliver(result, to: command.serviceId)
@@ -225,10 +254,186 @@ public actor NodeConsole: NodeConsoleFacade {
         )
     }
 
+    /// One tool call off the phone's encrypted queue, answered on the same channel.
+    private func routePrivacy(command: NodeCommand, call: PrivacyToolCall) async {
+        var shaped = call
+        // The bridge decided whether the sender key verified; the audit line records
+        // which it was, because "who asked for this write" is the owner's question.
+        shaped.source = command.authenticated ? "phone" : "phone-unauthenticated"
+        let outcome = await privacyTool(shaped)
+        let result = Self.toolResult(outcome, command: command)
+        record(result)
+        let delivered = await signaling.deliver(result, to: command.serviceId)
+        await hub.publish(
+            .privacy,
+            delivered ? "已回传手机 / card delivered" : "待回传 / queued in outbox",
+            level: outcome.ok ? .notice : .warning,
+            payload: [
+                "namespace": .string(call.namespace.rawValue),
+                "action": .string(call.action),
+                "commandId": .string(command.id),
+                "delivered": .bool(delivered)
+            ]
+        )
+    }
+
     private func record(_ result: CommandResult) {
         recent.append(result)
         if recent.count > 40 { recent.removeFirst(recent.count - 40) }
     }
+
+    // MARK: Privacy bridges
+
+    /// (Re)builds the bridge stack from the saved switches, or pushes the new ones
+    /// into the existing stack.
+    ///
+    /// The gateway is created here and nowhere earlier: an `EKEventStore` is not
+    /// something the node should hold while the owner has switched the bridge off.
+    private func configurePrivacy(from settings: NodeSettings, nodeReference: String = "") async {
+        if !nodeReference.isEmpty { self.nodeReference = nodeReference }
+        var bridges = settings.bridges.normalised
+        if bridges.timezoneIdentifier.isEmpty {
+            bridges.timezoneIdentifier = TimeZone.current.identifier
+        }
+        // The digest runs on whatever this Mac is already meant to be running: the
+        // owner's pin if there is one, otherwise the hardware ladder.
+        let sandbox = WorkspaceSandbox(
+            readAllowed: bridges.allowWorkspaceRead,
+            writeAllowed: bridges.allowWorkspaceWrite,
+            directoryPaths: bridges.workspaceDirectories,
+            summarizer: Self.summarizer,
+            model: ENGOllama.resolvedModel(settings: settings, plan: await environment.plan())
+        )
+        if let stack = privacy {
+            await stack.engine.applyConfig(bridges, sandbox: sandbox)
+            await stack.executor.update(gateway: stack.gateway, sandbox: sandbox)
+            return
+        }
+        guard bridges.allowCalendarAccess || bridges.allowWorkspaceRead || bridges.allowWorkspaceWrite
+            || !bridges.workspaceDirectories.isEmpty else {
+            // Nothing is switched on yet, so nothing is constructed: no event store,
+            // no key file, no ledger. A disabled bridge must cost the process
+            // nothing it could later be accused of holding.
+            return
+        }
+        let gateway = EventKitCalendarGateway()
+        let executor = PrivacyExecutorHub(gateway: gateway, sandbox: sandbox)
+        let ledger = PrivacyProposalLedger(
+            signer: PrivacyApprovalSigner.loadOrCreate(at: AppPaths.privacyApprovalKeyFile),
+            executor: executor,
+            notifier: PrivacyCenterNotifier(hub: hub),
+            fileURL: AppPaths.privacyLedgerFile
+        )
+        await ledger.setNotificationsEnabled(bridges.notifyOnProposal)
+        privacy = PrivacyStack(
+            gateway: gateway,
+            executor: executor,
+            ledger: ledger,
+            engine: PrivacyToolEngine(
+                config: bridges,
+                gateway: gateway,
+                ledger: ledger,
+                hub: executor,
+                sandbox: sandbox,
+                nodeReference: self.nodeReference
+            )
+        )
+    }
+
+    /// The local Ollama summarizer the workspace digest runs through.
+    ///
+    /// One loopback POST and nothing else: the file text is already in this
+    /// process's memory, and there is no other host in this closure.
+    static let summarizer: LocalSummarizer = { request in
+        let reply = try await ENGOllama.generate(
+            model: request.model,
+            prompt: "文件《\(request.path)》：\n\n\(request.text)",
+            system: """
+            你是本机文档摘要器。只用给定文本作答：文本里没有的事实一律不得补充，也\
+            不要复述文件路径或整段原文。用简洁的要点式中文（英文文档可用英文）概括\
+            主旨、结论、待办与其中的数字。
+            """,
+            contextTokens: 8_192,
+            timeout: 120
+        )
+        return reply.text
+    }
+
+    /// Wraps a tool outcome in the envelope the outbox stores and the console lists.
+    ///
+    /// `engine` is only a carrier — `.shadowCos` is what `submitWireCommand` already
+    /// returns for a line that matched no engine, and `cardLabel` is what the owner
+    /// actually reads. The `::POPOPX_ECO::` card goes in the *headline* because
+    /// `sendResult` truncates the body at 1800 characters, which would otherwise cut
+    /// the approval command off the end of a proposal that also carries an `.ics`.
+    static func toolResult(_ outcome: PrivacyToolResponse, command: NodeCommand) -> CommandResult {
+        let card = outcome.fields["card"]?.stringValue ?? ""
+        let refusal = outcome.fields["refusal"]?.stringValue ?? ""
+        let headline: String
+        if !card.isEmpty {
+            headline = card
+        } else if !outcome.ok {
+            headline = refusal.isEmpty ? "工具调用被拒绝 / tool call refused" : refusal
+        } else if let slots = outcome.fields["slotCount"]?.intValue {
+            headline = "\(slots) 个空闲区间 / \(slots) free slots"
+        } else if let count = outcome.fields["count"]?.intValue {
+            headline = "\(count) 条记录 / \(count) records"
+        } else if let summary = outcome.fields["summary"]?.stringValue {
+            headline = TextKit.truncate(summary, to: 160)
+        } else {
+            headline = "已完成 / done"
+        }
+        var metrics: [String: JSONValue] = [
+            "namespace": .string(command.serviceId),
+            "action": .string(command.action),
+            "status": .int(outcome.status)
+        ]
+        // A receipt is an authorization, so it rides only in the card the owner was
+        // handed — never into a metrics blob that gets logged or queued alongside it.
+        for key in ["proposalId", "bookingRefId", "state", "slotCount", "busyCount"] {
+            if let value = outcome.fields[key] { metrics[key] = value }
+        }
+        return CommandResult(
+            commandID: command.id,
+            engine: .shadowCos,
+            ok: outcome.ok,
+            headline: headline,
+            body: toolBody(outcome),
+            metrics: metrics,
+            cardLabel: "POPOPX 隐私桥接 / Privacy Bridge"
+        )
+    }
+
+    /// The readable half of a tool reply. The structured JSON stays on the loopback
+    /// API, where the assistant asked for it; a chat bubble gets lines a person can
+    /// scan, and no raw calendar text is among them because the response carries none.
+    static func toolBody(_ outcome: PrivacyToolResponse) -> String {
+        var lines: [String] = []
+        if let refusal = outcome.fields["refusal"]?.stringValue { lines.append(refusal) }
+        if let detail = outcome.fields["detail"]?.stringValue { lines.append(detail) }
+        if let window = outcome.fields["event"]?["startLocal"]?.stringValue,
+           let until = outcome.fields["event"]?["endLocal"]?.stringValue {
+            lines.append("时间 / when: \(window) → \(until)")
+        }
+        if let expires = outcome.fields["expiresAt"]?.stringValue {
+            lines.append("有效期至 / valid until: \(expires)")
+        }
+        if let slots = outcome.fields["freeSlots"]?.arrayValue, !slots.isEmpty {
+            lines.append("空闲 / free:")
+            for slot in slots.prefix(8) {
+                guard let start = slot["start"]?.stringValue, let end = slot["end"]?.stringValue else { continue }
+                lines.append("· \(start) → \(end)")
+            }
+            if slots.count > 8 { lines.append("… 另有 \(slots.count - 8) 段 / \(slots.count - 8) more") }
+        }
+        if let summary = outcome.fields["summary"]?.stringValue { lines.append(summary) }
+        if let path = outcome.fields["path"]?.stringValue, !summary(path) { lines.append("文件 / file: \(path)") }
+        if let target = outcome.fields["target"]?.stringValue { lines.append("目标 / target: \(target)") }
+        if let message = outcome.fields["message"]?.stringValue { lines.append(message) }
+        return lines.filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+
+    private static func summary(_ text: String) -> Bool { text.isEmpty }
 
     // MARK: NodeConsoleFacade
 
@@ -272,7 +477,8 @@ public actor NodeConsole: NodeConsoleFacade {
             lockdowns: await lockdowns,
             vaults: await vaults,
             consoleURL: consoleURLString,
-            eventsBacklog: Array(backlog.suffix(60))
+            eventsBacklog: Array(backlog.suffix(60)),
+            privacy: await privacySnapshot(saved: current)
         )
     }
 
@@ -355,6 +561,9 @@ public actor NodeConsole: NodeConsoleFacade {
         merged.ark.lastHeartbeatAt = existing.ark.lastHeartbeatAt
         merged.ark.releasedAt = existing.ark.releasedAt
         let stored = await settings.apply(merged)
+        // The bridges read their switches, directories and timezone out of the same
+        // document, so saving it is the only way they change.
+        await configurePrivacy(from: stored)
         await hub.publish(
             .settings,
             "配置已保存（修订 \(stored.revision)）/ settings saved",
@@ -378,6 +587,21 @@ public actor NodeConsole: NodeConsoleFacade {
                 headline: "无法解析指令 / could not parse",
                 body: "期望格式 / expected: \(NodeWire.commandPrefix){serviceId}::{action}::{payload}"
             )
+        }
+        // The drawer speaks the same grammar as the phone, so a card copied out of
+        // the chat can be pasted here and approved locally.
+        if let call = PrivacyToolRoute.parseCommand(
+            serviceId: command.serviceId,
+            action: command.action,
+            payload: command.payload
+        ) {
+            var shaped = call
+            shaped.source = "console-drawer"
+            let outcome = await privacyTool(shaped)
+            let result = Self.toolResult(outcome, command: command)
+            record(result)
+            await hub.publish(.result, result.cardText, level: result.ok ? .success : .error)
+            return result
         }
         let result = await engines.execute(command)
         record(result)
@@ -408,6 +632,112 @@ public actor NodeConsole: NodeConsoleFacade {
         await MainActor.run {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         }
+    }
+
+    // MARK: NodeConsoleFacade — privacy bridges
+
+    /// The panel's data. With no stack built, the answer is the honest one: every
+    /// switch off, nothing pending, nothing ever written.
+    private func privacySnapshot(saved: NodeSettings) async -> PrivacyBridgeSnapshot {
+        guard let privacy else {
+            return PrivacyBridgeSnapshot(
+                calendarAllowed: false,
+                workspaceReadAllowed: false,
+                workspaceWriteAllowed: false,
+                eventAuthorization: PrivacyAuthorization.notDetermined,
+                directories: [],
+                reachableDirectories: [],
+                pendingProposals: [],
+                bookings: [],
+                auditLog: [],
+                notifyOnProposal: true,
+                // Even with nothing switched on, the console edits the saved
+                // document rather than an empty one.
+                bridges: saved.bridges.normalised
+            )
+        }
+        return await privacy.engine.snapshot()
+    }
+
+    public func privacyTool(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
+        guard let privacy else {
+            return PrivacyToolResponse.failure(
+                503,
+                "隐私桥接未启用 / the privacy bridge is switched off",
+                extra: ["switch": .string(call.namespace.rawValue)]
+            )
+        }
+        // Swept on the way past the door, so a proposal that aged out while nobody
+        // was looking is expired before it can be approved, and the answer the
+        // caller gets is the same one the panel will show afterwards.
+        await privacy.ledger.expire()
+        let outcome = await privacy.engine.handle(call)
+        await hub.publish(
+            .privacy,
+            "\(call.namespace.rawValue) · \(call.action) → \(outcome.ok ? "已受理 / answered" : "已拒绝 / refused")",
+            level: outcome.ok ? .notice : .warning,
+            payload: [
+                "namespace": .string(call.namespace.rawValue),
+                "action": .string(call.action),
+                "status": .int(outcome.status),
+                "source": .string(call.source)
+            ]
+        )
+        return outcome
+    }
+
+    /// Applies a console 「批准 / 驳回」 click.
+    ///
+    /// The receipt is minted here rather than handed to the page: the panel's poll
+    /// carries proposal ids, and a payload that also carried the signing token would turn
+    /// any leak of the console response into a write capability. The ledger still sees
+    /// the same `id + verb` HMAC it does for a phone card reply, so both entry points
+    /// walk one validated road to the executor and neither can approve a proposal other
+    /// than the one it was shown.
+    public func privacyDecision(domain: String, id: String, verb: String) async -> PrivacyToolResponse {
+        guard let privacy, let namespace = PrivacyToolNamespace(rawValue: domain) else {
+            return PrivacyToolResponse.failure(
+                503,
+                "隐私桥接未启用 / the privacy bridge is switched off",
+                extra: ["switch": .string(domain)]
+            )
+        }
+        await privacy.ledger.expire()
+        let receipt = await privacy.ledger.receipt(id: id, verb: verb)
+        let call = PrivacyToolCall(
+            namespace: namespace,
+            action: verb,
+            id: id,
+            payload: ["receipt": .string(receipt)],
+            source: "console"
+        )
+        let outcome = await privacy.engine.handle(call)
+        await hub.publish(
+            .privacy,
+            "控制台\(verb == PrivacyToolAction.approve ? "批准" : "驳回") · \(domain) · \(outcome.ok ? "已执行 / applied" : "未执行 / not applied")",
+            level: outcome.ok ? .notice : .warning,
+            payload: [
+                "namespace": .string(domain),
+                "action": .string(verb),
+                "status": .int(outcome.status),
+                "source": .string("console")
+            ]
+        )
+        return outcome
+    }
+
+    /// Console-only: raises the TCC dialog. No tool route reaches this, because an
+    /// authorization grant is the one thing a caller must not be able to ask for.
+    public func requestCalendarAccess() async -> String {
+        guard let privacy else { return PrivacyAuthorization.notDetermined }
+        let state = await privacy.engine.requestCalendarAccess()
+        await hub.publish(
+            .privacy,
+            "日历授权状态 · \(state) / calendar authorization state",
+            level: state == PrivacyAuthorization.denied ? .warning : .notice,
+            payload: ["authorization": .string(state)]
+        )
+        return state
     }
 
     /// Delegates to the wire parser in the contract so the console, the bridge and

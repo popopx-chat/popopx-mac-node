@@ -101,8 +101,22 @@ public enum NodeWire {
     /// Default lifetime of a one-time pairing offer.
     public static let pairingOfferLifetime: TimeInterval = 15 * 60
 
+    /// How long a privacy-bridge proposal stays approvable. Same 15 minutes as a
+    /// pairing offer, and for the same reason: long enough to answer from a phone,
+    /// short enough that an unanswered proposal is not a standing permission.
+    public static let proposalLifetime: TimeInterval = 15 * 60
+
     /// Minimum wall time between two console heartbeat events.
     public static let heartbeatInterval: TimeInterval = 20
+
+    /// Services this node will run: the ten engines, plus the two privacy-bridge
+    /// namespaces. The bridges are deliberately *not* `EngineKind` cases — that enum
+    /// is the subscription catalogue, it drives the engine grid, the pull ladder and
+    /// the generated `service-table.json` — but a confirmation card has to be
+    /// replayable through this parser, so the grammar accepts both.
+    public static func isKnownService(_ serviceId: String) -> Bool {
+        EngineKind(rawValue: serviceId) != nil || PrivacyToolNamespace(rawValue: serviceId) != nil
+    }
 
     /// The one and only parser for `::popopx_sys::NODE_CMD::{serviceId}::{action}::{payload}`.
     ///
@@ -110,7 +124,7 @@ public enum NodeWire {
     /// survives intact — matching the iOS parser, which also splits on the first
     /// `::` only and treats everything after it as opaque. Returns nil (never a
     /// partially-filled command) for a foreign marker, a missing segment, an
-    /// unknown engine id, or a payload over the length the iOS side accepts.
+    /// unknown service id, or a payload over the length the iOS side accepts.
     public static func parseCommand(
         _ text: String,
         senderPublicKey: String = "local-console",
@@ -125,7 +139,7 @@ public enum NodeWire {
         let action = segments[1].trimmingCharacters(in: .whitespaces)
         let payload = segments[2...].joined(separator: "::")
         guard !serviceId.isEmpty, !action.isEmpty, !payload.isEmpty else { return nil }
-        guard EngineKind(rawValue: serviceId) != nil else { return nil }
+        guard isKnownService(serviceId) else { return nil }
         // The 1024-char ceiling the iOS parser enforces covers everything after
         // `::popopx_sys::NODE_CMD::`, so the two leading segments are charged too.
         let used = serviceId.count + action.count + 2
@@ -1521,6 +1535,14 @@ public struct CommandResult: Codable, Sendable, Equatable, Identifiable {
     public var durationMs: Int
     public var at: Date
     public var metrics: [String: JSONValue]
+    /// Names the card when the reply is not one of the ten subscription businesses.
+    /// The privacy bridges ride this same struct because it is what the outbox
+    /// stores, and their cards must not sign as "Shadow Chief of Staff".
+    ///
+    /// Optional on purpose: `Codable` synthesises a *required* key for
+    /// `String = ""`, so a non-optional field would fail to decode every outbox
+    /// file written before it existed, silently dropping queued results.
+    public var cardLabel: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -1533,7 +1555,8 @@ public struct CommandResult: Codable, Sendable, Equatable, Identifiable {
         artifacts: [String] = [],
         durationMs: Int = 0,
         at: Date = Date(),
-        metrics: [String: JSONValue] = [:]
+        metrics: [String: JSONValue] = [:],
+        cardLabel: String? = nil
     ) {
         self.id = id
         self.commandID = commandID
@@ -1546,6 +1569,7 @@ public struct CommandResult: Codable, Sendable, Equatable, Identifiable {
         self.durationMs = durationMs
         self.at = at
         self.metrics = metrics
+        self.cardLabel = cardLabel
     }
 
     public static func failure(_ engine: EngineKind, _ message: String, commandID: String? = nil) -> CommandResult {
@@ -1556,7 +1580,8 @@ public struct CommandResult: Codable, Sendable, Equatable, Identifiable {
     public var cardText: String {
         let flag = ok ? "✅" : "⚠️"
         let timing = durationMs > 0 ? " · \(durationMs) ms" : ""
-        return "\(flag) \(engine.displayNameEn) · \(headline)\(timing)"
+        let who = cardLabel ?? engine.displayNameEn
+        return "\(flag) \(who) · \(headline)\(timing)"
     }
 }
 
@@ -2055,6 +2080,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     public var paywall: PaywallConfig
     public var shadowWorkspaces: [String]
     public var llmModelOverride: String
+    public var privacyBridges: PrivacyBridgeConfig?
     public var revision: Int
     public var updatedAt: Date
 
@@ -2074,6 +2100,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         paywall: PaywallConfig = PaywallConfig(),
         shadowWorkspaces: [String] = [],
         llmModelOverride: String = "",
+        privacyBridges: PrivacyBridgeConfig? = nil,
         revision: Int = 0,
         updatedAt: Date = Date()
     ) {
@@ -2092,6 +2119,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         self.paywall = paywall
         self.shadowWorkspaces = shadowWorkspaces
         self.llmModelOverride = llmModelOverride
+        self.privacyBridges = privacyBridges
         self.revision = revision
         self.updatedAt = updatedAt
     }
@@ -2115,6 +2143,124 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     /// Every engine switch name → on/off pair the console can render directly.
     public var enabledEngineList: [EngineKind] {
         EngineKind.displayOrder.filter { isEnabled($0) }
+    }
+
+    /// The bridges as they behave when nothing has been stored yet: everything
+    /// off. Reading a missing document as "disabled" is what lets the calendar and
+    /// workspace tools stay opt-in across an upgrade.
+    public var bridges: PrivacyBridgeConfig { privacyBridges ?? PrivacyBridgeConfig.disabled }
+
+    public func withBridges(_ config: PrivacyBridgeConfig) -> NodeSettings {
+        var copy = self
+        copy.privacyBridges = config
+        return copy
+    }
+}
+
+// MARK: - Privacy bridges
+
+/// The raw-data capabilities the node may exercise on the owner's behalf, and the
+/// availability defaults the calendar tool applies when a caller leaves a probe
+/// field out.
+///
+/// Every capability starts closed and stays closed until the owner flips it in the
+/// console, because each one grants access to data that never leaves this Mac:
+/// calendar detail, and the file contents inside the authorized directories.
+public struct PrivacyBridgeConfig: Codable, Sendable, Equatable {
+    /// Hard ceiling on authorized directories. Three is enough for the
+    /// "Documents / Projects / Desktop" case and keeps the review surface small.
+    public static let maximumDirectories = 3
+
+    public var allowCalendarAccess: Bool
+    public var allowWorkspaceRead: Bool
+    public var allowWorkspaceWrite: Bool
+    /// User-shaped paths (`~/Documents/POPOPX-Workspace`), resolved at use time.
+    /// Storing the raw text rather than a resolved URL keeps a settings document
+    /// portable across machines and users.
+    public var workspaceDirectories: [String]
+    /// Empty means "the Mac's current zone", resolved per call rather than frozen
+    /// into the settings document.
+    public var timezoneIdentifier: String
+    public var workingStartHour: Int
+    public var workingEndHour: Int
+    /// ISO weekday numbers, 1 = Monday … 7 = Sunday.
+    public var workdays: [Int]
+    public var blockLunch: Bool
+    public var lunchStartHour: Int
+    public var lunchEndHour: Int
+    public var bufferMinutes: Int
+    public var defaultDurationMinutes: Int
+    /// macOS Notification Center reminder for a new proposal. Tests and headless
+    /// runs turn this off; nothing else depends on it.
+    public var notifyOnProposal: Bool
+    /// Template for the call link written into a created event's `LOCATION` and
+    /// `DESCRIPTION`, with `{ref}` and `{node}` placeholders — empty means the tool
+    /// proposes meetings without a link.
+    ///
+    /// A template rather than a constant because the node does not own the call
+    /// scheme: minting a plausible `https://…` link here would put a dead button in
+    /// the owner's calendar, and the operator pastes their real one once.
+    public var callLinkTemplate: String
+
+    public init(
+        allowCalendarAccess: Bool = false,
+        allowWorkspaceRead: Bool = false,
+        allowWorkspaceWrite: Bool = false,
+        workspaceDirectories: [String] = [],
+        timezoneIdentifier: String = "",
+        workingStartHour: Int = 9,
+        workingEndHour: Int = 18,
+        workdays: [Int] = [1, 2, 3, 4, 5],
+        blockLunch: Bool = false,
+        lunchStartHour: Int = 12,
+        lunchEndHour: Int = 13,
+        bufferMinutes: Int = 0,
+        defaultDurationMinutes: Int = 30,
+        notifyOnProposal: Bool = true,
+        callLinkTemplate: String = ""
+    ) {
+        self.allowCalendarAccess = allowCalendarAccess
+        self.allowWorkspaceRead = allowWorkspaceRead
+        self.allowWorkspaceWrite = allowWorkspaceWrite
+        self.workspaceDirectories = workspaceDirectories
+        self.timezoneIdentifier = timezoneIdentifier
+        self.workingStartHour = workingStartHour
+        self.workingEndHour = workingEndHour
+        self.workdays = workdays
+        self.blockLunch = blockLunch
+        self.lunchStartHour = lunchStartHour
+        self.lunchEndHour = lunchEndHour
+        self.bufferMinutes = bufferMinutes
+        self.defaultDurationMinutes = defaultDurationMinutes
+        self.notifyOnProposal = notifyOnProposal
+        self.callLinkTemplate = callLinkTemplate
+    }
+
+    public static let disabled = PrivacyBridgeConfig()
+
+    /// Clamped copy: the tools read hours and minutes straight from this, so the
+    /// bounds are enforced once, on the way in, instead of at every call site.
+    public var normalised: PrivacyBridgeConfig {
+        var copy = self
+        copy.workspaceDirectories = copy.workspaceDirectories
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        // The ceiling is enforced once, here, so no call site has to remember it and a
+        // hand-edited settings document cannot widen the readable set past three.
+        if copy.workspaceDirectories.count > Self.maximumDirectories {
+            copy.workspaceDirectories = Array(copy.workspaceDirectories.prefix(Self.maximumDirectories))
+        }
+        copy.workingStartHour = min(max(copy.workingStartHour, 0), 23)
+        copy.workingEndHour = min(max(copy.workingEndHour, 1), 24)
+        if copy.workingEndHour <= copy.workingStartHour { copy.workingEndHour = copy.workingStartHour + 1 }
+        copy.lunchStartHour = min(max(copy.lunchStartHour, 0), 23)
+        copy.lunchEndHour = min(max(copy.lunchEndHour, 1), 24)
+        if copy.lunchEndHour <= copy.lunchStartHour { copy.lunchEndHour = copy.lunchStartHour + 1 }
+        copy.workdays = Array(Set(copy.workdays.filter { (1...7).contains($0) })).sorted()
+        copy.bufferMinutes = min(max(copy.bufferMinutes, 0), 240)
+        copy.defaultDurationMinutes = min(max(copy.defaultDurationMinutes, 5), 720)
+        copy.callLinkTemplate = String(copy.callLinkTemplate.trimmingCharacters(in: .whitespacesAndNewlines).prefix(240))
+        return copy
     }
 }
 
@@ -2565,6 +2711,7 @@ public struct ConsoleEvent: Codable, Sendable, Equatable {
         case mesh
         case sentinel
         case settings
+        case privacy
         case system
     }
 
@@ -2617,6 +2764,7 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
     public var vaults: [TimelockEnvelope]
     public var consoleURL: String
     public var eventsBacklog: [ConsoleEvent]
+    public var privacy: PrivacyBridgeSnapshot
 
     public init(
         node: NodeIdentity,
@@ -2636,7 +2784,8 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         lockdowns: [LockdownReceipt],
         vaults: [TimelockEnvelope],
         consoleURL: String,
-        eventsBacklog: [ConsoleEvent] = []
+        eventsBacklog: [ConsoleEvent] = [],
+        privacy: PrivacyBridgeSnapshot = PrivacyBridgeSnapshot.empty
     ) {
         self.node = node
         self.version = NodeVersion.current.semanticString
@@ -2658,6 +2807,173 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         self.vaults = vaults
         self.consoleURL = consoleURL
         self.eventsBacklog = eventsBacklog
+        self.privacy = privacy
+    }
+}
+
+// MARK: - Privacy bridge snapshot
+
+/// What the 「隐私授权与协作桥接」 panel renders: the switch state, the proposals
+/// waiting on a click, and the tail of the audit log.
+///
+/// Nothing in here can carry calendar or file text from the owner's own data. The
+/// only free strings are the ones the node or the assistant authored inside a
+/// proposal, which is the whole point of the ledger: an approval always shows its
+/// own payload.
+public struct PrivacyBridgeSnapshot: Codable, Sendable, Equatable {
+    public var calendarAllowed: Bool
+    public var workspaceReadAllowed: Bool
+    public var workspaceWriteAllowed: Bool
+    /// macOS's own answer for the calendar permission — `notDetermined`,
+    /// `authorized`, `denied`, `restricted`. Read-only: the node cannot revoke a
+    /// TCC decision, so the console shows the state and the button that asks.
+    public var eventAuthorization: String
+    public var directories: [String]
+    /// Directories that currently exist and are reachable, as `~`-anonymised paths.
+    public var reachableDirectories: [String]
+    public var pendingProposals: [PrivacyProposalCard]
+    public var bookings: [PrivacyBookingCard]
+    public var auditLog: [PrivacyAuditRow]
+    public var notifyOnProposal: Bool
+    /// The config the bridge is actually running, so the console can edit a real
+    /// document instead of a JavaScript restatement of Swift's defaults. A settings
+    /// file may legitimately omit `privacyBridges`; this never does.
+    public var bridges: PrivacyBridgeConfig
+    /// How many directories the node will keep, so the panel caps its own input with the
+    /// number the engine enforces instead of a copy that can drift.
+    public var directoryCeiling: Int
+
+    public init(
+        calendarAllowed: Bool = false,
+        workspaceReadAllowed: Bool = false,
+        workspaceWriteAllowed: Bool = false,
+        eventAuthorization: String = PrivacyAuthorization.notDetermined,
+        directories: [String] = [],
+        reachableDirectories: [String] = [],
+        pendingProposals: [PrivacyProposalCard] = [],
+        bookings: [PrivacyBookingCard] = [],
+        auditLog: [PrivacyAuditRow] = [],
+        notifyOnProposal: Bool = true,
+        bridges: PrivacyBridgeConfig = PrivacyBridgeConfig.disabled,
+        directoryCeiling: Int = PrivacyBridgeConfig.maximumDirectories
+    ) {
+        self.calendarAllowed = calendarAllowed
+        self.workspaceReadAllowed = workspaceReadAllowed
+        self.workspaceWriteAllowed = workspaceWriteAllowed
+        self.eventAuthorization = eventAuthorization
+        self.directories = directories
+        self.reachableDirectories = reachableDirectories
+        self.pendingProposals = pendingProposals
+        self.bookings = bookings
+        self.auditLog = auditLog
+        self.notifyOnProposal = notifyOnProposal
+        self.bridges = bridges
+        self.directoryCeiling = directoryCeiling
+    }
+
+    public static let empty = PrivacyBridgeSnapshot()
+}
+
+/// The TCC states the console can display, spelled the way EventKit names them so
+/// the string needs no translation table to stay honest.
+public enum PrivacyAuthorization {
+    public static let notDetermined = "notDetermined"
+    public static let authorized = "authorized"
+    public static let denied = "denied"
+    public static let restricted = "restricted"
+    public static let fullAccess = "fullAccess"
+    public static let writeOnly = "writeAccess"
+}
+
+/// One pending proposal, in the form the console and the phone card both render.
+public struct PrivacyProposalCard: Codable, Sendable, Equatable {
+    public var id: String
+    public var domain: String
+    public var action: String
+    public var title: String
+    public var detail: String
+    public var startISO: String
+    public var endISO: String
+    public var bookingRef: String
+    public var path: String
+    public var state: String
+    public var expiresISO: String
+    public var secondsLeft: Int
+    public var canApprove: Bool
+
+    public init(
+        id: String,
+        domain: String,
+        action: String,
+        title: String = "",
+        detail: String = "",
+        startISO: String = "",
+        endISO: String = "",
+        bookingRef: String = "",
+        path: String = "",
+        state: String = "pending_user_approval",
+        expiresISO: String = "",
+        secondsLeft: Int = 0,
+        canApprove: Bool = true
+    ) {
+        self.id = id
+        self.domain = domain
+        self.action = action
+        self.title = title
+        self.detail = detail
+        self.startISO = startISO
+        self.endISO = endISO
+        self.bookingRef = bookingRef
+        self.path = path
+        self.state = state
+        self.expiresISO = expiresISO
+        self.secondsLeft = secondsLeft
+        self.canApprove = canApprove
+    }
+}
+
+/// A POPOPX-created booking, from the local ledger. `title` is text this node
+/// authored, never text read back out of the owner's calendar.
+public struct PrivacyBookingCard: Codable, Sendable, Equatable {
+    public var ref: String
+    public var action: String
+    public var title: String
+    public var startISO: String
+    public var endISO: String
+    public var sequence: Int
+
+    public init(
+        ref: String,
+        action: String,
+        title: String = "",
+        startISO: String = "",
+        endISO: String = "",
+        sequence: Int = 0
+    ) {
+        self.ref = ref
+        self.action = action
+        self.title = title
+        self.startISO = startISO
+        self.endISO = endISO
+        self.sequence = sequence
+    }
+}
+
+/// One audit row. Refs and results only — the log is the file a user pastes into a
+/// support thread, so it must be structurally incapable of leaking a schedule.
+public struct PrivacyAuditRow: Codable, Sendable, Equatable {
+    public var at: String
+    public var domain: String
+    public var action: String
+    public var outcome: String
+    public var detail: String
+
+    public init(at: String, domain: String, action: String, outcome: String, detail: String = "") {
+        self.at = at
+        self.domain = domain
+        self.action = action
+        self.outcome = outcome
+        self.detail = detail
     }
 }
 
@@ -2709,6 +3025,14 @@ public enum AppPaths {
     public static var offerFile: URL { pairing.appendingPathComponent("offer.json") }
     public static var lockdownLedgerFile: URL { ledger.appendingPathComponent("lockdown.json") }
     public static var meshLedgerFile: URL { ledger.appendingPathComponent("mesh.json") }
+    /// The controlled ledger of POPOPX-created bookings: `bookingRefId` → what this
+    /// node wrote into the calendar, and nothing else. It is the only reason a
+    /// reschedule or cancel proposal can name a booking at all — the node never
+    /// looks up an event it did not create.
+    public static var privacyLedgerFile: URL { ledger.appendingPathComponent("privacy.json") }
+    /// HMAC key for an approval receipt. Lives in `vault`, like every other secret
+    /// this node mints.
+    public static var privacyApprovalKeyFile: URL { vault.appendingPathComponent("privacy-approval.key") }
     public static var installLogFile: URL { logs.appendingPathComponent("install.log") }
     public static var auditLogFile: URL { logs.appendingPathComponent("node.log") }
 
@@ -3345,11 +3669,33 @@ public protocol NodeConsoleFacade: Sendable {
     func submitWireCommand(_ text: String) async -> CommandResult
     func invokeEngine(_ kind: EngineKind, action: String, payload: [String: JSONValue]) async -> CommandResult
     func openInFinder(path: String) async
+    /// Runs one privacy-bridge tool call, from either entry point. The switches are
+    /// checked inside the engine, so a facade cannot accidentally answer a call it
+    /// was not authorized to answer.
+    func privacyTool(_ call: PrivacyToolCall) async -> PrivacyToolResponse
+    /// Raises the EventKit access request. Console-only, and the only way the node
+    /// ever asks TCC for calendar access.
+    func requestCalendarAccess() async -> String
+    /// Applies a console approval or rejection to one proposal. Console-only: the
+    /// receipt is minted here, inside the node, so it never travels to the page.
+    func privacyDecision(domain: String, id: String, verb: String) async -> PrivacyToolResponse
 }
 
 public extension NodeConsoleFacade {
     /// Convenience overload: the console always asks for a 512 px QR.
     func pairingQR() async -> QRAsset? { await pairingQR(pixelSize: 512) }
+
+    /// A facade without a privacy bridge says so rather than inventing an answer.
+    /// The bind-path fakes in the test target ride this; `NodeConsole` overrides both.
+    func privacyTool(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
+        PrivacyToolResponse.failure(503, "本节点没有隐私桥接 / this facade has no privacy bridge")
+    }
+
+    func requestCalendarAccess() async -> String { PrivacyAuthorization.notDetermined }
+
+    func privacyDecision(domain: String, id: String, verb: String) async -> PrivacyToolResponse {
+        PrivacyToolResponse.failure(503, "本节点没有隐私桥接 / this facade has no privacy bridge")
+    }
 }
 
 // MARK: - Console API paths
@@ -3371,10 +3717,46 @@ public enum ConsoleRoute {
     public static let commandInject = "/api/command"
     public static let health = "/api/health"
 
+    // MARK: Privacy-bridge tools
+    //
+    // The tool surface shares the loopback listener and the bearer token with
+    // `/api/*` but keeps its own prefix, because the path is the contract the
+    // assistants code against: POST /v1/tools/{domain}/{action}.
+
+    public static let toolPrefix = "/v1/tools/"
+    public static let calendarAvailability = "/v1/tools/calendar/availability"
+    public static let calendarProposals = "/v1/tools/calendar/proposals"
+    public static let workspaceSummarize = "/v1/tools/workspace/summarize"
+    public static let workspaceProposals = "/v1/tools/workspace/proposals"
+    /// Console-only: flips the switches and, for the calendar, raises the TCC
+    /// request. There is no tool path for this on purpose — an authorization grant
+    /// is the one thing that must not be reachable from a caller.
+    public static let privacyAuthorize = "/api/privacy/authorize"
+    /// Console-only: applies a 「批准 / 驳回」 click to a proposal the panel is showing.
+    ///
+    /// The receipt the ledger demands is minted inside the node from this call instead
+    /// of being handed to the page, so no poll payload ever carries a write capability:
+    /// what authorizes the console path is the loopback bearer token plus the click on
+    /// one specific id, and the ledger still validates exactly one road to the executor
+    /// for both entry points.
+    public static let privacyDecision = "/api/privacy/decision"
+
+    /// `/v1/tools/{domain}/proposals/{id}/{verb}` — the approval gate, addressed by
+    /// proposal id.
+    public static func proposalDecision(_ domain: String, id: String, verb: String) -> String {
+        "/v1/tools/\(domain)/proposals/\(id)/\(verb)"
+    }
+
     public static let all: [String] = [
         index, snapshot, events, installStart, installCancel,
         pairingRotate, pairingQR, pairingRevoke, settings,
-        engineToggle, engineInvoke, commandInject, health
+        engineToggle, engineInvoke, commandInject, health, privacyAuthorize, privacyDecision
+    ]
+
+    /// The tool endpoints, kept out of `all` because `all` is the SPA surface the
+    /// `ConsoleRoute.count` contract test counts.
+    public static let tools: [String] = [
+        calendarAvailability, calendarProposals, workspaceSummarize, workspaceProposals
     ]
 }
 

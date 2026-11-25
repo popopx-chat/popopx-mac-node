@@ -26,7 +26,9 @@ let package = Package(
                 .linkedFramework("CryptoKit"),
                 .linkedFramework("CoreImage"),
                 .linkedFramework("AppKit"),
-                .linkedFramework("ServiceManagement")
+                .linkedFramework("ServiceManagement"),
+                .linkedFramework("EventKit"),
+                .linkedFramework("UserNotifications")
             ]
         ),
         .executableTarget(
@@ -36,7 +38,9 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("AppKit"),
-                .linkedFramework("ServiceManagement")
+                .linkedFramework("ServiceManagement"),
+                .linkedFramework("EventKit"),
+                .linkedFramework("UserNotifications")
             ]
         ),
         .testTarget(

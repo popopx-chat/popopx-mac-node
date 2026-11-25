@@ -661,6 +661,36 @@ textarea{min-height:66px;resize:vertical;font-family:var(--mono);font-size:var(-
 .engine__meta i{font-style:normal;color:var(--dim)}
 .engine__foot{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
 .engine__ref{font-family:var(--mono);font-size:var(--fs-xs);color:#4f4f5c;margin-left:auto}
+/* ---- privacy bridges -------------------------------------------------- */
+/* One card per proposal: the left rule carries its state, because the thing an
+   operator scans for on this page is "what is waiting for me right now". */
+.pv{display:flex;flex-direction:column;gap:var(--s3)}
+.pv-card{
+  display:flex;flex-direction:column;gap:var(--s2);
+  padding:var(--s3);border:1px solid var(--hair);border-left:2px solid var(--accent);
+  border-radius:var(--r-m);background:rgba(255,255,255,.025);
+}
+.pv-card.is-spent{border-left-color:var(--hair-strong);opacity:.72}
+.pv-card.is-live{border-left-color:var(--ok)}
+.pv-top{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
+.pv-title{font-size:var(--fs-sm);font-weight:650;color:var(--ink)}
+.pv-meta{font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute)}
+.pv-line{font-size:var(--fs-xs);color:var(--dim);word-break:break-word}
+.pv-acts{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center}
+.pv-ttl{margin-left:auto;font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute)}
+.pv-ttl.is-soon{color:var(--warn)}
+.pv-log{display:flex;flex-direction:column;gap:var(--s1);max-height:280px;overflow:auto;font-family:var(--mono);font-size:var(--fs-xs)}
+.pv-log__row{display:flex;gap:var(--s2);align-items:baseline;border-bottom:1px solid var(--hair);padding-bottom:3px}
+.pv-log__at{flex:0 0 auto;color:#4f4f5c}
+.pv-log__tx{min-width:0;color:var(--dim);word-break:break-word}
+.dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:var(--mute)}
+.dot--ok{background:var(--ok)}
+.dot--bad{background:var(--bad)}
+.btn--ok{border-color:rgba(63,214,143,.45);color:var(--ok)}
+.btn--bad{border-color:rgba(255,107,120,.4);color:var(--bad)}
+/* The second click of the confirmation gate: an armed button says so, in the
+   warning colour, and a poll that rebuilds the panel always drops the arm. */
+.btn.is-arm{background:rgba(255,204,92,.16);border-color:rgba(255,204,92,.55);color:var(--warn)}
 /* ---- states ----------------------------------------------------------- */
 .empty,.error{
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--s2);
@@ -782,6 +812,11 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
     <span class="rail__idx">03</span>
     <span class="rail__name" data-i18n="s3"></span>
     <span class="rail__badge" id="railbadge-3"></span>
+  </button>
+  <button class="rail__btn" id="rail-4" data-step="4" data-status="todo" onclick="PPX.step(4)">
+    <span class="rail__idx">04</span>
+    <span class="rail__name" data-i18n="s4"></span>
+    <span class="rail__badge" id="railbadge-4"></span>
   </button>
 </nav>
 
@@ -930,6 +965,86 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
     <button class="btn btn--primary" id="btn-save" onclick="PPX.save()" data-i18n="save"></button>
   </div>
 </section>
+
+<section class="step" id="step-4" hidden>
+  <div class="panel">
+    <div class="panel__head">
+      <h2 data-i18n="s4Title"></h2>
+      <span class="tag" id="pv-badge">—</span>
+    </div>
+    <p class="panel__sub" data-i18n="s4Desc"></p>
+    <div class="grid grid--stats" id="pv-stats"></div>
+    <hr class="hair">
+    <p class="field__note" data-i18n="pvGuarantee"></p>
+  </div>
+
+  <div class="grid grid--split" style="margin-top:12px">
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="pvAccessTitle"></h3>
+          <span class="tag" id="pv-auth-tag">—</span>
+        </div>
+        <div id="pv-access"></div>
+        <hr class="hair">
+        <div class="btn-row">
+          <button class="btn btn--mini" id="pv-ask" onclick="PPX.pvAuthorize()">—</button>
+          <button class="btn btn--mini" id="pv-check" onclick="PPX.pvCheck()" data-i18n="pvCheck"></button>
+        </div>
+        <div class="engine__meta" id="pv-check-out"></div>
+        <p class="field__note" data-i18n="pvAuthNote"></p>
+        <hr class="hair">
+        <span class="field__label" data-i18n="pvDirsTitle"></span>
+        <div id="pv-dirs"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--mini" id="pv-adddir" onclick="PPX.pvAddDir()" data-i18n="pvDirAdd"></button>
+        </div>
+        <p class="field__note" data-i18n="pvDirHint"></p>
+        <hr class="hair">
+        <span class="field__label" data-i18n="pvDirsKnown"></span>
+        <div class="list" id="pv-dirs-known"></div>
+        <p class="field__note" data-i18n="pvDirsKnownNote"></p>
+      </section>
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="pvRulesTitle"></h3></div>
+        <div id="pv-rules"></div>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="pvPropTitle"></h3>
+          <span class="tag" id="pv-prop-tag">0</span>
+        </div>
+        <div class="pv" id="pv-proposals"></div>
+      </section>
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="pvBookTitle"></h3>
+          <span class="tag" id="pv-book-tag">0</span>
+        </div>
+        <div class="pv" id="pv-bookings"></div>
+      </section>
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="pvAuditTitle"></h3>
+          <button class="btn btn--tiny" onclick="PPX.pvAuditCopy()" data-i18n="pvAuditCopy"></button>
+        </div>
+        <div class="pv-log" id="pv-audit"></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="savebar">
+    <div class="savebar__state">
+      <span class="savebar__text" id="pv-save-text" data-i18n="saved"></span>
+      <span class="savebar__rev mono" id="pv-save-rev"></span>
+    </div>
+    <button class="btn" onclick="PPX.revert()" data-i18n="revert"></button>
+    <button class="btn btn--primary" id="pv-save" onclick="PPX.save()" data-i18n="save"></button>
+  </div>
+</section>
 </main>
 
 <div class="drawer" id="drawer">
@@ -1000,7 +1115,12 @@ var ROUTE = {
   engineToggle: "/api/engine/toggle",
   engineInvoke: "/api/engine/invoke",
   command: "/api/command",
-  health: "/api/health"
+  health: "/api/health",
+  privacyAuthorize: "/api/privacy/authorize",
+  privacyDecision: "/api/privacy/decision",
+  // The console self-check calls the same tool route an assistant calls, so a green
+  // line on the panel is evidence about the entry point, not about a special path.
+  toolAvailability: "/v1/tools/calendar/availability"
 };
 
 var LEVEL_GLYPH = { debug: "·", info: "›", notice: "•", success: "✓", warning: "!", error: "✕" };
@@ -1305,7 +1425,86 @@ var I18N = {
   ago: { zh: "前", en: "ago" },
   paired: { zh: "已配对", en: "Paired" },
   released: { zh: "已开启", en: "Released" },
-  now: { zh: "现在", en: "now" }
+  now: { zh: "现在", en: "now" },
+  /* Step four — the privacy bridges. The copy states what the node actually does,
+     not what a bridge could promise: a switch here authorizes a local read, and a
+     write still needs the second click below. */
+  s4: { zh: "隐私桥接", en: "Privacy bridges" },
+  s4Title: { zh: "隐私桥接与人工确认", en: "Privacy bridges and manual confirmation" },
+  s4Desc: { zh: "日历与工作区的原始数据只在本机读取；这里列出的是节点生成的摘要与待确认动作。", en: "Raw calendar and workspace data is read on this Mac only; what is listed here is the node's own digest and the actions awaiting you." },
+  pvGuarantee: { zh: "本页全部来自 127.0.0.1 的快照：日程标题、地点、参会人与文件正文在进入快照前已被丢弃；任何写入都要在这里或配对手机上再确认一次。", en: "Everything on this page comes from the loopback snapshot: event titles, locations, attendees and file bodies are discarded before it is encoded, and every write takes a second confirmation here or on a paired phone." },
+  pvAccessTitle: { zh: "授权开关", en: "Authorization switches" },
+  pvAuthNote: { zh: "开关是节点这一侧的授权；macOS 仍可能单独拒绝日历访问，下面显示系统的实际状态。", en: "A switch is the node's own grant; macOS can still refuse calendar access separately, so the system state is shown below." },
+  pvCalSwitch: { zh: "读取日历空闲时段（不读取日程内容）", en: "Read calendar free/busy slots (not event content)" },
+  pvReadSwitch: { zh: "读取已授权目录的文件摘要", en: "Summarize files inside authorized directories" },
+  pvWriteSwitch: { zh: "在已授权目录内写入（每次需确认）", en: "Write inside authorized directories (each one confirmed)" },
+  pvNotifySwitch: { zh: "有新提案时发送系统通知", en: "Notify me in Notification Center when a proposal arrives" },
+  pvAskAccess: { zh: "请求日历权限", en: "Ask macOS for calendar access" },
+  pvAuthAgain: { zh: "再次请求日历权限", en: "Ask macOS again" },
+  pvAuthAsked: { zh: "已按系统答复更新授权状态", en: "Authorization state updated from macOS" },
+  pvAuthAskFailed: { zh: "请求授权失败", en: "The access request failed" },
+  pvCheck: { zh: "自检未来 7 天", en: "Self-check the next 7 days" },
+  pvCheckOff: { zh: "日历桥接未开启，自检不会发起查询", en: "The calendar bridge is off, so no query is sent" },
+  pvCheckFree: { zh: "找到空闲时段", en: "Free slots found" },
+  pvCheckNone: { zh: "这 7 天没有可用空闲时段", en: "No free slot inside this window" },
+  pvCheckFailed: { zh: "自检被拒", en: "Self-check refused" },
+  pvDirsTitle: { zh: "已授权目录", en: "Authorized directories" },
+  pvDirAdd: { zh: "新增目录", en: "Add directory" },
+  pvDirRemove: { zh: "移除", en: "Remove" },
+  pvDirHint: { zh: "用 ~ 开头的写法即可，例如 ~/Documents/项目。节点只接受前三个，且只会读取目录内的文件。", en: "Write them user-style, for example ~/Documents/Projects. The node keeps the first three and only reads inside them." },
+  pvDirEmpty: { zh: "还没有目录；摘要与写入都会被拒绝。", en: "No directory yet; summarization and writes are both refused." },
+  pvDirMax: { zh: "已达到目录上限，先移除一个", en: "Directory ceiling reached, remove one first" },
+  pvDirOpen: { zh: "存在且可读", en: "Present and reachable" },
+  pvDirClosed: { zh: "不存在或不可达", en: "Missing or unreachable" },
+  pvDirsKnown: { zh: "节点实际接受并解析的目录", en: "Directories the node actually accepts and resolves" },
+  pvDirsKnownNote: { zh: "这一列来自节点，不是输入框：保存后才会一致，被裁掉的条目说明超过了上限。", en: "This column is the node's answer, not the input boxes: it only matches after a save, and a dropped entry means the ceiling was passed." },
+  pvDirNoneSaved: { zh: "节点没有接受任何目录", en: "The node has accepted no directory" },
+  pvRulesTitle: { zh: "空闲判定与提案默认值", en: "Free-slot rules and proposal defaults" },
+  pvWorkStart: { zh: "工作开始", en: "Working start" },
+  pvWorkEnd: { zh: "工作结束", en: "Working end" },
+  pvDuration: { zh: "默认时长（分钟）", en: "Default length (min)" },
+  pvBuffer: { zh: "前后缓冲（分钟）", en: "Buffer around (min)" },
+  pvLunchStart: { zh: "午休开始", en: "Lunch start" },
+  pvLunchEnd: { zh: "午休结束", en: "Lunch end" },
+  pvBlockLunch: { zh: "把午休视为占用", en: "Treat lunch as busy" },
+  pvWorkdays: { zh: "工作日", en: "Workdays" },
+  pvZone: { zh: "时区", en: "Time zone" },
+  pvZoneNote: { zh: "留空表示跟随这台 Mac 的当前时区。", en: "Empty means the Mac's current zone." },
+  pvCallTemplate: { zh: "通话链接模板", en: "Call link template" },
+  pvCallNote: { zh: "可放 {ref} 与 {node}；留空则提案不带链接。", en: "{ref} and {node} are substituted; empty means proposals carry no link." },
+  pvPropTitle: { zh: "等你确认的提案", en: "Proposals awaiting you" },
+  pvBookTitle: { zh: "本节点登记的预约", en: "Bookings this node minted" },
+  pvAuditTitle: { zh: "本机审计记录", en: "Local audit trail" },
+  pvAuditCopy: { zh: "复制记录", en: "Copy trail" },
+  pvNone: { zh: "没有待确认的提案", en: "Nothing awaiting a decision" },
+  pvNoBookings: { zh: "本节点还没有写入过日历", en: "This node has not written a calendar event yet" },
+  pvNoAudit: { zh: "还没有记录", en: "No entries yet" },
+  pvStatPending: { zh: "待确认", en: "Awaiting" },
+  pvStatBookings: { zh: "已登记预约", en: "Bookings" },
+  pvStatDirs: { zh: "可达目录", en: "Reachable dirs" },
+  pvStatDirsNote: { zh: "可达数 / 上限", en: "reachable / ceiling" },
+  pvBadgePending: { zh: "等你确认", en: "Awaiting you" },
+  pvBadgeQuiet: { zh: "无需你处理", en: "Nothing for you" },
+  pvActCreate: { zh: "新建日程", en: "create event" },
+  pvActReschedule: { zh: "改期", en: "reschedule" },
+  pvActCancel: { zh: "取消日程", en: "cancel event" },
+  pvActWrite: { zh: "写入文件", en: "write file" },
+  pvStatePending: { zh: "等你确认", en: "awaiting you" },
+  pvStateApproved: { zh: "已批准", en: "approved" },
+  pvStateExecuted: { zh: "已执行", en: "executed" },
+  pvStateRejected: { zh: "已驳回", en: "rejected" },
+  pvStateExpired: { zh: "已过期", en: "expired" },
+  pvStateFailed: { zh: "执行失败", en: "execution failed" },
+  pvStateCancelled: { zh: "已作废", en: "voided" },
+  pvDomainCal: { zh: "日历", en: "calendar" },
+  pvDomainWs: { zh: "工作区", en: "workspace" },
+  pvApprove: { zh: "批准并执行", en: "Approve and run" },
+  pvReject: { zh: "驳回", en: "Reject" },
+  pvConfirmAgain: { zh: "再点一次以确认", en: "Click again to confirm" },
+  pvCannotApprove: { zh: "该提案现在无法执行：所需开关或目录已关闭", en: "This one cannot run: the switch or directory it needs is off" },
+  pvTtlOver: { zh: "已超时", en: "timed out" },
+  decisionDone: { zh: "已按你的决定执行", en: "Your decision was applied" },
+  decisionFailed: { zh: "决定未能执行", en: "The decision could not be applied" }
 };
 
 /* ------------------------------------------------------- locale registry */
@@ -1950,6 +2149,11 @@ function renderRail() {
     : !offer ? "run"
       : new Date(offer.expiresAt).getTime() < nodeNow() ? "wait" : "todo");
   setRail(3, enabledCount(snap) > 0 ? "done" : "todo");
+  // Step four's badge is the one that should pull an operator back to the page: a
+  // proposal is only actionable while its receipt is alive.
+  var privacy = snap.privacy || {};
+  setRail(4, pvPendingCards().length ? "wait"
+    : (privacy.calendarAllowed || privacy.workspaceReadAllowed || privacy.workspaceWriteAllowed) ? "done" : "todo");
 }
 
 /* -------------------------------------------------------------- step one */
@@ -1972,7 +2176,7 @@ function renderStats() {
   slot.appendChild(statCard("freeDisk", bytes(hardware.freeDisk && hardware.freeDisk.bytes),
     t("freeDiskNote") + " " + bytes(hardware.totalDisk && hardware.totalDisk.bytes)));
   slot.appendChild(statCard("tier", tierLabel(hardware.tier || plan.tier), String(plan.videoPrecision || ""), true));
-  slot.appendChild(statCard("load", fmt(load.cpuLoadPercent, 0) + " %",
+  slot.appendChild(statCard("cpu", fmt(load.cpuLoadPercent, 0) + " %",
     t("processes") + " " + String(load.activeProcessCount || 0) + " · " + t("pressure") + " " + t(String(load.memoryPressure || "nominal"))));
 }
 
@@ -2682,6 +2886,7 @@ function buildSettingsForm() {
   buildMeshForm();
   buildSentinelForm();
   buildArkForm();
+  buildPrivacyForm();
 }
 function renderSettingsViews() {
   var snap = S.snap;
@@ -2829,16 +3034,436 @@ function drillCard(result) {
   });
   return card;
 }
+var SAVE_BARS = [["save-text", "save-rev", "btn-save"], ["pv-save-text", "pv-save-rev", "pv-save"]];
+/* Two steps post the same settings document, so both bars must tell the truth about it:
+   leaving the second one static would let step four claim 「已保存」 while step three was
+   still dirty. */
 function renderSaveBar() {
-  var text = el("save-text");
-  if (!text) { return; }
-  if (S.saving) { text.textContent = t("saving"); text.className = "savebar__text"; }
-  else if (S.dirty) { text.textContent = t("dirty"); text.className = "savebar__text is-dirty"; }
-  else { text.textContent = t("saved"); text.className = "savebar__text"; }
-  setText("save-rev", t("revision") + " " + String(S.formBase) + " · " + t("now") + " " + String(nodeRevision()));
-  var button = el("btn-save");
-  button.textContent = S.saving ? t("saving") : t("save");
-  button.classList.toggle("is-disabled", S.saving || !S.dirty);
+  var label = S.saving ? t("saving") : (S.dirty ? t("dirty") : t("saved"));
+  var kind = S.saving || S.dirty ? "savebar__text is-dirty" : "savebar__text";
+  SAVE_BARS.forEach(function (bar) {
+    var text = el(bar[0]);
+    if (!text) { return; }
+    text.textContent = label;
+    text.className = kind;
+    setText(bar[1], t("revision") + " " + String(S.formBase) + " · " + t("now") + " " + String(nodeRevision()));
+    var button = el(bar[2]);
+    if (!button) { return; }
+    button.textContent = S.saving ? t("saving") : t("save");
+    button.classList.toggle("is-disabled", S.saving || !S.dirty);
+  });
+}
+
+/* -------------------------------------------------------------- step four */
+/* The privacy panel renders the snapshot's own cards. The node discards event titles,
+   locations and attendees before it encodes them, so this page has no raw calendar text
+   to leak even if a caller injected one: every string below is a bucket count, a stamp,
+   or a ref the node minted. */
+function pvSnap() { return (S.snap && S.snap.privacy) || {}; }
+/* Called only from renderers and from `buildSettingsForm`, never the other way round:
+   `ensureForm` is what invokes the builders, so a builder that asked for the form again
+   would recurse. */
+function pvConfig() {
+  if (!S.form) { return null; }
+  // Seeded from the config the engine is actually running, never from a copy of Swift's
+  // defaults written down here.
+  if (!S.form.privacyBridges) { S.form.privacyBridges = clone(pvSnap().bridges || {}); }
+  return S.form.privacyBridges;
+}
+function pvWhen(iso) {
+  var date = dateOf(iso);
+  if (!date) { return t("never"); }
+  function pad(x) { return x < 10 ? "0" + x : String(x); }
+  return pad(date.getMonth() + 1) + "-" + pad(date.getDate()) + " " + pad(date.getHours()) + ":" + pad(date.getMinutes());
+}
+/* Spelled out one `t()` call per value so the catalog gate in the contract test can see
+   every key: a lookup table would hide a missing string behind a silent empty label. */
+function pvActionLabel(action) {
+  if (action === "create") { return t("pvActCreate"); }
+  if (action === "reschedule") { return t("pvActReschedule"); }
+  if (action === "cancel") { return t("pvActCancel"); }
+  if (action === "write") { return t("pvActWrite"); }
+  return String(action || "—");
+}
+function pvStateLabel(state) {
+  if (state === "pending_user_approval") { return t("pvStatePending"); }
+  if (state === "approved") { return t("pvStateApproved"); }
+  if (state === "executed") { return t("pvStateExecuted"); }
+  if (state === "rejected") { return t("pvStateRejected"); }
+  if (state === "expired") { return t("pvStateExpired"); }
+  if (state === "failed") { return t("pvStateFailed"); }
+  if (state === "cancelled") { return t("pvStateCancelled"); }
+  return String(state || "—");
+}
+function pvDomainLabel(domain) {
+  return domain === "calendar" ? t("pvDomainCal") : t("pvDomainWs");
+}
+function pvTag(text, kind) { return h("span", { cls: "tag" + (kind ? " tag--" + kind : ""), text: text }); }
+function pvPendingCards() {
+  return (pvSnap().pendingProposals || []).filter(function (card) { return card.state === "pending_user_approval"; });
+}
+
+/* ---------------------------------------------------------------- the form */
+function buildPrivacyForm() {
+  var access = el("pv-access"), rules = el("pv-rules");
+  var cfg = pvConfig();
+  if (cfg) {
+    if (access) {
+      clear(access);
+      var box = h("div", { cls: "list" });
+      box.appendChild(checkField("pvCalSwitch", function () { return cfg.allowCalendarAccess; },
+        function (value) { cfg.allowCalendarAccess = value; }));
+      box.appendChild(checkField("pvReadSwitch", function () { return cfg.allowWorkspaceRead; },
+        function (value) { cfg.allowWorkspaceRead = value; }));
+      box.appendChild(checkField("pvWriteSwitch", function () { return cfg.allowWorkspaceWrite; },
+        function (value) { cfg.allowWorkspaceWrite = value; }));
+      box.appendChild(checkField("pvNotifySwitch", function () { return cfg.notifyOnProposal; },
+        function (value) { cfg.notifyOnProposal = value; }));
+      access.appendChild(box);
+    }
+    if (rules) { buildPrivacyRules(rules, cfg); }
+  }
+  renderPvDirRows();
+}
+function buildPrivacyRules(slot, cfg) {
+  clear(slot);
+  var grid = h("div", { cls: "fields" });
+  grid.appendChild(numField("pvWorkStart", function () { return Number(cfg.workingStartHour) || 9; },
+    function (value) { cfg.workingStartHour = value; }, 0, 23, null));
+  grid.appendChild(numField("pvWorkEnd", function () { return Number(cfg.workingEndHour) || 18; },
+    function (value) { cfg.workingEndHour = value; }, 1, 24, null));
+  grid.appendChild(numField("pvDuration", function () { return Number(cfg.defaultDurationMinutes) || 30; },
+    function (value) { cfg.defaultDurationMinutes = value; }, 5, 720, null));
+  grid.appendChild(numField("pvBuffer", function () { return Number(cfg.bufferMinutes) || 0; },
+    function (value) { cfg.bufferMinutes = value; }, 0, 240, null));
+  slot.appendChild(grid);
+  var lunch = h("div", { cls: "fields" });
+  lunch.appendChild(numField("pvLunchStart", function () { return Number(cfg.lunchStartHour) || 12; },
+    function (value) { cfg.lunchStartHour = value; }, 0, 23, null));
+  lunch.appendChild(numField("pvLunchEnd", function () { return Number(cfg.lunchEndHour) || 13; },
+    function (value) { cfg.lunchEndHour = value; }, 1, 24, null));
+  slot.appendChild(lunch);
+  slot.appendChild(checkField("pvBlockLunch", function () { return cfg.blockLunch; },
+    function (value) { cfg.blockLunch = value; }));
+  slot.appendChild(h("span", { cls: "field__label", text: t("pvWorkdays") }));
+  slot.appendChild(pvWorkdayPicker(cfg));
+  slot.appendChild(h("hr", { cls: "hair" }));
+  slot.appendChild(textField("pvZone", function () { return cfg.timezoneIdentifier; },
+    function (value) { cfg.timezoneIdentifier = value; }, null, "pvZoneNote"));
+  slot.appendChild(textField("pvCallTemplate", function () { return cfg.callLinkTemplate; },
+    function (value) { cfg.callLinkTemplate = value; }, null, "pvCallNote"));
+}
+/* The node stores ISO weekdays (1 = Monday … 7 = Sunday) while the shared weekday strip
+   is Apple's 0-based, Sunday-first order, so the two are converted at this edge only. */
+function pvWorkdayPicker(cfg) {
+  var host = h("div", { cls: "weekdays" });
+  var labels = WEEKDAYS[catalogFor(S.lang)] || WEEKDAYS.en;
+  function local(days) { return (days || []).map(function (day) { return day % 7; }); }
+  [1, 2, 3, 4, 5, 6, 0].forEach(function (day) {
+    var button = h("button", { type: "button", text: labels[day], title: labels[day] });
+    button.classList.toggle("is-on", local(cfg.workdays).indexOf(day) >= 0);
+    button.addEventListener("click", function () {
+      var list = local(cfg.workdays);
+      var position = list.indexOf(day);
+      if (position >= 0) { list.splice(position, 1); } else { list.push(day); }
+      cfg.workdays = list.map(function (value) { return value === 0 ? 7 : value; }).sort(function (a, b) { return a - b; });
+      button.classList.toggle("is-on", list.indexOf(day) >= 0);
+      markDirty();
+    });
+    host.appendChild(button);
+  });
+  return host;
+}
+function renderPvDirRows() {
+  var host = el("pv-dirs"), cfg = pvConfig();
+  if (!host || !cfg) { return; }
+  clear(host);
+  cfg.workspaceDirectories = cfg.workspaceDirectories || [];
+  cfg.workspaceDirectories.forEach(function (item, index) {
+    var input = h("input", { type: "text", spellcheck: "false", value: String(item), placeholder: "~/Documents/…" });
+    input.addEventListener("input", function () { cfg.workspaceDirectories[index] = input.value; markDirty(); });
+    host.appendChild(h("div", { cls: "list__row" }, [
+      input,
+      h("button", { cls: "btn btn--tiny", text: t("pvDirRemove"), type: "button", onclick: "PPX.pvRemoveDir(" + index + ")" })
+    ]));
+  });
+  if (!cfg.workspaceDirectories.length) { host.appendChild(note(t("pvDirEmpty"))); }
+}
+
+/* ------------------------------------------------------------- the readouts */
+function renderPrivacyStats() {
+  var privacy = pvSnap(), slot = el("pv-stats");
+  if (!slot) { return; }
+  clear(slot);
+  slot.appendChild(h("div", { cls: "stat" }, [
+    h("span", { cls: "stat__k", text: t("pvStatPending") }),
+    h("span", { cls: "stat__v", text: String(pvPendingCards().length) })
+  ]));
+  slot.appendChild(h("div", { cls: "stat" }, [
+    h("span", { cls: "stat__k", text: t("pvStatBookings") }),
+    h("span", { cls: "stat__v", text: String((privacy.bookings || []).length) })
+  ]));
+  slot.appendChild(h("div", { cls: "stat" }, [
+    h("span", { cls: "stat__k", text: t("pvStatDirs") }),
+    h("span", { cls: "stat__v stat__v--sm", text: String((privacy.reachableDirectories || []).length) + " / " + String(privacy.directoryCeiling || 0) }),
+    h("span", { cls: "stat__n", text: t("pvStatDirsNote") })
+  ]));
+  var badge = el("pv-badge");
+  if (badge) {
+    var pending = pvPendingCards().length;
+    badge.textContent = pending ? t("pvBadgePending") + " " + String(pending) : t("pvBadgeQuiet");
+    badge.className = "tag" + (pending ? " tag--warn" : " tag--off");
+  }
+  var tag = el("pv-prop-tag");
+  if (tag) {
+    var count = pvPendingCards().length;
+    tag.textContent = String(count);
+    tag.className = "tag" + (count ? " tag--warn" : "");
+  }
+}
+function renderPrivacyControls() {
+  var privacy = pvSnap(), cfg = pvConfig();
+  var state = String(privacy.eventAuthorization || "notDetermined");
+  var granted = state === "authorized" || state === "fullAccess";
+  var tag = el("pv-auth-tag");
+  if (tag) {
+    tag.textContent = state;
+    tag.className = "tag " + (granted ? "tag--ok" : state === "notDetermined" ? "tag--off" : "tag--bad");
+  }
+  var ask = el("pv-ask");
+  if (ask) {
+    ask.classList.toggle("is-disabled", !(cfg && cfg.allowCalendarAccess));
+    ask.textContent = granted ? t("pvAuthAgain") : t("pvAskAccess");
+  }
+  var add = el("pv-adddir");
+  if (add) {
+    var dirs = (cfg && cfg.workspaceDirectories) || [];
+    add.classList.toggle("is-disabled", dirs.length >= Number(privacy.directoryCeiling || 0));
+  }
+  var known = el("pv-dirs-known");
+  if (known) {
+    clear(known);
+    var reachable = privacy.reachableDirectories || [];
+    (privacy.directories || []).forEach(function (path) {
+      var open = reachable.indexOf(path) >= 0;
+      known.appendChild(h("div", { cls: "list__row" }, [
+        h("span", { cls: "dot" + (open ? " dot--ok" : " dot--bad"), title: open ? t("pvDirOpen") : t("pvDirClosed") }),
+        h("span", { cls: "pv-line mono", text: path })
+      ]));
+    });
+    if (!(privacy.directories || []).length) { known.appendChild(h("div", { cls: "pv-line", text: t("pvDirNoneSaved") })); }
+  }
+}
+function renderPrivacyProposals() {
+  var host = el("pv-proposals");
+  if (!host) { return; }
+  clear(host);
+  var cards = pvSnap().pendingProposals || [];
+  if (!cards.length) { host.appendChild(h("div", { cls: "empty", text: t("pvNone") })); return; }
+  cards.forEach(function (card) {
+    var pending = card.state === "pending_user_approval";
+    var box = h("div", { cls: "pv-card" + (pending ? "" : " is-spent") });
+    box.appendChild(h("div", { cls: "pv-top" }, [
+      h("span", { cls: "pv-title", text: pvActionLabel(card.action) }),
+      pvTag(pvDomainLabel(card.domain)),
+      pvTag(pvStateLabel(card.state), pending ? "warn" : card.state === "executed" ? "ok" : "off"),
+      h("span", {
+        cls: "pv-ttl" + (pending && Number(card.secondsLeft) > 0 && Number(card.secondsLeft) < 60 ? " is-soon" : ""),
+        text: pending ? dur(card.secondsLeft) : ""
+      })
+    ]));
+    if (card.title) { box.appendChild(h("div", { cls: "pv-line", text: String(card.title) })); }
+    if (card.startISO) {
+      box.appendChild(h("div", { cls: "pv-meta", text: pvWhen(card.startISO) + (card.endISO ? " → " + pvWhen(card.endISO) : "") }));
+    }
+    if (card.path) { box.appendChild(h("div", { cls: "pv-meta", text: anon(card.path) })); }
+    if (card.detail) { box.appendChild(h("div", { cls: "pv-line", text: String(card.detail).slice(0, 300) })); }
+    if (card.bookingRef) { box.appendChild(h("div", { cls: "pv-meta", text: String(card.bookingRef) })); }
+    var acts = h("div", { cls: "pv-acts" });
+    if (pending) {
+      ["approve", "reject"].forEach(function (verb) {
+        acts.appendChild(h("button", {
+          cls: "btn btn--mini " + (verb === "approve" ? "btn--ok" : "btn--bad"),
+          text: verb === "approve" ? t("pvApprove") : t("pvReject"),
+          type: "button",
+          "data-id": String(card.id || ""), "data-domain": String(card.domain || ""), "data-verb": verb,
+          "data-label": verb === "approve" ? t("pvApprove") : t("pvReject"),
+          onclick: "PPX.pvDecide(this)"
+        }));
+      });
+      if (!card.canApprove) { acts.appendChild(note(t("pvCannotApprove"))); }
+    }
+    box.appendChild(acts);
+    host.appendChild(box);
+  });
+}
+function renderPrivacyBookings() {
+  var host = el("pv-bookings");
+  if (!host) { return; }
+  clear(host);
+  var rows = pvSnap().bookings || [];
+  var tag = el("pv-book-tag");
+  if (tag) { tag.textContent = String(rows.length); }
+  if (!rows.length) { host.appendChild(h("div", { cls: "empty", text: t("pvNoBookings") })); return; }
+  rows.forEach(function (row) {
+    host.appendChild(h("div", { cls: "pv-card is-live" }, [
+      h("div", { cls: "pv-top" }, [
+        h("span", { cls: "pv-title", text: pvActionLabel(row.action) }),
+        pvTag("#" + String(row.sequence || 1), "accent"),
+        h("span", { cls: "pv-ttl mono", text: String(row.ref || "") })
+      ]),
+      row.title ? h("div", { cls: "pv-line", text: String(row.title) }) : null,
+      h("div", { cls: "pv-meta", text: pvWhen(row.startISO) + (row.endISO ? " → " + pvWhen(row.endISO) : "") })
+    ]));
+  });
+}
+function renderPrivacyAudit() {
+  var host = el("pv-audit");
+  if (!host) { return; }
+  clear(host);
+  var rows = pvSnap().auditLog || [];
+  if (!rows.length) { host.appendChild(h("div", { cls: "empty", text: t("pvNoAudit") })); return; }
+  rows.forEach(function (row) {
+    host.appendChild(h("div", { cls: "pv-log__row" }, [
+      h("span", { cls: "pv-log__at", text: pvWhen(row.at) }),
+      h("span", { cls: "pv-log__tx", text: [pvDomainLabel(row.domain), pvActionLabel(row.action), row.outcome, row.detail]
+        .filter(function (piece) { return piece !== null && piece !== undefined && String(piece).length; })
+        .join(" · ") })
+    ]));
+  });
+}
+function renderStep4() {
+  ensureForm(S.snap);
+  renderPrivacyStats();
+  renderPrivacyControls();
+  renderPrivacyProposals();
+  renderPrivacyBookings();
+  renderPrivacyAudit();
+  renderSaveBar();
+}
+/* A second label, ticked down here rather than re-fetched: the poll carries the whole
+   card list, and rebuilding it every second would drop an armed confirmation button. */
+function updatePvCountdown() {
+  if (S.step !== 4) { return; }
+  var cards = pvSnap().pendingProposals || [];
+  var index = 0;
+  Array.prototype.forEach.call(document.querySelectorAll("#pv-proposals .pv-ttl"), function (node) {
+    var card = cards[index]; index += 1;
+    if (!card || card.state !== "pending_user_approval" || !card.expiresISO) { return; }
+    var left = Math.round((new Date(card.expiresISO).getTime() - nodeNow()) / 1000);
+    if (isNaN(left)) { return; }
+    node.textContent = left > 0 ? dur(left) : t("pvTtlOver");
+    node.classList.toggle("is-soon", left > 0 && left < 60);
+  });
+}
+
+/* ---------------------------------------------------------------- decisions */
+/* The confirmation gate is two clicks and one request. The first click only arms the
+   button; the second posts. The node then mints the receipt for that exact id and verb,
+   so a click cannot be replayed against another proposal, and a page that is merely open
+   writes nothing by itself. */
+function pvDecide(node) {
+  if (node.dataset.armed === "1") {
+    disarmPv(node);
+    postDecision(node.dataset.domain, node.dataset.id, node.dataset.verb);
+    return;
+  }
+  node.dataset.armed = "1";
+  node.classList.add("is-arm");
+  node.textContent = t("pvConfirmAgain");
+  window.setTimeout(function () {
+    if (node.dataset.armed === "1" && node.isConnected) { disarmPv(node); }
+  }, 8000);
+}
+function disarmPv(node) {
+  node.dataset.armed = "0";
+  node.classList.remove("is-arm");
+  node.textContent = node.dataset.label || t("pvApprove");
+}
+function postDecision(domain, id, verb) {
+  api(ROUTE.privacyDecision, { method: "POST", json: { domain: domain, id: id, verb: verb } }).then(function (reply) {
+    if (reply && reply.privacy) { S.snap.privacy = reply.privacy; }
+    if (reply && reply.ok) { toast("ok", String(reply.detail || t("decisionDone"))); }
+    else { toast("err", String((reply && reply.detail) || t("decisionFailed"))); }
+    renderStep4();
+    return refreshSnapshot(true);
+  }).catch(function (error) {
+    fail("decisionFailed", error);
+    refreshSnapshot(true);
+  });
+}
+function pvAuthorize() {
+  api(ROUTE.privacyAuthorize, { method: "POST", json: {} }).then(function (reply) {
+    if (reply && reply.privacy) { S.snap.privacy = reply.privacy; }
+    toast(reply && reply.ok ? "ok" : "warn", t("pvAuthAsked") + " · " + String((reply && reply.detail) || "—"));
+    renderStep4();
+    return refreshSnapshot(true);
+  }).catch(function (error) {
+    fail("pvAuthAskFailed", error);
+    refreshSnapshot(true);
+  });
+}
+function pvAddDir() {
+  var cfg = pvConfig(), privacy = pvSnap();
+  if (!cfg) { return; }
+  cfg.workspaceDirectories = cfg.workspaceDirectories || [];
+  if (cfg.workspaceDirectories.length >= Number(privacy.directoryCeiling || 0)) {
+    toast("warn", t("pvDirMax") + " · " + String(privacy.directoryCeiling || 0));
+    return;
+  }
+  cfg.workspaceDirectories.push("");
+  markDirty();
+  renderPvDirRows();
+}
+function pvRemoveDir(index) {
+  var cfg = pvConfig();
+  if (!cfg || !cfg.workspaceDirectories) { return; }
+  cfg.workspaceDirectories.splice(Number(index), 1);
+  markDirty();
+  renderPvDirRows();
+}
+/* The self-check asks the node the question an assistant would ask, over the same route:
+   a green line here means the bridge works, not merely that a switch is on. */
+function pvCheck() {
+  var out = el("pv-check-out"), button = el("pv-check");
+  if (!out) { return; }
+  var cfg = pvConfig();
+  if (!cfg || !cfg.allowCalendarAccess) { out.textContent = t("pvCheckOff"); return; }
+  if (button) { button.classList.add("is-disabled"); }
+  out.textContent = t("loadingShort");
+  var start = new Date(nodeNow());
+  var end = new Date(start.getTime() + 7 * 86400000);
+  api(ROUTE.toolAvailability, { method: "POST", json: { startIso: start.toISOString(), endIso: end.toISOString() } })
+    .then(function (reply) {
+      var slots = (reply && reply.freeSlots) || [];
+      if (!slots.length) { out.textContent = t("pvCheckNone"); return; }
+      out.textContent = t("pvCheckFree") + " " + String(slots.length) + " · " + pvWhen(slots[0].start) +
+        (slots[0].end ? " → " + pvWhen(slots[0].end) : "");
+    })
+    .catch(function (error) {
+      // A tool refusal is `{"ok":false,"refusal":"…"}` on a non-200, and `api()` only
+      // unwraps an `error` key, so the refusal is pulled out here rather than shown raw.
+      var raw = String(error && error.message ? error.message : error);
+      var reason = raw;
+      try {
+        var parsed = JSON.parse(raw);
+        if (parsed && parsed.refusal) { reason = String(parsed.refusal); }
+      } catch (ignored) { /* a plain-text body is as good an answer */ }
+      out.textContent = t("pvCheckFailed") + " · " + reason.slice(0, 200);
+    })
+    .then(function () {
+      if (button) { button.classList.remove("is-disabled"); }
+      return refreshSnapshot(true);
+    });
+}
+function pvAuditCopy() {
+  var rows = pvSnap().auditLog || [];
+  if (!rows.length) { toast("warn", t("pvNoAudit")); return; }
+  copyText(rows.map(function (row) {
+    return [row.at, row.domain, row.action, row.outcome, row.detail]
+      .filter(function (piece) { return piece !== null && piece !== undefined && String(piece).length; })
+      .join(" · ");
+  }).join("\n"));
 }
 
 /* ------------------------------------------------------------- rendering IO */
@@ -2886,6 +3511,10 @@ function renderPending() {
   skeleton("sentinel", 3, 38);
   skeleton("ark", 3, 38);
   skeleton("drill", 1, 60);
+  skeleton("pv-stats", 4, 56);
+  skeleton("pv-proposals", 2, 86);
+  skeleton("pv-bookings", 1, 66);
+  skeleton("pv-audit", 3, 20);
   S.gauge = null;
   var body = el("log");
   if (body && !body.firstChild) { body.appendChild(h("div", { cls: "line" }, h("span", { cls: "line__m", text: t("loading") }))); }
@@ -2897,7 +3526,8 @@ function renderAll() {
   renderRail();
   if (S.step === 1) { renderStep1(); }
   else if (S.step === 2) { renderStep2(); }
-  else { renderStep3(); }
+  else if (S.step === 3) { renderStep3(); }
+  else { renderStep4(); }
   renderSaveBar();
 }
 
@@ -3144,6 +3774,7 @@ function tick() {
     setText("foot-uptime", t("uptime") + " " + dur((nodeNow() - new Date(node.startedAt).getTime()) / 1000));
   }
   updatePairCountdown();
+  updatePvCountdown();
   if (S.step === 1) { renderDeployControls(); }
   var alive = S.es && (S.es.readyState === 0 || S.es.readyState === 1);
   if (alive) { return; }
@@ -3200,7 +3831,7 @@ var PPX = {
   step: function (number) {
     S.step = number;
     S.logStep = 0;
-    [1, 2, 3].forEach(function (index) {
+    [1, 2, 3, 4].forEach(function (index) {
       show("step-" + index, index === number);
       var button = el("rail-" + index);
       if (button) { button.classList.toggle("is-on", index === number); }
@@ -3271,6 +3902,12 @@ var PPX = {
   revert: doRevert,
   drill: doDrill,
   revealDir: doReveal,
+  pvAuthorize: pvAuthorize,
+  pvCheck: pvCheck,
+  pvDecide: pvDecide,
+  pvAddDir: pvAddDir,
+  pvRemoveDir: pvRemoveDir,
+  pvAuditCopy: pvAuditCopy,
   windowAdd: windowAdd,
   windowRemove: windowRemove,
   mountAdd: mountAdd,
@@ -3735,7 +4372,7 @@ public actor LocalWebConsoleServer {
                             status: 200)
         }
 
-        guard path.hasPrefix("/api/") else {
+        guard path.hasPrefix("/api/") || path.hasPrefix(ConsoleRoute.toolPrefix) else {
             throw WEBConsoleError.notFound(path)
         }
         // Every API route, without exception, needs the bearer. This is the only
@@ -3745,6 +4382,14 @@ public actor LocalWebConsoleServer {
         }
         guard Self.allows(request.method, for: path) else {
             throw WEBConsoleError.unsupportedMethod(request.method)
+        }
+
+        // Tool paths are prefixed rather than literal — `/v1/tools/{domain}/{action}`,
+        // with a proposal id appended for the three decision actions — so they are
+        // shaped by `PrivacyToolRoute`, the same parser the phone entry point uses.
+        // Anything it refuses has never reached the engine.
+        if path.hasPrefix(ConsoleRoute.toolPrefix) {
+            return try await routeTool(request: request, path: path)
         }
 
         switch path {
@@ -3823,6 +4468,43 @@ public actor LocalWebConsoleServer {
             guard !action.isEmpty else { throw WEBConsoleError.badEngine("action is required") }
             return try json(await facade.invokeEngine(kind, action: action, payload: body.payload ?? [:]))
 
+        case ConsoleRoute.privacyAuthorize:
+            // The one console-only privacy route: it raises the TCC dialog, which no
+            // tool path may do. The reply is the state macOS settled on, plus the
+            // fresh snapshot so the panel can settle without a second round trip.
+            let state = await facade.requestCalendarAccess()
+            let snapshot = await facade.snapshot()
+            return try json(WEBPrivacyAuthorizeResponse(
+                ok: state == PrivacyAuthorization.authorized || state == PrivacyAuthorization.fullAccess,
+                detail: state,
+                privacy: snapshot.privacy
+            ))
+
+        case ConsoleRoute.privacyDecision:
+            // The console's approval click. `domain` and `verb` are checked here rather
+            // than passed down: the route is the only place the console's intent is
+            // turned into a ledger call, so it is where a malformed click must die.
+            let body: WEBPrivacyDecisionRequest = try decode(WEBPrivacyDecisionRequest.self, from: request)
+            let domain = body.domain.trimmingCharacters(in: .whitespacesAndNewlines)
+            let verb = body.verb.trimmingCharacters(in: .whitespacesAndNewlines)
+            let id = body.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard PrivacyToolNamespace(rawValue: domain) != nil,
+                  verb == PrivacyToolAction.approve || verb == PrivacyToolAction.reject,
+                  PrivacyToolRoute.isSafeId(id) else {
+                throw WEBConsoleError.badEngine("domain、id 与 verb 需合法 / domain, id and verb must each be valid")
+            }
+            let outcome = await facade.privacyDecision(domain: domain, id: id, verb: verb)
+            let snapshot = await facade.snapshot()
+            let detail = outcome.fields["message"]?.stringValue
+                ?? outcome.fields["refusal"]?.stringValue
+                ?? (outcome.ok ? "已执行 / applied" : "已拒绝 / refused")
+            return try json(WEBPrivacyDecisionResponse(
+                ok: outcome.ok,
+                detail: detail,
+                status: outcome.status,
+                privacy: snapshot.privacy
+            ))
+
         case ConsoleRoute.commandInject:
             let body: WEBCommandRequest = try decode(WEBCommandRequest.self, from: request)
             let text = body.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3837,6 +4519,33 @@ public actor LocalWebConsoleServer {
         }
     }
 
+    /// One tool call: path shapes it, body argues it, the engine answers it.
+    ///
+    /// The body is read as a JSON object rather than into a DTO because the tool
+    /// arguments are the assistant-facing contract (`startIso`, `durationMinutes`,
+    /// `bookingRefId`…), and a missing key means "use the owner's saved preference"
+    /// — a distinction a struct with defaults cannot express after decoding.
+    private func routeTool(request: WEBHTTPRequest, path: String) async throws -> WEBHTTPResponse {
+        guard var call = PrivacyToolRoute.parse(path: path, source: "bot-studio") else {
+            throw WEBConsoleError.notFound(path)
+        }
+        if !request.body.isEmpty {
+            guard let text = String(data: request.body, encoding: .utf8) else {
+                throw WEBConsoleError.undecodableBody(typeName: "UTF-8 JSON object")
+            }
+            guard var fields = JSONValue.parse(text).objectValue else {
+                throw WEBConsoleError.undecodableBody(typeName: "JSON object")
+            }
+            // A body may not re-point a decision at some other proposal: the id in
+            // the path is the one the caller was handed, and this route is the only
+            // place they can be told which one they are approving.
+            if !call.id.isEmpty { fields["proposalId"] = .string(call.id) }
+            call.payload = fields
+        }
+        let outcome = await facade.privacyTool(call)
+        return response(Data(outcome.body.utf8), type: "application/json; charset=utf-8", status: outcome.status)
+    }
+
     /// Read routes answer `GET`/`HEAD`, mutation routes answer `POST`, nothing
     /// answers `OPTIONS`: the page is same-origin by construction, so a preflight
     /// can only come from somebody else's document, and the answer to that is no.
@@ -3847,7 +4556,11 @@ public actor LocalWebConsoleServer {
         ]
         switch method {
         case "GET", "HEAD": return readable.contains(path)
-        case "POST": return !readable.contains(path) && ConsoleRoute.all.contains(path)
+        // Every tool is a POST: `availability` and `bookings` are reads, but they are
+        // reads that cost an EventKit query, so they get the same method discipline
+        // as the writes and no browser can trigger one with a navigation.
+        case "POST": return path.hasPrefix(ConsoleRoute.toolPrefix)
+            || (!readable.contains(path) && ConsoleRoute.all.contains(path))
         default: return false
         }
     }
@@ -3857,6 +4570,7 @@ public actor LocalWebConsoleServer {
             ConsoleRoute.index, ConsoleRoute.snapshot, ConsoleRoute.events,
             ConsoleRoute.pairingQR, ConsoleRoute.health
         ]
+        if path.hasPrefix(ConsoleRoute.toolPrefix) { return "POST" }
         return readable.contains(path) ? "GET, HEAD" : "POST"
     }
 
@@ -3918,7 +4632,7 @@ public actor LocalWebConsoleServer {
 
     func failure(_ error: WEBConsoleError, path: String, keepAlive: Bool) -> WEBHTTPResponse {
         let status = error.httpStatus
-        let api = path.hasPrefix("/api/")
+        let api = path.hasPrefix("/api/") || path.hasPrefix(ConsoleRoute.toolPrefix)
         var pairs = Self.securityHeaders
         pairs.append(("Cache-Control", "no-store"))
         if case .unsupportedMethod = error {
@@ -4060,6 +4774,24 @@ public actor LocalWebConsoleServer {
         let payload: [String: JSONValue]?
     }
     struct WEBCommandRequest: Codable { let text: String }
+    struct WEBPrivacyAuthorizeResponse: Encodable {
+        let ok: Bool
+        let detail: String
+        let privacy: PrivacyBridgeSnapshot
+    }
+    struct WEBPrivacyDecisionRequest: Codable {
+        let domain: String
+        let id: String
+        let verb: String
+    }
+    struct WEBPrivacyDecisionResponse: Encodable {
+        let ok: Bool
+        let detail: String
+        /// The engine's own HTTP-shaped verdict, kept so the panel can tell a stale
+        /// proposal (409) apart from a refused one (403) without parsing prose.
+        let status: Int
+        let privacy: PrivacyBridgeSnapshot
+    }
 
     // MARK: - Dispatch outcome
 
