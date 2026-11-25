@@ -47,6 +47,13 @@ actor PrivacyCenterNotifier: ProposalNotifier {
     }
 
     private func deliverToNotificationCenter(_ proposal: PrivacyProposal) async {
+        // Measured, not theoretical: launched as the bare `.build/release` executable,
+        // `UNUserNotificationCenter.current()` raises the Objective-C exception
+        // `bundleProxyForCurrentProcess is nil`, which `try?` cannot see, so the proposal
+        // that was only meant to be announced took the whole node down. The packer always
+        // ships a bundle, so this declines the second channel for an unpackaged run and the
+        // console event above still carries the proposal.
+        guard Bundle.main.bundleIdentifier != nil else { return }
         let center = UNUserNotificationCenter.current()
         if !authorizationAttempted {
             authorizationAttempted = true

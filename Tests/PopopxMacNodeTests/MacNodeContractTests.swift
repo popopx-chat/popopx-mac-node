@@ -1985,6 +1985,37 @@ final class MacNodeContractTests: XCTestCase {
             year: year, month: month, day: day, hour: parts[0], minute: parts[1], second: 0
         ))
     }
+
+    /// `UNUserNotificationCenter.current()` is the one call in the composition root that
+    /// raises an Objective-C exception instead of returning an error, and `try?` cannot see
+    /// an exception: measured on 2026-11-26, a proposal created against the unpackaged
+    /// `.build/release` binary killed the node with `bundleProxyForCurrentProcess is nil`.
+    /// The defence is the bundle guard written in front of the call, so this scans the host
+    /// source for the call and refuses to let it stand without its guard — an owner who
+    /// clicks 「批准」 must not be able to take the process down.
+    func testTheNotificationCenterIsReachedOnlyBehindABundleGuard() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let url = root.appendingPathComponent("Sources/PopopxMacNodeApp/PrivacyNotificationBridge.swift")
+        let text = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertGreaterThan(text.count, 500, url.path)
+
+        // Comments talk about the exception, so only real code may be scanned for the call.
+        let code = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+        let call = "UNUserNotificationCenter.current()"
+        let hits = code.enumerated().filter { $0.element.contains(call) }.map(\.offset)
+        XCTAssertEqual(hits.count, 1, "the notification center should have exactly one entry point")
+        guard let hit = hits.first else { return }
+
+        let enclosing = code[0..<hit].lastIndex { $0.trimmingCharacters(in: .whitespaces).hasPrefix("func ") }
+        let window = code[(enclosing ?? 0)..<hit]
+        XCTAssertTrue(
+            window.contains { $0.contains("guard Bundle.main.bundleIdentifier != nil") },
+            "line \(hit + 1) calls \(call) without the bundle guard in front of it"
+        )
+    }
 }
 
 /// A structural read of one Markdown document: the counts a translated twin has to

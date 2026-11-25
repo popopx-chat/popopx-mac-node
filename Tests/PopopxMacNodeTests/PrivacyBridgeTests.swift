@@ -294,15 +294,14 @@ extension PrivacyBridgeTests {
     }
 
     func testApproveWithoutAValidReceiptNeverReachesTheExecutor() async {
-        var made = false
-        let gate = BlockExecutor { made = true; return .succeeded("evt-x", "written") }
+        let gate = BlockExecutor()
         let (ledger, _) = makeLedger(executor: gate)
         _ = await ledger.propose(PrivacyProposal(id: probeId, domain: .calendar, action: .create))
         for candidate in ["", "   ", "garbage", await ledger.receipt(id: probeId, verb: "reject")] {
             let outcome = await ledger.approve(id: probeId, receipt: candidate)
             XCTAssertFalse(outcome.ok, "receipt \(candidate.isEmpty ? "<empty>" : candidate) must not approve")
         }
-        XCTAssertFalse(made, "the executor is the only road to a write, and it stayed closed")
+        XCTAssertFalse(gate.didRun, "the executor is the only road to a write, and it stayed closed")
         let proposal = await ledger.proposal(id: probeId)
         XCTAssertEqual(proposal?.state, .pendingUserApproval, "a refused decision must not consume the proposal")
     }
@@ -526,11 +525,14 @@ extension PrivacyBridgeTests {
     }
 }
 
-/// An executor that reports back whether the ledger let it run.
-private struct BlockExecutor: ProposalExecutor {
-    let body: () -> PrivacyExecution
-    init(_ body: @escaping () -> PrivacyExecution) { self.body = body }
-    func execute(_ proposal: PrivacyProposal) async -> PrivacyExecution { body() }
+/// An executor that records whether the ledger let it run at all.
+private final class BlockExecutor: ProposalExecutor, @unchecked Sendable {
+    private(set) var runs = 0
+    var didRun: Bool { runs > 0 }
+    func execute(_ proposal: PrivacyProposal) async -> PrivacyExecution {
+        runs += 1
+        return .succeeded("evt-\(proposal.id)", "written")
+    }
 }
 
 // MARK: - The two entry points against one gate
@@ -633,9 +635,42 @@ extension PrivacyBridgeTests {
         XCTAssertFalse(NodeWire.isKnownService("secrets"))
     }
 
-    func testSnapshotCarriesTheCeilingsThePanelIsAllowedToAssume() {        // The page seeds its form from these two fields instead of restating Swift
+    func testSnapshotCarriesTheCeilingsThePanelIsAllowedToAssume() {
+        // The page seeds its form from these two fields instead of restating Swift
         // defaults, so a drift here is a panel that lies about what can be configured.
         XCTAssertEqual(PrivacyBridgeSnapshot.empty.directoryCeiling, PrivacyBridgeConfig.maximumDirectories)
         XCTAssertEqual(PrivacyBridgeSnapshot.empty.bridges, PrivacyBridgeConfig())
+    }
+
+    /// Seen in the browser on 2026-11-26: every workspace row of the audit tail read
+    /// `ref ` with nothing after it, because a file write books nothing. The calendar
+    /// keeps its booking reference, and an empty detail is what the panel drops from the
+    /// joined line instead of rendering a dangling label.
+    func testAuditRowsNameABookingOnlyWhenOneExists() async {
+        let (ledger, signer) = makeLedger()
+        _ = await ledger.propose(PrivacyProposal(id: probeId, domain: .workspace, action: .write))
+        let workspace = await ledger.auditLog().first
+        XCTAssertEqual(workspace?.outcome, "proposed")
+        XCTAssertEqual(workspace?.detail ?? "", "")
+
+        let booked = PrivacyProposal(id: "ppx-pr-test-0002", domain: .calendar, action: .create,
+                                     draft: CalendarEventDraft(summary: "standup",
+                                                               start: Date(),
+                                                               end: Date().addingTimeInterval(900)))
+        _ = await ledger.propose(booked)
+        let calendar = await ledger.auditLog().first
+        XCTAssertEqual(calendar?.outcome, "proposed")
+        XCTAssertTrue(calendar?.detail.hasPrefix("ref ppx-bk-") ?? false,
+                      "a booked proposal must still name its reference, got \(calendar?.detail ?? "<nil>")")
+
+        // The same rule on the road out: reject both and neither row may dangle.
+        _ = await ledger.reject(id: probeId, receipt: signer.receipt(id: probeId, verb: "reject"))
+        let workspaceRejection = await ledger.auditLog().first?.detail
+        XCTAssertEqual(workspaceRejection ?? "", "")
+        _ = await ledger.reject(id: "ppx-pr-test-0002",
+                                receipt: signer.receipt(id: "ppx-pr-test-0002", verb: "reject"))
+        let calendarRejection = await ledger.auditLog().first?.detail
+        XCTAssertTrue(calendarRejection?.hasPrefix("ref ppx-bk-") ?? false,
+                      "got \(calendarRejection ?? "<nil>")")
     }
 }

@@ -1618,6 +1618,7 @@ var S = {
   saving: false,
   hadTunnel: false,
   expiredRendered: false,
+  pvCheck: null,
   clockOffset: 0,
   es: null,
   esBackoff: 1000,
@@ -3230,6 +3231,8 @@ function renderPrivacyControls() {
     tag.textContent = state;
     tag.className = "tag " + (granted ? "tag--ok" : state === "notDetermined" ? "tag--off" : "tag--bad");
   }
+  var checkOut = el("pv-check-out");
+  if (checkOut) { checkOut.textContent = pvCheckText(); }
   var ask = el("pv-ask");
   if (ask) {
     ask.classList.toggle("is-disabled", !(cfg && cfg.allowCalendarAccess));
@@ -3422,23 +3425,35 @@ function pvRemoveDir(index) {
   markDirty();
   renderPvDirRows();
 }
+/* The readout is repainted from the last result rather than left as whatever string the
+   previous click wrote: a language flip re-renders the panel, and a Chinese console that
+   kept an English self-check line was measured in the browser on 2026-11-26. */
+function pvCheckText() {
+  var last = S.pvCheck;
+  if (!last) { return ""; }
+  if (last.kind === "off") { return t("pvCheckOff"); }
+  if (last.kind === "none") { return t("pvCheckNone"); }
+  if (last.kind === "failed") { return t("pvCheckFailed") + " · " + String(last.reason || "").slice(0, 200); }
+  var slots = last.slots || [];
+  if (!slots.length) { return t("pvCheckNone"); }
+  return t("pvCheckFree") + " " + String(slots.length) + " · " + pvWhen(slots[0].start) +
+    (slots[0].end ? " → " + pvWhen(slots[0].end) : "");
+}
 /* The self-check asks the node the question an assistant would ask, over the same route:
    a green line here means the bridge works, not merely that a switch is on. */
 function pvCheck() {
   var out = el("pv-check-out"), button = el("pv-check");
   if (!out) { return; }
   var cfg = pvConfig();
-  if (!cfg || !cfg.allowCalendarAccess) { out.textContent = t("pvCheckOff"); return; }
+  if (!cfg || !cfg.allowCalendarAccess) { S.pvCheck = { kind: "off" }; out.textContent = pvCheckText(); return; }
   if (button) { button.classList.add("is-disabled"); }
   out.textContent = t("loadingShort");
   var start = new Date(nodeNow());
   var end = new Date(start.getTime() + 7 * 86400000);
   api(ROUTE.toolAvailability, { method: "POST", json: { startIso: start.toISOString(), endIso: end.toISOString() } })
     .then(function (reply) {
-      var slots = (reply && reply.freeSlots) || [];
-      if (!slots.length) { out.textContent = t("pvCheckNone"); return; }
-      out.textContent = t("pvCheckFree") + " " + String(slots.length) + " · " + pvWhen(slots[0].start) +
-        (slots[0].end ? " → " + pvWhen(slots[0].end) : "");
+      S.pvCheck = { kind: "free", slots: (reply && reply.freeSlots) || [] };
+      out.textContent = pvCheckText();
     })
     .catch(function (error) {
       // A tool refusal is `{"ok":false,"refusal":"…"}` on a non-200, and `api()` only
@@ -3449,7 +3464,8 @@ function pvCheck() {
         var parsed = JSON.parse(raw);
         if (parsed && parsed.refusal) { reason = String(parsed.refusal); }
       } catch (ignored) { /* a plain-text body is as good an answer */ }
-      out.textContent = t("pvCheckFailed") + " · " + reason.slice(0, 200);
+      S.pvCheck = { kind: "failed", reason: reason };
+      out.textContent = pvCheckText();
     })
     .then(function () {
       if (button) { button.classList.remove("is-disabled"); }

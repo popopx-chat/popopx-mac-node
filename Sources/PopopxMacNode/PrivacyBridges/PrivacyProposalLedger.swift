@@ -407,7 +407,7 @@ public actor PrivacyProposalLedger {
             domain: stored.domain.rawValue,
             action: stored.action.rawValue,
             outcome: "proposed",
-            detail: "ref \(stored.bookingRef)"
+            detail: Self.refDetail(stored.bookingRef)
         ))
         Task { [notifier, notificationsEnabled] in
             if notificationsEnabled { await notifier.announce(stored) }
@@ -441,7 +441,7 @@ public actor PrivacyProposalLedger {
                 domain: expired.domain.rawValue,
                 action: expired.action.rawValue,
                 outcome: "expired",
-                detail: "ref \(expired.bookingRef)"
+                detail: Self.refDetail(expired.bookingRef)
             ))
         }
         persist()
@@ -483,7 +483,7 @@ public actor PrivacyProposalLedger {
             proposals[key] = proposal
             record(PrivacyAuditEntry(
                 at: now, domain: proposal.domain.rawValue, action: proposal.action.rawValue,
-                outcome: "expired", detail: "ref \(proposal.bookingRef)"
+                outcome: "expired", detail: Self.refDetail(proposal.bookingRef)
             ))
             persist()
             return PrivacyDecision(ok: false, proposal: proposal, message: "提案已过期（15 分钟）/ proposal expired")
@@ -493,7 +493,7 @@ public actor PrivacyProposalLedger {
             // owner wants to see in the audit tail.
             record(PrivacyAuditEntry(
                 at: now, domain: proposal.domain.rawValue, action: verb,
-                outcome: "receipt_rejected", detail: "ref \(proposal.bookingRef)"
+                outcome: "receipt_rejected", detail: Self.refDetail(proposal.bookingRef)
             ))
             persist()
             return PrivacyDecision(ok: false, message: "批准令牌无效 / approval receipt rejected")
@@ -506,7 +506,7 @@ public actor PrivacyProposalLedger {
             proposals[key] = proposal
             record(PrivacyAuditEntry(
                 at: now, domain: proposal.domain.rawValue, action: proposal.action.rawValue,
-                outcome: "rejected", detail: "ref \(proposal.bookingRef)"
+                outcome: "rejected", detail: Self.refDetail(proposal.bookingRef)
             ))
             persist()
             return PrivacyDecision(ok: true, proposal: proposal, message: proposal.lastMessage)
@@ -533,7 +533,7 @@ public actor PrivacyProposalLedger {
             domain: proposal.domain.rawValue,
             action: proposal.action.rawValue,
             outcome: execution.ok ? "executed" : "execution_failed",
-            detail: "ref \(proposal.bookingRef)"
+            detail: Self.refDetail(proposal.bookingRef)
         ))
         persist()
         return PrivacyDecision(
@@ -607,6 +607,13 @@ public actor PrivacyProposalLedger {
     }
 
     // MARK: Audit and snapshot
+
+    /// The audit detail of a decision: the booking reference, but only when the proposal
+    /// booked something. A workspace write never does, and a row that read `ref ` with
+    /// nothing after it looked to the owner like a value the node had lost.
+    static func refDetail(_ bookingRef: String) -> String {
+        bookingRef.isEmpty ? "" : "ref \(bookingRef)"
+    }
 
     public func record(_ entry: PrivacyAuditEntry) {
         audit.append(entry)
@@ -687,7 +694,7 @@ public actor PrivacyProposalLedger {
             proposals[id] = closed
             record(PrivacyAuditEntry(
                 domain: closed.domain.rawValue, action: closed.action.rawValue,
-                outcome: "voided", detail: "ref \(closed.bookingRef)"
+                outcome: "voided", detail: Self.refDetail(closed.bookingRef)
             ))
             dropped += 1
         }
