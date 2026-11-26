@@ -387,6 +387,11 @@ a{color:var(--accent-lift)}
 .brand__text{display:flex;flex-direction:column;min-width:0}
 .brand__name{font-size:clamp(15px,1.2vw,19px);font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .brand__sub{font-size:var(--fs-xs);color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brand__claim{font-size:var(--fs-xs);font-weight:600;letter-spacing:.01em;color:var(--accent-lift);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Measured at 360px: the Simplified and Traditional claim needs 261px inside a
+   248px box, so the ellipsis would cut the sentence's own full stop off the
+   brand line. Wrapping costs one line of sticky header and loses nothing. */
+@media (max-width:479px){.brand__claim{white-space:normal;line-height:1.35}}
 .chip{
   display:inline-flex;align-items:center;gap:var(--s2);
   padding:3px var(--s2);border:1px solid var(--hair);border-radius:999px;
@@ -757,6 +762,11 @@ pre.raw{
 .toast[data-kind="err"]{border-color:rgba(255,107,120,.5)}
 .toast[data-kind="warn"]{border-color:rgba(255,204,92,.45)}
 .toast__x{margin-left:auto;color:var(--mute);font-size:var(--fs-xs);padding:0 var(--s1)}
+.brandnote{margin-top:var(--s5);padding:var(--s3) var(--s4);border:1px solid var(--hair);border-radius:var(--r-l);background:rgba(255,255,255,.02);display:flex;flex-direction:column;gap:var(--s2)}
+.brandnote__head{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--s1) var(--s3);font-size:var(--fs-xs);line-height:1.5;color:var(--dim);overflow-wrap:anywhere}
+.brandnote__pos{font-weight:600;color:var(--accent-lift);letter-spacing:.01em}
+.brandnote__slogan::before{content:"·";margin-right:var(--s2);color:var(--mute)}
+.brandnote__mission,.brandnote__role{font-size:var(--fs-xs);line-height:1.6;color:var(--mute);overflow-wrap:anywhere}
 footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid var(--hair);display:flex;flex-wrap:wrap;gap:var(--s2) var(--s4);align-items:center;font-size:var(--fs-xs);color:var(--mute)}
 </style>
 </head>
@@ -773,6 +783,7 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
     </span>
     <span class="brand__text">
       <h1 class="brand__name" id="node-name">POPOPX Mac Node</h1>
+      <span class="brand__claim" data-i18n="brandClaim"></span>
       <span class="brand__sub" data-i18n="brandSub"></span>
       <span class="brand__sub mono" id="node-ref"></span>
     </span>
@@ -1074,6 +1085,15 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
   </div>
 </div>
 
+<div class="brandnote">
+  <p class="brandnote__head">
+    <span class="brandnote__pos" data-i18n="brandPosition"></span>
+    <span class="brandnote__slogan" data-i18n="brandSlogan"></span>
+  </p>
+  <p class="brandnote__mission" data-i18n="brandMission"></p>
+  <p class="brandnote__role" data-i18n="brandRole"></p>
+</div>
+
 <footer class="app__foot">
   <span class="mono" id="foot-ref"></span>
   <span class="mono" id="foot-uptime"></span>
@@ -1134,6 +1154,15 @@ var LOG_LIMIT = 900;
 /* ---------------------------------------------------------------- i18n */
 var I18N = {
   brandSub: { zh: "本地算力与物理执行中枢 · 仅回环可达", en: "Local compute and physical execution hub · loopback only" },
+  /* The four brand layers of the platform, in the order the brand book reads:
+     claim, slogan, positioning, mission. They are one wording across the menu
+     bar, this page and both READMEs, and `MacNodeContractTests` compares the
+     three surfaces so a rename cannot land in one of them. */
+  brandClaim: { zh: "Connect Everything. 连接一切，让智能自由协作。", en: "Connect Everything." },
+  brandSlogan: { zh: "自由连接 · 私密沟通 · 智能协作", en: "Connect Freely · Communicate Privately · Collaborate Intelligently" },
+  brandPosition: { zh: "隐私优先的智能连接平台", en: "Privacy-First Intelligent Connection Platform" },
+  brandRole: { zh: "POPOPX 隐私优先智能连接平台的本机边缘算力与隐私执行节点", en: "The on-device edge compute and privacy execution node of POPOPX, the Privacy-First Intelligent Connection Platform" },
+  brandMission: { zh: "POPOPX 不只是提供连接工具，而是建立一个让人、AI、Agent、设备和服务能够安全连接、自由协作的开放生态。", en: "POPOPX does not merely provide connection tools — it builds an open ecosystem where people, AI, agents, devices, and services connect securely and collaborate freely." },
   loadingShort: { zh: "载入中", en: "Loading" },
   connecting: { zh: "连接中", en: "Connecting" },
   live: { zh: "已连接", en: "Connected" },

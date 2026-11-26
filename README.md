@@ -2,6 +2,14 @@
 
 # POPOPX Mac Node
 
+**Connect Everything.**
+
+*Connect Freely · Communicate Privately · Collaborate Intelligently*
+
+**Privacy-First Intelligent Connection Platform** — this repository is its on-device edge compute and privacy execution node.
+
+> POPOPX does not merely provide connection tools — it builds an open ecosystem where people, AI, agents, devices, and services connect securely and collaborate freely.
+
 **Turn your own Mac into the local compute and deterministic-execution host for the 10 "Discover" businesses of the POPOPX iOS client — zero cloud, no account, no telemetry, end-to-end encrypted.**
 
 [![Apple Silicon Native](https://img.shields.io/badge/Apple%20Silicon-native-A272E1?style=for-the-badge&logo=apple&logoColor=white)](LICENSE)

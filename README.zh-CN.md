@@ -2,6 +2,14 @@
 
 # POPOPX Mac Node
 
+**Connect Everything. 连接一切，让智能自由协作。**
+
+*自由连接 · 私密沟通 · 智能协作*
+
+**隐私优先的智能连接平台** —— 本仓库就是它的本机边缘算力与隐私执行节点。
+
+> POPOPX 不只是提供连接工具，而是建立一个让人、AI、Agent、设备和服务能够安全连接、自由协作的开放生态。
+
 **把你自己那台 Mac 变成 POPOPX iOS 客户端「发现」10 大业务的本地算力与确定性物理执行中枢 —— 零云端、无账号、无遥测、端到端加密。**
 
 [![Apple Silicon Native](https://img.shields.io/badge/Apple%20Silicon-native-A272E1?style=for-the-badge&logo=apple&logoColor=white)](LICENSE)

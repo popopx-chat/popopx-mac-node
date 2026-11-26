@@ -1071,6 +1071,16 @@ struct MenuBarContent: View {
 
     var body: some View {
         Section {
+            Text(label("Connect Everything. 连接一切，让智能自由协作。", "Connect Everything."))
+                .font(.system(size: 12, weight: .semibold))
+                .disabled(true)
+            Text(label(
+                "POPOPX 隐私优先智能连接平台的本机边缘算力与隐私执行节点",
+                "The on-device edge compute and privacy execution node of POPOPX, the Privacy-First Intelligent Connection Platform"
+            ))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .disabled(true)
             LabeledContent(hardwareLine, value: label("\(activeTasks) 个任务", "\(activeTasks) task(s)"))
             LabeledContent(daemonLabel, value: model.snapshot?.mesh.acceptingNow == true
                 ? label("接单中", "Accepting")

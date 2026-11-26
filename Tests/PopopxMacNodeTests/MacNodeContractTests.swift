@@ -513,6 +513,90 @@ final class MacNodeContractTests: XCTestCase {
         XCTAssertEqual(TraditionalChinese.render("皇后"), "皇后", "an empress keeps 后; the converter cannot know")
     }
 
+    /// The four brand layers are one wording, not four: the claim, the slogan, the
+    /// positioning and the mission have to read identically in the console catalog,
+    /// the menu bar, the Derived Traditional table and both READMEs. A rename that
+    /// reaches three of the four surfaces compiles, passes every type check and is
+    /// only noticed by a reader, so the expected strings are typed here instead of
+    /// read back out of the product.
+    func testTheBrandLayersReadTheSameOnEverySurface() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+
+        let claimEn = "Connect Everything."
+        let claimZh = "Connect Everything. 连接一切，让智能自由协作。"
+        let sloganEn = "Connect Freely · Communicate Privately · Collaborate Intelligently"
+        let sloganZh = "自由连接 · 私密沟通 · 智能协作"
+        let positionEn = "Privacy-First Intelligent Connection Platform"
+        let positionZh = "隐私优先的智能连接平台"
+        let missionEn = "POPOPX does not merely provide connection tools — it builds an open ecosystem where people, AI, agents, devices, and services connect securely and collaborate freely."
+        let missionZh = "POPOPX 不只是提供连接工具，而是建立一个让人、AI、Agent、设备和服务能够安全连接、自由协作的开放生态。"
+        let roleZh = "POPOPX 隐私优先智能连接平台的本机边缘算力与隐私执行节点"
+        let roleEn = "The on-device edge compute and privacy execution node of POPOPX, the Privacy-First Intelligent Connection Platform"
+
+        let page = WEBConsoleHTML.document
+        let rows: [(key: String, zh: String, en: String)] = [
+            ("brandClaim", claimZh, claimEn),
+            ("brandSlogan", sloganZh, sloganEn),
+            ("brandPosition", positionZh, positionEn),
+            ("brandRole", roleZh, roleEn),
+            ("brandMission", missionZh, missionEn)
+        ]
+        for row in rows {
+            let needle = #"\#(row.key): { zh: "\#(row.zh)", en: "\#(row.en)" }"#
+            XCTAssertTrue(page.contains(needle), "\(row.key) is not the shared wording in the console catalog")
+            XCTAssertTrue(page.contains("data-i18n=\"\(row.key)\""), "\(row.key) is catalogued but never rendered")
+        }
+
+        // Traditional is derived, so this is the check that the derivation still
+        // answers with the brand book's own Traditional copy rather than a
+        // character-wise guess that drifted on one of 連接/讓/協/設備/服務.
+        let derived = Dictionary(WEBConsoleHTML.traditionalRows.map { ($0.key, $0.text) }, uniquingKeysWith: { first, _ in first })
+        let hant: [(key: String, text: String)] = [
+            ("brandClaim", "Connect Everything. 連接一切，讓智能自由協作。"),
+            ("brandSlogan", "自由連接 · 私密溝通 · 智能協作"),
+            ("brandPosition", "隱私優先的智能連接平台"),
+            ("brandRole", "POPOPX 隱私優先智能連接平台的本機邊緣算力與隱私執行節點"),
+            ("brandMission", "POPOPX 不只是提供連接工具，而是建立一個讓人、AI、Agent、設備和服務能夠安全連接、自由協作的開放生態。")
+        ]
+        for entry in hant {
+            XCTAssertEqual(derived[entry.key], entry.text, "\(entry.key) must reach Traditional through the node's own converter")
+            XCTAssertTrue(page.contains(entry.text), "\(entry.key) is derived but not served")
+        }
+
+        let menuBar = try String(contentsOf: root.appendingPathComponent("Sources/PopopxMacNodeApp/PopopxMacNodeApp.swift"), encoding: .utf8)
+        XCTAssertTrue(
+            menuBar.contains("label(\"\(claimZh)\", \"\(claimEn)\")"),
+            "the menu bar carries the claim outside the shared language fallback, so zh-Hant cannot convert it"
+        )
+        XCTAssertTrue(menuBar.contains(roleZh), "the menu bar has no eco-role subtitle")
+        XCTAssertTrue(menuBar.contains(roleEn), "the menu bar's eco-role subtitle has no English copy")
+
+        // The READMEs carry the four layers verbatim and describe the node's place
+        // in the platform in their own prose, so only the layers are pinned here —
+        // and they are pinned to the lead-in, which is where a reader meets them.
+        let englishReadme = try String(contentsOf: root.appendingPathComponent("README.md"), encoding: .utf8)
+        let chineseReadme = try String(contentsOf: root.appendingPathComponent("README.zh-CN.md"), encoding: .utf8)
+        func layersLead(_ text: String, heading: String, name: String, layers: [String]) {
+            guard let end = text.range(of: heading) else {
+                XCTFail("\(name): the \(heading) heading is gone, so the lead-in cannot be measured")
+                return
+            }
+            for literal in layers {
+                guard let at = text.range(of: literal) else {
+                    XCTFail("\(name) is missing the brand layer: \(literal)")
+                    continue
+                }
+                XCTAssert(at.upperBound <= end.lowerBound,
+                          "\(name) states \(literal) after the technical copy, not in the lead-in")
+            }
+        }
+        layersLead(englishReadme, heading: "## What this is", name: "README.md",
+                   layers: [claimEn, sloganEn, positionEn, missionEn])
+        layersLead(chineseReadme, heading: "## 这是什么", name: "README.zh-CN.md",
+                   layers: [claimZh, sloganZh, positionZh, missionZh])
+    }
+
     /// The console reads the Traditional names off the snapshot, so they have to
     /// survive the wire: one broadcast snapshot, every browser's own language.
     func testTraditionalNamesTravelOnTheWire() throws {
