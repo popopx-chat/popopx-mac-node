@@ -691,6 +691,7 @@ textarea{min-height:66px;resize:vertical;font-family:var(--mono);font-size:var(-
 .dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:var(--mute)}
 .dot--ok{background:var(--ok)}
 .dot--bad{background:var(--bad)}
+.dot--off{background:var(--mute)}
 .btn--ok{border-color:rgba(63,214,143,.45);color:var(--ok)}
 .btn--bad{border-color:rgba(255,107,120,.4);color:var(--bad)}
 /* The second click of the confirmation gate: an armed button says so, in the
@@ -828,6 +829,11 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
     <span class="rail__idx">04</span>
     <span class="rail__name" data-i18n="s4"></span>
     <span class="rail__badge" id="railbadge-4"></span>
+  </button>
+  <button class="rail__btn" id="rail-5" data-step="5" data-status="todo" onclick="PPX.step(5)">
+    <span class="rail__idx">05</span>
+    <span class="rail__name" data-i18n="s5"></span>
+    <span class="rail__badge" id="railbadge-5"></span>
   </button>
 </nav>
 
@@ -1056,6 +1062,83 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
     <button class="btn btn--primary" id="pv-save" onclick="PPX.save()" data-i18n="save"></button>
   </div>
 </section>
+
+<section class="step" id="step-5" hidden>
+  <div class="panel">
+    <div class="panel__head">
+      <h2 data-i18n="s5Title"></h2>
+      <span class="tag" id="hv-badge">—</span>
+    </div>
+    <p class="panel__sub" data-i18n="s5Desc"></p>
+    <div class="grid grid--stats" id="hv-stats"></div>
+    <hr class="hair">
+    <p class="field__note" data-i18n="hvGuarantee"></p>
+  </div>
+
+  <div class="grid grid--split" style="margin-top:12px">
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="hvDiscTitle"></h3>
+          <span class="tag" id="hv-disc-tag">—</span>
+        </div>
+        <div class="pv" id="hv-caps"><div class="empty" data-i18n="hvDiscIdle"></div></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--mini" id="hv-scan" onclick="PPX.hvScan()" data-i18n="hvScan"></button>
+        </div>
+        <p class="field__note" id="hv-bound"></p>
+      </section>
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="hvPropTitle"></h3>
+          <span class="tag" id="hv-prop-tag">0</span>
+        </div>
+        <div class="pv" id="hv-proposals"></div>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="hvSwitchTitle"></h3></div>
+        <div id="hv-switches"></div>
+        <p class="field__note" data-i18n="hvSwitchNote"></p>
+        <hr class="hair">
+        <div class="fields" id="hv-fields"></div>
+        <hr class="hair">
+        <span class="field__label" data-i18n="hvEntitiesTitle"></span>
+        <div id="hv-entities"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--mini" id="hv-addentity" onclick="PPX.hvAddEntity()" data-i18n="hvEntityAdd"></button>
+        </div>
+        <p class="field__note" data-i18n="hvEntityNote"></p>
+        <hr class="hair">
+        <span class="field__label" data-i18n="hvTargetsTitle"></span>
+        <div id="hv-targets"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--tiny" id="hv-addtarget" onclick="PPX.hvAddTarget()" data-i18n="hvTargetAdd"></button>
+        </div>
+        <p class="field__note" data-i18n="hvTargetNote"></p>
+      </section>
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="hvStatusTitle"></h3></div>
+        <div class="list" id="hv-status"><div class="empty" data-i18n="hvStatusIdle"></div></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--tiny" onclick="PPX.hvStatus()" data-i18n="hvRefresh"></button>
+        </div>
+        <p class="field__note" data-i18n="hvGateNote"></p>
+      </section>
+    </div>
+  </div>
+
+  <div class="savebar">
+    <div class="savebar__state">
+      <span class="savebar__text" id="hv-save-text" data-i18n="saved"></span>
+      <span class="savebar__rev mono" id="hv-save-rev"></span>
+    </div>
+    <button class="btn" onclick="PPX.revert()" data-i18n="revert"></button>
+    <button class="btn btn--primary" id="hv-save" onclick="PPX.save()" data-i18n="save"></button>
+  </div>
+</section>
 </main>
 
 <div class="drawer" id="drawer">
@@ -1138,9 +1221,21 @@ var ROUTE = {
   health: "/api/health",
   privacyAuthorize: "/api/privacy/authorize",
   privacyDecision: "/api/privacy/decision",
+  // Console-only, like the two above it: writing a Keychain item is the setup act that
+  // precedes an authorization, so no tool path and no phone command may reach it.
+  hubCredential: "/api/hub/credential",
   // The console self-check calls the same tool route an assistant calls, so a green
   // line on the panel is evidence about the entry point, not about a special path.
-  toolAvailability: "/v1/tools/calendar/availability"
+  toolAvailability: "/v1/tools/calendar/availability",
+  // Discovery: the card reads the cached snapshot with a GET, and only the button waits.
+  discoveryCapabilities: "/v1/discovery/capabilities",
+  discoveryScan: "/v1/discovery/scan",
+  // The three bridge readouts, called through the same `/v1/tools/` surface a paired phone
+  // uses. A panel that had its own status endpoint would be a second answer to
+  // 「is this bridge up」, and the two would disagree about the switch.
+  toolMCPStatus: "/v1/tools/mcp/status",
+  toolHomeStatus: "/v1/tools/home/status",
+  toolCalDavStatus: "/v1/tools/caldav/status"
 };
 
 var LEVEL_GLYPH = { debug: "·", info: "›", notice: "•", success: "✓", warning: "!", error: "✕" };
@@ -1150,6 +1245,12 @@ var CJK_WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 var WEEKDAYS = { zh: CJK_WEEKDAYS, zhHant: CJK_WEEKDAYS, en: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] };
 var WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
 var LOG_LIMIT = 900;
+/* The two ceilings the hub panel enforces while typing. They are the node's numbers, and
+   `HubBridgeTests` pins each one against `HubConfig` — the server truncates silently through
+   `normalised`, so an untested copy here would be a page that lets an owner add rows the
+   node then drops without saying so. */
+var HV_ENTITY_LIMIT = 64;
+var HV_TARGET_LIMIT = 8;
 
 /* ---------------------------------------------------------------- i18n */
 var I18N = {
@@ -1518,6 +1619,8 @@ var I18N = {
   pvActReschedule: { zh: "改期", en: "reschedule" },
   pvActCancel: { zh: "取消日程", en: "cancel event" },
   pvActWrite: { zh: "写入文件", en: "write file" },
+  pvActOrganize: { zh: "整理文件", en: "organize files" },
+  pvActInvoke: { zh: "调用工具", en: "call tool" },
   pvStatePending: { zh: "等你确认", en: "awaiting you" },
   pvStateApproved: { zh: "已批准", en: "approved" },
   pvStateExecuted: { zh: "已执行", en: "executed" },
@@ -1527,13 +1630,107 @@ var I18N = {
   pvStateCancelled: { zh: "已作废", en: "voided" },
   pvDomainCal: { zh: "日历", en: "calendar" },
   pvDomainWs: { zh: "工作区", en: "workspace" },
+  pvDomainMCP: { zh: "MCP", en: "MCP" },
+  pvDomainHome: { zh: "家居", en: "home" },
   pvApprove: { zh: "批准并执行", en: "Approve and run" },
   pvReject: { zh: "驳回", en: "Reject" },
   pvConfirmAgain: { zh: "再点一次以确认", en: "Click again to confirm" },
   pvCannotApprove: { zh: "该提案现在无法执行：所需开关或目录已关闭", en: "This one cannot run: the switch or directory it needs is off" },
   pvTtlOver: { zh: "已超时", en: "timed out" },
   decisionDone: { zh: "已按你的决定执行", en: "Your decision was applied" },
-  decisionFailed: { zh: "决定未能执行", en: "The decision could not be applied" }
+  decisionFailed: { zh: "决定未能执行", en: "The decision could not be applied" },
+  /* ---- step five: local capability discovery and protocol bridges ---- */
+  s5: { zh: "本地中枢桥接", en: "Edge hub bridges" },
+  s5Title: { zh: "本地能力发现与协议桥接", en: "Local discovery and protocol bridges" },
+  s5Desc: { zh: "只探测这台 Mac 与机主列出的内网地址；每一项能力都默认关闭，启用后仍受同一条二次确认门禁约束。", en: "Only this Mac and the private addresses you list are probed. Every capability starts switched off, and an enabled one still runs through the same second-confirmation gate." },
+  hvGuarantee: { zh: "本页全部来自 127.0.0.1：探测不出网、不扫端口、不猜主机；公网地址在建立连接前就被拒绝，计数与原因一并列出。", en: "Everything here is served from the loopback address: no egress, no port sweep, no guessed host. A public target is refused before a socket exists, and the count and reason are listed." },
+  hvDiscTitle: { zh: "本地能力发现", en: "Local capability discovery" },
+  hvDiscIdle: { zh: "还没有探测结果", en: "Nothing measured yet" },
+  hvScan: { zh: "立即探测", en: "Probe now" },
+  hvScanning: { zh: "探测中", en: "measuring" },
+  hvScanFailed: { zh: "探测失败", en: "The probe failed" },
+  hvBoundary: { zh: "仅回环与机主列出的局域网地址", en: "Loopback plus the LAN targets this owner listed" },
+  hvKindEngine: { zh: "推理服务", en: "engine" },
+  hvKindModel: { zh: "模型", en: "model" },
+  hvKindWorkspace: { zh: "工作区", en: "workspace" },
+  hvKindCalendar: { zh: "日历", en: "calendar" },
+  hvKindLan: { zh: "内网服务", en: "lan" },
+  hvKindRefused: { zh: "已拒绝", en: "refused" },
+  hvStatePresent: { zh: "在线", en: "present" },
+  hvStateAbsent: { zh: "未发现", en: "absent" },
+  hvStateInstalled: { zh: "已安装", en: "installed" },
+  hvStateAuthorized: { zh: "已授权", en: "authorized" },
+  hvStateDenied: { zh: "系统已拒绝", en: "denied by macOS" },
+  hvStateOff: { zh: "未开启", en: "off" },
+  hvStateReachable: { zh: "端口有响应", en: "reachable" },
+  hvStateSilent: { zh: "无响应", en: "silent" },
+  hvStateRefused: { zh: "被拒绝", en: "refused" },
+  hvStateFull: { zh: "已授权", en: "authorized" },
+  hvStateWrite: { zh: "仅写入", en: "write only" },
+  hvStateRestricted: { zh: "受限", en: "restricted" },
+  hvStateNotAsked: { zh: "尚未询问", en: "not asked yet" },
+  hvStateNoBridge: { zh: "未装配", en: "not attached" },
+  hvStatCaps: { zh: "能力项", en: "Capabilities" },
+  hvStatRefused: { zh: "被拒绝的目标", en: "Refused targets" },
+  hvStatRefusedNote: { zh: "未发起任何连接", en: "no connection attempted" },
+  hvStatServers: { zh: "MCP 服务器", en: "MCP servers" },
+  hvStatServersNote: { zh: "已登记 / 已连接", en: "registered / connected" },
+  hvStatEntities: { zh: "可见实体", en: "Visible entities" },
+  hvStatEntitiesNote: { zh: "来自白名单", en: "from the allow-list" },
+  hvBadgePending: { zh: "等你确认", en: "Awaiting you" },
+  hvBadgeOn: { zh: "已启用", en: "Bridges on" },
+  hvBadgeOff: { zh: "全部关闭", en: "All off" },
+  hvPropTitle: { zh: "待确认的桥接动作", en: "Bridge actions awaiting you" },
+  hvPropNone: { zh: "没有等待确认的桥接动作", en: "No bridge action awaits a decision" },
+  hvSwitchTitle: { zh: "桥接开关（默认全部关闭）", en: "Bridge switches (all off by default)" },
+  hvSwitchNote: { zh: "开关需要背后有可用目标才会真正生效：没有已登记的 MCP 服务器、没有 Home Assistant 或 Broker 地址、没有 CalDAV 服务器时，节点会把它读作关闭。", en: "A switch only takes effect once it has something behind it: with no registered MCP server, no Home Assistant or broker address, and no CalDAV server, the node reads it as off." },
+  hvMcpSwitch: { zh: "启用本机 MCP 客户端（stdio 或回环 HTTP）", en: "Enable the local MCP client (stdio or loopback HTTP)" },
+  hvHomeSwitch: { zh: "启用 Home Assistant 与 MQTT（仅内网）", en: "Enable Home Assistant and MQTT (private network only)" },
+  hvCalDavSwitch: { zh: "启用 CalDAV 空闲时段（仅时段，不读事件内容）", en: "Enable CalDAV free/busy (windows only, never event content)" },
+  hvAutoScan: { zh: "打开控制台时自动探测本机能力", en: "Probe local capabilities when the console opens" },
+  hvReadonly: { zh: "家居只读：仅镜像状态，不控制设备", en: "Smart home read-only: mirror state, never actuate" },
+  hvTelemetry: { zh: "接收 MQTT 状态推送（需填写订阅主题）", en: "Accept MQTT telemetry (needs topic filters)" },
+  hvStatusTitle: { zh: "桥接状态", en: "Bridge status" },
+  hvStatusIdle: { zh: "尚未查询", en: "not asked yet" },
+  hvChecking: { zh: "查询中", en: "asking" },
+  hvRefresh: { zh: "重新查询", en: "Ask again" },
+  hvGateNote: { zh: "三条状态来自与手机相同的工具入口；只读动作直接执行，变更类动作一律进入待确认提案队列并写入本地审计日志。", en: "All three lines come from the same tool entry points a paired phone uses: read-only calls run, anything mutating becomes a proposal and is written to the local audit log." },
+  hvBridgeMCP: { zh: "MCP 客户端", en: "MCP client" },
+  hvBridgeHome: { zh: "Home Assistant · MQTT", en: "Home Assistant · MQTT" },
+  hvBridgeCalDav: { zh: "CalDAV 空闲时段", en: "CalDAV free/busy" },
+  hvHaOk: { zh: "Home Assistant 已配置", en: "Home Assistant configured" },
+  hvHaAbsent: { zh: "Home Assistant 未配置", en: "Home Assistant absent" },
+  hvMqttOk: { zh: "Broker 已连接", en: "broker connected" },
+  hvMqttAbsent: { zh: "Broker 未连接", en: "broker not connected" },
+  hvRejectedEntries: { zh: "被拒绝的登记表条目", en: "refused registry entries" },
+  hvHaUrl: { zh: "Home Assistant 地址", en: "Home Assistant URL" },
+  hvHaNote: { zh: "仅接受回环、10/8、172.16/12、192.168/16 或 .local；公网地址与外部域名在连接前被拒绝。", en: "Loopback, 10/8, 172.16/12, 192.168/16 and .local only; a public address or external domain is refused before a socket exists." },
+  hvHaToken: { zh: "长期访问令牌（存入钥匙串）", en: "Long-lived access token (Keychain)" },
+  hvMqttHost: { zh: "MQTT 主机", en: "MQTT host" },
+  hvMqttHostPlaceholder: { zh: "例如 192.168.1.20", en: "for example 192.168.1.20" },
+  hvMqttNote: { zh: "同样是内网边界；MQTT v3.1.1 由本节点直接连接，不经过任何第三方。", en: "The same private-network boundary; the node speaks MQTT v3.1.1 itself, with no third party in between." },
+  hvMqttPassword: { zh: "MQTT 口令（存入钥匙串）", en: "MQTT password (Keychain)" },
+  hvSecretSave: { zh: "存入钥匙串", en: "Store in Keychain" },
+  hvSecretStored: { zh: "凭据已加密存入钥匙串", en: "The credential is stored encrypted" },
+  hvMqttPort: { zh: "MQTT 端口", en: "MQTT port" },
+  hvSecretFailed: { zh: "凭据未能存入", en: "The credential was not stored" },
+  hvSecretEmpty: { zh: "请先填写凭据", en: "Write the credential first" },
+  hvServerRequired: { zh: "请先填写 CalDAV 服务器标识", en: "Name the CalDAV server first" },
+  hvCalDavId: { zh: "CalDAV 服务器标识", en: "CalDAV server id" },
+  hvCalDavIdNote: { zh: "必须与设置文档中已登记的标识一致。", en: "Must match a server already listed in the settings document." },
+  hvCalDavPassword: { zh: "CalDAV 口令或应用专用密码", en: "CalDAV password or app token" },
+  hvCalDavPasswordNote: { zh: "同样是只存引用；节点不会把口令写入设置、日志或本页任何回包。", en: "Reference only, again: the node never puts the value in the settings file, a log line, or any reply this page reads." },
+  hvEntitiesTitle: { zh: "设备实体白名单", en: "Entity allow-list" },
+  hvEntityAdd: { zh: "添加实体", en: "Add entity" },
+  hvEntityNote: { zh: "不在此列表中的实体对本节点不存在。门锁、撤防、警号、摄像机与扫地机即使已列入，也必须经过二次确认才能控制。", en: "An entity that is not listed here does not exist for this node. Locks, alarms, sirens, cameras and vacuums need the second confirmation even when they are listed." },
+  hvEntityEmpty: { zh: "白名单为空：桥接将读作关闭", en: "The allow-list is empty, so the bridge reads as off" },
+  hvEntityLimit: { zh: "白名单已达上限", en: "The allow-list is at its ceiling" },
+  hvTargetsTitle: { zh: "局域网探测目标（可选）", en: "LAN probe targets (optional)" },
+  hvTargetAdd: { zh: "添加目标", en: "Add target" },
+  hvTargetNote: { zh: "格式为 主机:端口。仅一次 TCP 连接尝试，350 毫秒超时；公网地址会被拒绝并计入上面的「被拒绝的目标」。", en: "Host and port. One TCP attempt with a 350 ms timeout; a public address is refused and counted under refused targets above." },
+  hvTargetEmpty: { zh: "未列出目标：仅探测本机", en: "No target listed, so only this Mac is probed" },
+  hvTargetLimit: { zh: "探测目标已达上限", en: "The probe list is at its ceiling" },
+  hvRemove: { zh: "移除", en: "remove" }
 };
 
 /* ------------------------------------------------------- locale registry */
@@ -1648,6 +1845,9 @@ var S = {
   hadTunnel: false,
   expiredRendered: false,
   pvCheck: null,
+  discovery: null,
+  hub: null,
+  hubPending: false,
   clockOffset: 0,
   es: null,
   esBackoff: 1000,
@@ -2184,6 +2384,11 @@ function renderRail() {
   var privacy = snap.privacy || {};
   setRail(4, pvPendingCards().length ? "wait"
     : (privacy.calendarAllowed || privacy.workspaceReadAllowed || privacy.workspaceWriteAllowed) ? "done" : "todo");
+  // Step five reads the switches from the saved document, and the *reachability* from the
+  // last `/v1/tools/*/status` fetch (`S.hub`). A switch that has no target behind it is off
+  // inside the engine even while it is ticked here, which is exactly what the panel's own
+  // 「被拒绝 / refused」 rows say, so the badge is allowed to be optimistic and the rows are not.
+  setRail(5, hvPendingCards().length ? "wait" : hvAnyOn() ? "done" : "todo");
 }
 
 /* -------------------------------------------------------------- step one */
@@ -3064,10 +3269,13 @@ function drillCard(result) {
   });
   return card;
 }
-var SAVE_BARS = [["save-text", "save-rev", "btn-save"], ["pv-save-text", "pv-save-rev", "pv-save"]];
-/* Two steps post the same settings document, so both bars must tell the truth about it:
-   leaving the second one static would let step four claim 「已保存」 while step three was
-   still dirty. */
+var SAVE_BARS = [
+  ["save-text", "save-rev", "btn-save"],
+  ["pv-save-text", "pv-save-rev", "pv-save"],
+  ["hv-save-text", "hv-save-rev", "hv-save"]
+];
+/* Three steps post the same settings document, so every bar must tell the truth about it:
+   leaving one static would let a panel claim 「已保存」 while another was still dirty. */
 function renderSaveBar() {
   var label = S.saving ? t("saving") : (S.dirty ? t("dirty") : t("saved"));
   var kind = S.saving || S.dirty ? "savebar__text is-dirty" : "savebar__text";
@@ -3113,6 +3321,8 @@ function pvActionLabel(action) {
   if (action === "reschedule") { return t("pvActReschedule"); }
   if (action === "cancel") { return t("pvActCancel"); }
   if (action === "write") { return t("pvActWrite"); }
+  if (action === "organize") { return t("pvActOrganize"); }
+  if (action === "invoke") { return t("pvActInvoke"); }
   return String(action || "—");
 }
 function pvStateLabel(state) {
@@ -3126,7 +3336,14 @@ function pvStateLabel(state) {
   return String(state || "—");
 }
 function pvDomainLabel(domain) {
-  return domain === "calendar" ? t("pvDomainCal") : t("pvDomainWs");
+  if (domain === "calendar") { return t("pvDomainCal"); }
+  if (domain === "workspace") { return t("pvDomainWs"); }
+  // The ledger stores the audit domain, so a hub card says `smartHome` where the owner
+  // typed `home`. Listing both here is what keeps a device proposal from being filed
+  // under "workspace" on the page the owner uses to approve it.
+  if (domain === "mcp") { return t("pvDomainMCP"); }
+  if (domain === "smartHome" || domain === "home") { return t("pvDomainHome"); }
+  return String(domain || "—");
 }
 function pvTag(text, kind) { return h("span", { cls: "tag" + (kind ? " tag--" + kind : ""), text: text }); }
 function pvPendingCards() {
@@ -3292,7 +3509,12 @@ function renderPrivacyProposals() {
   clear(host);
   var cards = pvSnap().pendingProposals || [];
   if (!cards.length) { host.appendChild(h("div", { cls: "empty", text: t("pvNone") })); return; }
-  cards.forEach(function (card) {
+  cards.forEach(function (card) { host.appendChild(pvProposalCard(card)); });
+}
+/* One card, built by both panels. The hub panel filters the same ledger list down to its
+   two domains, and a second copy of this markup is how the two would drift into two
+   different answers about whether a proposal was clickable. */
+function pvProposalCard(card) {
     var pending = card.state === "pending_user_approval";
     var box = h("div", { cls: "pv-card" + (pending ? "" : " is-spent") });
     box.appendChild(h("div", { cls: "pv-top" }, [
@@ -3326,8 +3548,7 @@ function renderPrivacyProposals() {
       if (!card.canApprove) { acts.appendChild(note(t("pvCannotApprove"))); }
     }
     box.appendChild(acts);
-    host.appendChild(box);
-  });
+    return box;
 }
 function renderPrivacyBookings() {
   var host = el("pv-bookings");
@@ -3387,6 +3608,412 @@ function updatePvCountdown() {
     node.textContent = left > 0 ? dur(left) : t("pvTtlOver");
     node.classList.toggle("is-soon", left > 0 && left < 60);
   });
+}
+
+/* ---------------------------------------------------------------- step five */
+/* The two hub cards. Everything here is read from the node: the switches come from the saved
+   settings document, the capability rows from the discovery actor, the bridge lines from the
+   same `/v1/tools/…/status` routes a paired phone calls. The page holds no endpoint it did not
+   get from the node, and no secret it ever shows back. */
+function hvSaved() { return (S.snap && S.snap.settings && S.snap.settings.hubBridges) || {}; }
+function hvConfig() {
+  if (!S.form) { return null; }
+  if (!S.form.hubBridges) { S.form.hubBridges = clone(hvSaved()); }
+  var cfg = S.form.hubBridges;
+  cfg.discovery = cfg.discovery || clone(hvSaved().discovery || {});
+  cfg.smartHome = cfg.smartHome || clone(hvSaved().smartHome || {});
+  cfg.calDav = cfg.calDav || clone(hvSaved().calDav || {});
+  cfg.smartHome.exposedEntities = cfg.smartHome.exposedEntities || [];
+  cfg.discovery.lanTargets = cfg.discovery.lanTargets || [];
+  return cfg;
+}
+function hvAnyOn() {
+  var cfg = (S.form && S.form.hubBridges) || hvSaved();
+  return Boolean(cfg.allowMcpBridge || cfg.allowSmartHomeBridge || cfg.allowCalDavBridge);
+}
+function hvPendingCards() {
+  return ((pvSnap().pendingProposals) || []).filter(function (card) {
+    return card.domain === "mcp" || card.domain === "smartHome" || card.domain === "home";
+  });
+}
+function hvKindLabel(kind) {
+  if (kind === "ollama") { return t("hvKindEngine"); }
+  if (kind === "model") { return t("hvKindModel"); }
+  if (kind === "workspace") { return t("hvKindWorkspace"); }
+  if (kind === "calendar") { return t("hvKindCalendar"); }
+  if (kind === "lanService") { return t("hvKindLan"); }
+  if (kind === "refusal") { return t("hvKindRefused"); }
+  return String(kind || "—");
+}
+/* Written out one `t()` per value, for the same reason `pvStateLabel` is: a lookup table
+   hides a missing string behind an empty cell, and the catalog gate cannot see it. */
+function hvStateLabel(state) {
+  if (state === "present") { return t("hvStatePresent"); }
+  if (state === "absent") { return t("hvStateAbsent"); }
+  if (state === "installed") { return t("hvStateInstalled"); }
+  if (state === "authorized") { return t("hvStateAuthorized"); }
+  if (state === "denied") { return t("hvStateDenied"); }
+  if (state === "off") { return t("hvStateOff"); }
+  if (state === "reachable") { return t("hvStateReachable"); }
+  if (state === "silent") { return t("hvStateSilent"); }
+  if (state === "refused") { return t("hvStateRefused"); }
+  if (state === "fullAccess") { return t("hvStateFull"); }
+  if (state === "writeAccess") { return t("hvStateWrite"); }
+  if (state === "restricted") { return t("hvStateRestricted"); }
+  if (state === "notDetermined") { return t("hvStateNotAsked"); }
+  if (state === "noGateway") { return t("hvStateNoBridge"); }
+  return String(state || "—");
+}
+function hvStateKind(state) {
+  if (state === "present" || state === "installed" || state === "authorized"
+    || state === "reachable" || state === "fullAccess" || state === "writeAccess") { return "ok"; }
+  if (state === "denied" || state === "refused" || state === "restricted") { return "bad"; }
+  return "off";
+}
+function hvPoll() {
+  api(ROUTE.discoveryCapabilities).then(function (reply) {
+    S.discovery = reply || {};
+    renderDiscovery();
+  }).catch(function () { /* the card keeps its last answer; a failed poll is not a finding */ });
+  hvStatus();
+}
+function hvScan() {
+  var button = el("hv-scan");
+  if (button) { button.classList.add("is-disabled"); button.textContent = t("hvScanning"); }
+  function done() {
+    if (button) {
+      button.classList.remove("is-disabled");
+      button.textContent = t("hvScan");
+    }
+  }
+  api(ROUTE.discoveryScan, { method: "POST", json: {} }).then(function (reply) {
+    S.discovery = reply || {};
+    renderDiscovery();
+    done();
+  }).catch(function (error) {
+    done();
+    fail("hvScanFailed", error);
+  });
+}
+function hvStatus() {
+  S.hubPending = true;
+  renderHubStatus();
+  var jobs = [
+    ["mcp", ROUTE.toolMCPStatus],
+    ["home", ROUTE.toolHomeStatus],
+    ["calDav", ROUTE.toolCalDavStatus]
+  ];
+  var settled = 0;
+  function settle() {
+    settled += 1;
+    if (settled >= jobs.length) { S.hubPending = false; }
+    renderHubStatus();
+  }
+  jobs.forEach(function (job) {
+    api(job[1], { method: "POST", json: {} }).then(function (reply) {
+      S.hub = S.hub || {};
+      S.hub[job[0]] = { ok: true, data: reply || {} };
+      settle();
+    }).catch(function (error) {
+      S.hub = S.hub || {};
+      S.hub[job[0]] = {
+        ok: false,
+        // A refused bridge answers 403 with `refusal`, and that sentence names the missing
+        // switch. Swallowing it into "403" would leave the owner guessing which of the three.
+        message: String((error && error.message) || job[0])
+      };
+      settle();
+    });
+  });
+}
+/* The credential path is console-only and one-way: the value goes out in a POST body, the
+   reply carries only the Keychain reference, and nothing is written into `S.form`, so the
+   settings document the save bar posts can never carry a token. Implemented as `hvStore`,
+   next to the draft holder it reads. */
+function renderStep5() {
+  ensureForm(S.snap);
+  renderHubStats();
+  renderDiscovery();
+  buildHubControls();
+  renderHubEntityRows();
+  renderHubTargetRows();
+  renderHubStatus();
+  renderHubProposals();
+  renderSaveBar();
+}
+function renderHubStats() {
+  var disc = S.discovery || {}, slot = el("hv-stats");
+  if (!slot) { return; }
+  clear(slot);
+  var caps = disc.capabilities || [];
+  slot.appendChild(statCard("hvStatCaps", String(caps.length), "", false));
+  var refused = caps.filter(function (row) { return row.state === "refused"; }).length;
+  slot.appendChild(statCard("hvStatRefused", String(refused), t("hvStatRefusedNote"), false));
+  var hub = S.hub || {};
+  var mcp = (hub.mcp && hub.mcp.data) || {};
+  slot.appendChild(statCard("hvStatServers", String(mcp.serverCount || 0) + " · " + String(mcp.connectedCount || 0),
+    t("hvStatServersNote"), false));
+  var home = ((hub.home && hub.home.data) || {});
+  slot.appendChild(statCard("hvStatEntities", String(home.entityCount || 0),
+    t("hvStatEntitiesNote"), false));
+  var badge = el("hv-badge");
+  if (badge) {
+    var pending = hvPendingCards().length;
+    badge.textContent = pending ? t("hvBadgePending") + " " + String(pending)
+      : hvAnyOn() ? t("hvBadgeOn") : t("hvBadgeOff");
+    badge.className = "tag" + (pending ? " tag--warn" : hvAnyOn() ? " tag--ok" : " tag--off");
+  }
+  var tag = el("hv-prop-tag");
+  if (tag) {
+    var count = hvPendingCards().length;
+    tag.textContent = String(count);
+    tag.className = "tag" + (count ? " tag--warn" : "");
+  }
+}
+function renderDiscovery() {
+  var host = el("hv-caps"), tag = el("hv-disc-tag"), bound = el("hv-bound");
+  var disc = S.discovery || {}, caps = disc.capabilities || [];
+  if (tag) {
+    tag.textContent = disc.scanning ? t("hvScanning") : caps.length ? String(caps.length) : t("hvDiscIdle");
+    tag.className = "tag" + (disc.scanning ? " tag--warn" : "");
+  }
+  if (bound) {
+    bound.textContent = String(disc.boundary || t("hvBoundary"))
+      + (disc.scannedAt ? " · " + pvWhen(disc.scannedAt) : "");
+  }
+  if (!host) { return; }
+  clear(host);
+  if (!caps.length) { host.appendChild(h("div", { cls: "empty", text: t("hvDiscIdle") })); return; }
+  caps.forEach(function (row) {
+    var box = h("div", { cls: "list__row" }, [
+      h("span", { cls: "dot dot--" + hvStateKind(row.state) }),
+      h("span", { cls: "pv-line", text: String(row.label || "") }),
+      pvTag(hvKindLabel(row.kind)),
+      pvTag(hvStateLabel(row.state), hvStateKind(row.state))
+    ]);
+    host.appendChild(box);
+    if (row.detail) { host.appendChild(h("div", { cls: "pv-meta", text: String(row.detail).slice(0, 240) })); }
+    if (row.origin) { host.appendChild(h("div", { cls: "pv-meta mono", text: String(row.origin) })); }
+  });
+}
+function buildHubControls() {
+  var host = el("hv-switches"), fields = el("hv-fields"), cfg = hvConfig();
+  if (!cfg) { return; }
+  if (host) {
+    clear(host);
+    var box = h("div", { cls: "list" });
+    box.appendChild(checkField("hvMcpSwitch", function () { return cfg.allowMcpBridge; },
+      function (value) { cfg.allowMcpBridge = value; }));
+    box.appendChild(checkField("hvHomeSwitch", function () { return cfg.allowSmartHomeBridge; },
+      function (value) { cfg.allowSmartHomeBridge = value; }));
+    box.appendChild(checkField("hvCalDavSwitch", function () { return cfg.allowCalDavBridge; },
+      function (value) { cfg.allowCalDavBridge = value; }));
+    box.appendChild(checkField("hvAutoScan", function () { return cfg.discovery.autoScanOnLaunch; },
+      function (value) { cfg.discovery.autoScanOnLaunch = value; }));
+    box.appendChild(checkField("hvReadonly", function () { return cfg.smartHome.readOnlyMode; },
+      function (value) { cfg.smartHome.readOnlyMode = value; }));
+    box.appendChild(checkField("hvTelemetry", function () { return cfg.smartHome.allowMqttTelemetry; },
+      function (value) { cfg.smartHome.allowMqttTelemetry = value; }));
+    host.appendChild(box);
+  }
+  if (fields) {
+    clear(fields);
+    fields.appendChild(urlField("hvHaUrl", function () { return cfg.smartHome.homeAssistantUrl; },
+      function (value) { cfg.smartHome.homeAssistantUrl = value; }, "http://homeassistant.local:8123", "hvHaNote"));
+    fields.appendChild(secretField("hvHaToken", function () { return ""; }, function (value) {
+      hvDraftToken("homeToken", value);
+    }));
+    fields.appendChild(textField("hvMqttHost", function () { return cfg.smartHome.mqttHost; },
+      function (value) { cfg.smartHome.mqttHost = value; }, "hvMqttHostPlaceholder", "hvMqttNote"));
+    fields.appendChild(numField("hvMqttPort", function () { return Number(cfg.smartHome.mqttPort) || 1883; },
+      function (value) { cfg.smartHome.mqttPort = value; }, 1, 65535, null));
+    fields.appendChild(secretField("hvMqttPassword", function () { return ""; }, function (value) {
+      hvDraftToken("mqttPassword", value);
+    }));
+    var store = h("div", { cls: "btn-row" }, [
+      h("button", { cls: "btn btn--mini", type: "button", text: t("hvSecretSave"), onclick: "PPX.hvStoreHome()" })
+    ]);
+    fields.appendChild(store);
+    fields.appendChild(h("hr", { cls: "hair" }));
+    var calId = h("input", { type: "text", spellcheck: "false", id: "hv-caldav-id", placeholder: "icloud" });
+    calId.addEventListener("input", function () { hvDraftCalDavId(calId.value); });
+    fields.appendChild(fieldWrap("hvCalDavId", calId, note(t("hvCalDavIdNote"))));
+    var calSecret = h("input", { type: "password", spellcheck: "false", id: "hv-caldav-secret", autocomplete: "off" });
+    fields.appendChild(fieldWrap("hvCalDavPassword", calSecret, note(t("hvCalDavPasswordNote"))));
+    fields.appendChild(h("div", { cls: "btn-row" }, [
+      h("button", { cls: "btn btn--mini", type: "button", text: t("hvSecretSave"), onclick: "PPX.hvStoreCalDav()" })
+    ]));
+  }
+}
+/* A typed credential is held only in this closure until the 「存入钥匙串」 click posts it. It is
+   deliberately not copied into `S.form`, so a 「保存」 of the settings document cannot put it in a
+   file, and a page reload drops it. */
+var HV_DRAFT = { homeToken: "", mqttPassword: "", calDavId: "" };
+function hvDraftToken(kind, value) { HV_DRAFT[kind] = value; }
+function hvDraftCalDavId(value) { HV_DRAFT.calDavId = value; }
+function renderHubEntityRows() {
+  var host = el("hv-entities"), cfg = hvConfig();
+  if (!host || !cfg) { return; }
+  clear(host);
+  var list = cfg.smartHome.exposedEntities;
+  list.forEach(function (item, index) {
+    var input = h("input", { type: "text", spellcheck: "false", value: String(item), placeholder: "light.study_desk" });
+    input.addEventListener("input", function () { list[index] = input.value; markDirty(); });
+    host.appendChild(h("div", { cls: "list__row" }, [
+      input,
+      h("button", { cls: "btn btn--tiny", text: t("hvRemove"), type: "button", onclick: "PPX.hvRemoveEntity(" + index + ")" })
+    ]));
+  });
+  if (!list.length) { host.appendChild(note(t("hvEntityEmpty"))); }
+  var add = el("hv-addentity");
+  if (add) { add.classList.toggle("is-disabled", list.length >= HV_ENTITY_LIMIT); }
+}
+function renderHubTargetRows() {
+  var host = el("hv-targets"), cfg = hvConfig();
+  if (!host || !cfg) { return; }
+  clear(host);
+  var list = cfg.discovery.lanTargets;
+  list.forEach(function (item, index) {
+    var input = h("input", { type: "text", spellcheck: "false", value: String(item), placeholder: "homeassistant.local:8123" });
+    input.addEventListener("input", function () { list[index] = input.value; markDirty(); });
+    host.appendChild(h("div", { cls: "list__row" }, [
+      input,
+      h("button", { cls: "btn btn--tiny", text: t("hvRemove"), type: "button", onclick: "PPX.hvRemoveTarget(" + index + ")" })
+    ]));
+  });
+  if (!list.length) { host.appendChild(note(t("hvTargetEmpty"))); }
+  var add = el("hv-addtarget");
+  if (add) { add.classList.toggle("is-disabled", list.length >= HV_TARGET_LIMIT); }
+}
+function renderHubStatus() {
+  var host = el("hv-status");
+  if (!host) { return; }
+  clear(host);
+  var rows = [
+    ["mcp", t("hvBridgeMCP")],
+    ["home", t("hvBridgeHome")],
+    ["calDav", t("hvBridgeCalDav")]
+  ];
+  rows.forEach(function (row) {
+    var entry = (S.hub || {})[row[0]];
+    if (!entry) {
+      host.appendChild(h("div", { cls: "list__row" }, [
+        h("span", { cls: "dot" }),
+        h("span", { cls: "pv-line", text: row[1] }),
+        pvTag(S.hubPending ? t("hvChecking") : t("hvStatusIdle"), "off")
+      ]));
+      return;
+    }
+    if (!entry.ok) {
+      host.appendChild(h("div", { cls: "list__row" }, [
+        h("span", { cls: "dot dot--bad" }),
+        h("span", { cls: "pv-line", text: row[1] }),
+        pvTag(t("hvStateOff"), "off")
+      ]));
+      host.appendChild(h("div", { cls: "pv-meta", text: String(entry.message || "").slice(0, 240) }));
+      return;
+    }
+    var data = entry.data || {};
+    host.appendChild(h("div", { cls: "list__row" }, [
+      h("span", { cls: "dot dot--ok" }),
+      h("span", { cls: "pv-line", text: row[1] }),
+      pvTag(hvBridgeSummary(row[0], data), "ok")
+    ]));
+    (data.servers || data.entities || []).slice(0, 6).forEach(function (card) {
+      host.appendChild(h("div", { cls: "pv-meta", text: hvCardLine(row[0], card) }));
+    });
+    if (data.gate) { host.appendChild(h("div", { cls: "pv-meta", text: String(data.gate) })); }
+    if (data.redaction) { host.appendChild(h("div", { cls: "pv-meta", text: String(data.redaction) })); }
+    if (row[0] === "mcp" && (data.entryRejections || []).length) {
+      host.appendChild(h("div", { cls: "pv-meta", text: t("hvRejectedEntries") + " " + String(data.entryRejections.length) }));
+    }
+  });
+}
+/* One `t()` per bridge rather than a table, so a missing label is a visible empty string the
+   catalog gate can catch instead of a row that silently renders English. */
+function hvBridgeSummary(kind, data) {
+  if (kind === "mcp") {
+    return String(data.serverCount || 0) + " · " + String(data.connectedCount || 0) + " · " + String(data.toolCount || 0);
+  }
+  if (kind === "home") {
+    var status = data.status || {};
+    return String(status.homeAssistantConfigured ? t("hvHaOk") : t("hvHaAbsent")) + " · "
+      + String(status.mqttConnected ? t("hvMqttOk") : t("hvMqttAbsent"));
+  }
+  return String(data.busyCount || 0) + " · " + String(data.busyMinutes || 0) + " · " + String(data.serverCount || 0);
+}
+function hvCardLine(kind, card) {
+  if (kind === "home") { return String(card.entityID || "") + " · " + String(card.state || ""); }
+  return String(card.id || card.label || "") + " · "
+    + (card.connected === undefined ? "" : String(card.connected)) + " · "
+    + String(card.reason || card.detail || "");
+}
+function renderHubProposals() {
+  var host = el("hv-proposals");
+  if (!host) { return; }
+  clear(host);
+  var cards = hvPendingCards();
+  if (!cards.length) { host.appendChild(h("div", { cls: "empty", text: t("hvPropNone") })); return; }
+  cards.forEach(function (card) { host.appendChild(pvProposalCard(card)); });
+}
+
+function hvStore(kind, field) {
+  var input = el(field);
+  if (!input) { return; }
+  var secret = String(input.value || "");
+  HV_DRAFT[kind] = "";
+  if (!secret) { toast("warn", t("hvSecretEmpty")); return; }
+  var server = kind === "calDav" ? String(HV_DRAFT.calDavId || "") : "";
+  if (kind === "calDav" && !server) { toast("warn", t("hvServerRequired")); return; }
+  api(ROUTE.hubCredential, { method: "POST", json: { bridge: kind, serverId: server, secret: secret } })
+    .then(function (reply) {
+      input.value = "";
+      toast("ok", t("hvSecretStored") + " · " + String((reply && reply.reference) || ""));
+      // The node wrote the reference into the settings document, so the page adopts what
+      // it says rather than guessing where the reference belongs.
+      refreshSnapshot(true);
+      hvStatus();
+    })
+    .catch(function (error) { input.value = ""; fail("hvSecretFailed", error); });
+}
+function hvStoreHome() {
+  var wrote = false;
+  if (HV_DRAFT.homeToken) { hvStore("homeToken", "hvHaToken"); wrote = true; }
+  if (HV_DRAFT.mqttPassword) { hvStore("mqttPassword", "hvMqttPassword"); wrote = true; }
+  if (!wrote) { toast("warn", t("hvSecretEmpty")); }
+}
+function hvStoreCalDav() {
+  hvStore("calDav", "hv-caldav-secret");
+}
+function hvAddEntity() {
+  var cfg = hvConfig();
+  if (!cfg) { return; }
+  if (cfg.smartHome.exposedEntities.length >= HV_ENTITY_LIMIT) { toast("warn", t("hvEntityLimit")); return; }
+  cfg.smartHome.exposedEntities.push("");
+  markDirty();
+  renderHubEntityRows();
+}
+function hvRemoveEntity(index) {
+  var cfg = hvConfig();
+  if (!cfg) { return; }
+  cfg.smartHome.exposedEntities.splice(index, 1);
+  markDirty();
+  renderHubEntityRows();
+}
+function hvAddTarget() {
+  var cfg = hvConfig();
+  if (!cfg) { return; }
+  if (cfg.discovery.lanTargets.length >= HV_TARGET_LIMIT) { toast("warn", t("hvTargetLimit")); return; }
+  cfg.discovery.lanTargets.push("");
+  markDirty();
+  renderHubTargetRows();
+}
+function hvRemoveTarget(index) {
+  var cfg = hvConfig();
+  if (!cfg) { return; }
+  cfg.discovery.lanTargets.splice(index, 1);
+  markDirty();
+  renderHubTargetRows();
 }
 
 /* ---------------------------------------------------------------- decisions */
@@ -3572,7 +4199,8 @@ function renderAll() {
   if (S.step === 1) { renderStep1(); }
   else if (S.step === 2) { renderStep2(); }
   else if (S.step === 3) { renderStep3(); }
-  else { renderStep4(); }
+  else if (S.step === 4) { renderStep4(); }
+  else { renderStep5(); }
   renderSaveBar();
 }
 
@@ -3876,12 +4504,13 @@ var PPX = {
   step: function (number) {
     S.step = number;
     S.logStep = 0;
-    [1, 2, 3, 4].forEach(function (index) {
+    [1, 2, 3, 4, 5].forEach(function (index) {
       show("step-" + index, index === number);
       var button = el("rail-" + index);
       if (button) { button.classList.toggle("is-on", index === number); }
     });
     renderAll();
+    if (number === 5) { hvPoll(); }
   },
   retry: function () {
     if (S.esTimer) { window.clearTimeout(S.esTimer); S.esTimer = null; }
@@ -3953,6 +4582,14 @@ var PPX = {
   pvAddDir: pvAddDir,
   pvRemoveDir: pvRemoveDir,
   pvAuditCopy: pvAuditCopy,
+  hvScan: hvScan,
+  hvStatus: hvStatus,
+  hvStoreHome: hvStoreHome,
+  hvStoreCalDav: hvStoreCalDav,
+  hvAddEntity: hvAddEntity,
+  hvRemoveEntity: hvRemoveEntity,
+  hvAddTarget: hvAddTarget,
+  hvRemoveTarget: hvRemoveTarget,
   windowAdd: windowAdd,
   windowRemove: windowRemove,
   mountAdd: mountAdd,
@@ -4417,7 +5054,8 @@ public actor LocalWebConsoleServer {
                             status: 200)
         }
 
-        guard path.hasPrefix("/api/") || path.hasPrefix(ConsoleRoute.toolPrefix) else {
+        guard path.hasPrefix("/api/") || path.hasPrefix(ConsoleRoute.toolPrefix)
+            || path.hasPrefix(ConsoleRoute.discoveryPrefix) else {
             throw WEBConsoleError.notFound(path)
         }
         // Every API route, without exception, needs the bearer. This is the only
@@ -4529,11 +5167,16 @@ public actor LocalWebConsoleServer {
             // The console's approval click. `domain` and `verb` are checked here rather
             // than passed down: the route is the only place the console's intent is
             // turned into a ledger call, so it is where a malformed click must die.
+            //
+            // `domain` is read through the same resolver the tool path uses, because a hub
+            // card carries the ledger's audit domain (`smartHome`) rather than the typed
+            // namespace (`home`) — refusing it here would leave a proposal the phone can
+            // approve and the console cannot.
             let body: WEBPrivacyDecisionRequest = try decode(WEBPrivacyDecisionRequest.self, from: request)
             let domain = body.domain.trimmingCharacters(in: .whitespacesAndNewlines)
             let verb = body.verb.trimmingCharacters(in: .whitespacesAndNewlines)
             let id = body.id.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard PrivacyToolNamespace(rawValue: domain) != nil,
+            guard PrivacyToolRoute.namespace(accepting: domain) != nil,
                   verb == PrivacyToolAction.approve || verb == PrivacyToolAction.reject,
                   PrivacyToolRoute.isSafeId(id) else {
                 throw WEBConsoleError.badEngine("domain、id 与 verb 需合法 / domain, id and verb must each be valid")
@@ -4548,6 +5191,36 @@ public actor LocalWebConsoleServer {
                 detail: detail,
                 status: outcome.status,
                 privacy: snapshot.privacy
+            ))
+
+        case ConsoleRoute.discoveryCapabilities:
+            // Read-only and never waiting: the snapshot call answers from the last
+            // measurement and starts a background pass when it is stale.
+            return try json(await facade.discoverySnapshot(force: false))
+
+        case ConsoleRoute.discoveryScan:
+            // The 「立即探测」 button: this is the one path that waits for the measurement,
+            // because the owner clicked precisely because they wanted the answer now.
+            return try json(await facade.discoverySnapshot(force: true))
+
+        case ConsoleRoute.hubCredential:
+            // Console-only, like the two privacy routes above it. The value is handed
+            // straight to the store and is never echoed: the reply is the reference, and an
+            // error carries the reason rather than the body that caused it.
+            let body: WEBHubCredentialRequest = try decode(WEBHubCredentialRequest.self, from: request)
+            let bridge = body.bridge.trimmingCharacters(in: .whitespacesAndNewlines)
+            let server = body.serverId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !bridge.isEmpty, server.count <= 64, !body.secret.isEmpty else {
+                throw WEBConsoleError.badEngine("桥接类别与凭据均需填写 / bridge and credential must both be present")
+            }
+            let outcome = await facade.storeHubCredential(bridge: bridge, serverID: server, secret: body.secret)
+            return try json(WEBHubCredentialResponse(
+                ok: outcome.ok,
+                detail: outcome.fields["detail"]?.stringValue
+                    ?? outcome.fields["refusal"]?.stringValue
+                    ?? (outcome.ok ? "已存入 / stored" : "未存入 / not stored"),
+                reference: outcome.fields["reference"]?.stringValue,
+                status: outcome.status
             ))
 
         case ConsoleRoute.commandInject:
@@ -4597,7 +5270,10 @@ public actor LocalWebConsoleServer {
     static func allows(_ method: String, for path: String) -> Bool {
         let readable: Set<String> = [
             ConsoleRoute.index, ConsoleRoute.snapshot, ConsoleRoute.events,
-            ConsoleRoute.pairingQR, ConsoleRoute.health
+            ConsoleRoute.pairingQR, ConsoleRoute.health,
+            // The discovery card is the one capability read a navigation could legitimately
+            // want, and it costs a cached answer. `/scan` stays POST-only: it waits.
+            ConsoleRoute.discoveryCapabilities
         ]
         switch method {
         case "GET", "HEAD": return readable.contains(path)
@@ -4613,7 +5289,7 @@ public actor LocalWebConsoleServer {
     static func allowHeader(for path: String) -> String {
         let readable: Set<String> = [
             ConsoleRoute.index, ConsoleRoute.snapshot, ConsoleRoute.events,
-            ConsoleRoute.pairingQR, ConsoleRoute.health
+            ConsoleRoute.pairingQR, ConsoleRoute.health, ConsoleRoute.discoveryCapabilities
         ]
         if path.hasPrefix(ConsoleRoute.toolPrefix) { return "POST" }
         return readable.contains(path) ? "GET, HEAD" : "POST"
@@ -4678,6 +5354,7 @@ public actor LocalWebConsoleServer {
     func failure(_ error: WEBConsoleError, path: String, keepAlive: Bool) -> WEBHTTPResponse {
         let status = error.httpStatus
         let api = path.hasPrefix("/api/") || path.hasPrefix(ConsoleRoute.toolPrefix)
+            || path.hasPrefix(ConsoleRoute.discoveryPrefix)
         var pairs = Self.securityHeaders
         pairs.append(("Cache-Control", "no-store"))
         if case .unsupportedMethod = error {
@@ -4836,6 +5513,21 @@ public actor LocalWebConsoleServer {
         /// proposal (409) apart from a refused one (403) without parsing prose.
         let status: Int
         let privacy: PrivacyBridgeSnapshot
+    }
+    /// The credential POST body. `secret` is intentionally the only field with no
+    /// counterpart in any response or log line: this route's whole contract is that a
+    /// value goes in and a *reference* comes out.
+    struct WEBHubCredentialRequest: Codable {
+        let bridge: String
+        let serverId: String
+        let secret: String
+    }
+    struct WEBHubCredentialResponse: Encodable {
+        let ok: Bool
+        let detail: String
+        /// The Keychain reference, never the value. `nil` on a refusal.
+        let reference: String?
+        let status: Int
     }
 
     // MARK: - Dispatch outcome

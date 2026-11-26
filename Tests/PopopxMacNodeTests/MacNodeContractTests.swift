@@ -216,10 +216,13 @@ final class MacNodeContractTests: XCTestCase {
     func testConsoleRoutesAreUniqueAndWellFormed() {
         let routes = ConsoleRoute.all
         XCTAssertEqual(Set(routes).count, routes.count, "a duplicate route would shadow a handler")
-        // 13 console routes plus the two privacy-bridge routes the SPA posts to
-        // (`/api/privacy/authorize`, `/api/privacy/decision`). The tool surface under
-        // `/v1/tools/` is prefixed, not literal, so it stays out of `all`.
-        XCTAssertEqual(routes.count, 15)
+        // 13 console routes, the two privacy-bridge routes the SPA posts to
+        // (`/api/privacy/authorize`, `/api/privacy/decision`), the one credential route
+        // (`/api/hub/credential`, POST-only and console-only), and the two discovery
+        // routes (`/v1/discovery/capabilities` GET and `/v1/discovery/scan` POST). The tool
+        // surface under `/v1/tools/` and the discovery prefix are matched by prefix, not
+        // literal, so only their literal endpoints are counted here.
+        XCTAssertEqual(routes.count, 18)
         for route in routes {
             XCTAssertTrue(route.hasPrefix("/"), route)
             XCTAssertFalse(route.contains(".."), route)
@@ -306,12 +309,71 @@ final class MacNodeContractTests: XCTestCase {
         referenced.formUnion(jsIdentifierGroups(in: page, pattern: "data-i18n(?:-ph|-aria)?=\"([A-Za-z][A-Za-z0-9]*)\""))
         // The field builders take a label key and call `t()` with a variable, which the
         // scan above cannot see, so their first argument is collected separately.
+        // `fieldWrap` is on the list for the same reason: the hub panel's CalDAV fields
+        // reach their label through it, and a key missing there paints an empty label.
         referenced.formUnion(jsIdentifierGroups(in: page,
-            pattern: "\\b(?:checkField|numField|textField|urlField|secretField|statCard)\\(\"([A-Za-z][A-Za-z0-9]*)\""))
+            pattern: "\\b(?:checkField|numField|textField|urlField|secretField|fieldWrap|statCard)\\(\"([A-Za-z][A-Za-z0-9]*)\""))
         XCTAssertGreaterThan(referenced.count, 100, "the reference scan found \(referenced.count) keys; the call shape changed")
 
         let missing = referenced.subtracting(declared)
         XCTAssertTrue(missing.isEmpty, "i18n keys used but not defined: \(missing.sorted().joined(separator: ", "))")
+    }
+
+    /// The console is one inline `<script>` and nothing else loads, so a single
+    /// unterminated comment takes the whole interface down, silently, in the
+    /// browser — every Swift type still compiles and every substring assertion in
+    /// this file still passes. That is not a hypothetical: on 2026-11-26 a comment
+    /// body held the path glob `/v1/tools/*/status`, its `*/` closed the comment
+    /// early, and the prose after it parsed as code.
+    ///
+    /// So the script is handed to a real JavaScript parser. `node --check` reads the
+    /// file and reports the first syntax error without running any of it, which is
+    /// the only honest way to test this: a Swift-side approximation would need to
+    /// know regex literals, template interpolation and ES2023 syntax, and a lexer
+    /// that is wrong in any of those prints a confident green over a dead page.
+    /// Node is a build host's tool, not a product dependency, so a machine without
+    /// it reports the gap instead of passing quietly.
+    func testConsoleScriptParsesAsJavaScript() throws {
+        let page = WEBConsoleHTML.document
+        guard let open = page.range(of: "<script>"),
+              let close = page.range(of: "</script>", options: .backwards) else {
+            return XCTFail("the served document has no inline script to parse")
+        }
+        let script = String(page[open.upperBound..<close.lowerBound])
+        XCTAssertGreaterThan(script.utf8.count, 100_000, "the slice is not the console body")
+
+        // The GUI test host does not inherit a shell profile, so `PATH` alone is
+        // not enough: the usual Homebrew and system locations are appended.
+        let directories = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":").map(String.init)
+            + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+        let candidates = directories.map { URL(fileURLWithPath: $0).appendingPathComponent("node").path }
+        guard let found = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            throw XCTSkip("no `node` on this host: the console script was not parsed by a JavaScript parser")
+        }
+
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ppx-console-parse-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("console.js")
+        try script.write(to: file, atomically: true, encoding: .utf8)
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: found)
+        task.arguments = ["--check", file.path]
+        let pipe = Pipe()
+        task.standardError = pipe
+        task.standardOutput = pipe
+        try task.run()
+        task.waitUntilExit()
+        let raw = pipe.fileHandleForReading.readDataToEndOfFile()
+        let diagnosis = String(decoding: raw, as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .prefix(6)
+            .joined(separator: "\n")
+        XCTAssertEqual(task.terminationStatus, 0,
+                       "`\(found) --check` refused the console script:\n\(diagnosis)")
     }
 
     /// One fallback rule, shared by the page, the menu bar and the report copy:

@@ -2081,6 +2081,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     public var shadowWorkspaces: [String]
     public var llmModelOverride: String
     public var privacyBridges: PrivacyBridgeConfig?
+    public var hubBridges: HubConfig?
     public var revision: Int
     public var updatedAt: Date
 
@@ -2101,6 +2102,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         shadowWorkspaces: [String] = [],
         llmModelOverride: String = "",
         privacyBridges: PrivacyBridgeConfig? = nil,
+        hubBridges: HubConfig? = nil,
         revision: Int = 0,
         updatedAt: Date = Date()
     ) {
@@ -2120,6 +2122,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         self.shadowWorkspaces = shadowWorkspaces
         self.llmModelOverride = llmModelOverride
         self.privacyBridges = privacyBridges
+        self.hubBridges = hubBridges
         self.revision = revision
         self.updatedAt = updatedAt
     }
@@ -2153,6 +2156,15 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     public func withBridges(_ config: PrivacyBridgeConfig) -> NodeSettings {
         var copy = self
         copy.privacyBridges = config
+        return copy
+    }
+
+    /// The v1.1 edge-hub switches, read the same way: absent means everything off.
+    public var hubs: HubConfig { hubBridges ?? HubConfig.disabled }
+
+    public func withHubs(_ config: HubConfig) -> NodeSettings {
+        var copy = self
+        copy.hubBridges = config
         return copy
     }
 }
@@ -3020,6 +3032,11 @@ public enum AppPaths {
     /// Optional `{ "refs": { "<catalog id>": "<ollama reference>" } }` document:
     /// the tag actually imported when it is not the one the catalog ships with.
     public static var modelRefsFile: URL { config.appendingPathComponent("model_refs.json") }
+    /// The controlled MCP registration file — `{ allowedCommands, servers }`. It lives
+    /// apart from `settings.json` because registering an executable this node will spawn
+    /// is a step the owner takes in a text editor; the console reads it and, on an
+    /// explicit save, writes it back with owner-only permissions.
+    public static var mcpServersFile: URL { config.appendingPathComponent("mcp_servers.json") }
     public static var pairedDevicesFile: URL { pairing.appendingPathComponent("devices.json") }
     public static var nodeKeyFile: URL { pairing.appendingPathComponent("node.key") }
     public static var offerFile: URL { pairing.appendingPathComponent("offer.json") }
@@ -3679,6 +3696,14 @@ public protocol NodeConsoleFacade: Sendable {
     /// Applies a console approval or rejection to one proposal. Console-only: the
     /// receipt is minted here, inside the node, so it never travels to the page.
     func privacyDecision(domain: String, id: String, verb: String) async -> PrivacyToolResponse
+    /// The local capability card. `force` asks for a fresh measurement and waits for it;
+    /// without it the call must return whatever was last measured *immediately*, because the
+    /// console polls this and a poll that waits on a TCP timeout stalls the page.
+    func discoverySnapshot(force: Bool) async -> DiscoverySnapshot
+    /// Console-only: puts one bridge credential into the Keychain and answers with its
+    /// reference. The secret is an argument and never a return value, so no poll payload and no
+    /// settings document can carry one by accident.
+    func storeHubCredential(bridge: String, serverID: String, secret: String) async -> PrivacyToolResponse
 }
 
 public extension NodeConsoleFacade {
@@ -3695,6 +3720,23 @@ public extension NodeConsoleFacade {
 
     func privacyDecision(domain: String, id: String, verb: String) async -> PrivacyToolResponse {
         PrivacyToolResponse.failure(503, "本节点没有隐私桥接 / this facade has no privacy bridge")
+    }
+
+    /// A facade without a discovery probe says so in the card rather than returning an empty
+    /// list, which a console would render as "this Mac has nothing".
+    func discoverySnapshot(force: Bool) async -> DiscoverySnapshot {
+        DiscoverySnapshot(capabilities: [DiscoveryCapability(
+            kind: .refusal,
+            label: "本地能力发现 / Local capability discovery",
+            state: "off",
+            detail: "本节点未装配探测器 / this node has no capability probe"
+        )], scannedAt: PrivacyStamp.iso(Date()))
+    }
+
+    /// A facade without a credential store refuses rather than keeping the value in memory,
+    /// because "nothing accepted it" is the only honest answer a fake can give.
+    func storeHubCredential(bridge: String, serverID: String, secret: String) async -> PrivacyToolResponse {
+        PrivacyToolResponse.failure(503, "本节点没有钥匙串存储 / this facade has no credential store")
     }
 }
 
@@ -3740,6 +3782,11 @@ public enum ConsoleRoute {
     /// one specific id, and the ledger still validates exactly one road to the executor
     /// for both entry points.
     public static let privacyDecision = "/api/privacy/decision"
+    /// Console-only: stores one bridge credential in the macOS Keychain and answers with its
+    /// reference. Deliberately *not* under `/v1/tools/`, because writing a secret is the setup
+    /// act that precedes an authorization grant, and the rule for those is that no caller —
+    /// paired phone or loopback script — may ask for one. The reply never repeats the value.
+    public static let hubCredential = "/api/hub/credential"
 
     /// `/v1/tools/{domain}/proposals/{id}/{verb}` — the approval gate, addressed by
     /// proposal id.
@@ -3747,10 +3794,24 @@ public enum ConsoleRoute {
         "/v1/tools/\(domain)/proposals/\(id)/\(verb)"
     }
 
+    // MARK: Local capability discovery
+
+    /// The discovery surface keeps its own prefix for the same reason the tools do: the
+    /// path is what an assistants-side integration codes against.
+    ///
+    /// `/capabilities` is a **GET** and answers from the last measurement, so a console poll
+    /// can never be blocked by a TCP timeout. `/scan` is a POST because it waits for a real
+    /// pass — a read the caller pays for in milliseconds gets a method a stray navigation
+    /// cannot trigger.
+    public static let discoveryPrefix = "/v1/discovery/"
+    public static let discoveryCapabilities = "/v1/discovery/capabilities"
+    public static let discoveryScan = "/v1/discovery/scan"
+
     public static let all: [String] = [
         index, snapshot, events, installStart, installCancel,
         pairingRotate, pairingQR, pairingRevoke, settings,
-        engineToggle, engineInvoke, commandInject, health, privacyAuthorize, privacyDecision
+        engineToggle, engineInvoke, commandInject, health, privacyAuthorize, privacyDecision,
+        hubCredential, discoveryCapabilities, discoveryScan
     ]
 
     /// The tool endpoints, kept out of `all` because `all` is the SPA surface the

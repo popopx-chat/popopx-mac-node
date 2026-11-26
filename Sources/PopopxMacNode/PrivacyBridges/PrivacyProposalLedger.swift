@@ -34,9 +34,15 @@ public enum PrivacyStamp {
 
 // MARK: - Proposal model
 
+/// What a proposal wants to touch. The v1.1 hub domains reuse the calendar gate
+/// rather than inventing a second one: a mutation of a smart-home device or an MCP
+/// tool call is the same *kind* of act as writing a file, and it deserves the same
+/// 15-minute, receipt-signed, one-click approval that a calendar write already has.
 public enum PrivacyDomain: String, Codable, Sendable, CaseIterable {
     case calendar
     case workspace
+    case mcp
+    case smartHome
 }
 
 public enum PrivacyProposalAction: String, Codable, Sendable, CaseIterable {
@@ -45,6 +51,9 @@ public enum PrivacyProposalAction: String, Codable, Sendable, CaseIterable {
     case cancel
     case write
     case organize
+    /// Invoking a tool or actuating a device. Used by both hub domains, and the only
+    /// action whose payload is a `HubCallPayload` rather than a draft or a file.
+    case invoke
 }
 
 /// The human-in-the-loop states. There is no separate `approved` state on purpose:
@@ -82,6 +91,10 @@ public struct PrivacyProposal: Sendable, Equatable {
     public var sequence: Int
     public var draft: CalendarEventDraft?
     public var file: WorkspaceFilePayload?
+    /// What a hub proposal will actually do, held as a value rather than as prose.
+    /// The gate has to survive the round trip through 「批准」, so the thing that gets
+    /// executed is the thing that was shown — not a string the executor re-parses.
+    public var hubCall: HubCallPayload?
     public var lastMessage: String
 
     public init(
@@ -101,6 +114,7 @@ public struct PrivacyProposal: Sendable, Equatable {
         sequence: Int = 0,
         draft: CalendarEventDraft? = nil,
         file: WorkspaceFilePayload? = nil,
+        hubCall: HubCallPayload? = nil,
         lastMessage: String = ""
     ) {
         self.id = id
@@ -119,6 +133,7 @@ public struct PrivacyProposal: Sendable, Equatable {
         self.sequence = sequence
         self.draft = draft
         self.file = file
+        self.hubCall = hubCall
         self.lastMessage = lastMessage
     }
 
@@ -585,7 +600,7 @@ public actor PrivacyProposalLedger {
             booking.status = .cancelled
             booking.updatedAt = now
             bookings[booking.ref] = booking
-        case .write, .organize:
+        case .write, .organize, .invoke:
             break
         }
     }

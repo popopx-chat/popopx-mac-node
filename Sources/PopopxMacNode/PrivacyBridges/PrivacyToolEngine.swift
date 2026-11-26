@@ -13,11 +13,36 @@ import Foundation
 public enum PrivacyToolNamespace: String, Codable, Sendable, CaseIterable {
     case calendar
     case workspace
+    /// The MCP bridge. Named `mcp` on the wire because that is what the owner reads in the
+    /// console, and because a namespace is also the audit `domain` string.
+    case mcp
+    /// Home Assistant and the MQTT broker, which share one switch and one entity whitelist.
+    case home
+    /// CalDAV. Read-only, so it borrows the calendar audit domain: a remote free/busy lookup
+    /// and a local one are the same kind of fact, and the ledger should not pretend otherwise.
+    case calDav = "caldav"
 
     public var domain: PrivacyDomain {
         switch self {
         case .calendar: return .calendar
         case .workspace: return .workspace
+        case .mcp: return .mcp
+        case .home: return .smartHome
+        case .calDav: return .calendar
+        }
+    }
+}
+
+extension PrivacyDomain {
+    /// The namespace a command line carries for this domain. Not a `rawValue` round-trip:
+    /// `smartHome` is the audit and console key, `home` is what the owner types, and a phone
+    /// that was handed `…::smartHome::approve::…` would find no namespace and no approval.
+    public var toolNamespace: PrivacyToolNamespace {
+        switch self {
+        case .calendar: return .calendar
+        case .workspace: return .workspace
+        case .mcp: return .mcp
+        case .smartHome: return .home
         }
     }
 }
@@ -30,12 +55,25 @@ public enum PrivacyToolAction {
     public static let inspect = "inspect"
     public static let summarize = "summarize"
     public static let bookings = "bookings"
+    // Hub bridge actions. Every one of them is in `PrivacyToolAction.all`, so a paired phone
+    // can address exactly what the loopback console can — including the three write-shaped ones
+    // (`invoke`, `control`, `publish`), each of which can only ever produce a proposal.
+    public static let status = "status"
+    public static let servers = "servers"
+    public static let tools = "tools"
+    public static let invoke = "invoke"
+    public static let entities = "entities"
+    public static let control = "control"
+    public static let publish = "publish"
 
     /// Actions addressed by a proposal id.
     public static let idBearing = [approve, reject, inspect]
     /// Every action either entry point may use, so a phone cannot reach an endpoint
     /// the HTTP layer does not already have.
-    public static let all = [availability, proposals, approve, reject, inspect, summarize, bookings]
+    public static let all = [
+        availability, proposals, approve, reject, inspect, summarize, bookings,
+        status, servers, tools, invoke, entities, control, publish
+    ]
 }
 
 public struct PrivacyToolCall: Sendable, Equatable {
@@ -109,6 +147,21 @@ public enum PrivacyToolRoute {
             && candidate.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
     }
 
+    /// Either name a caller can legitimately hold. `home` is the namespace an owner types into
+    /// a path; `smartHome` is the audit domain the ledger stores, so it is what a proposal card
+    /// carries back when the console posts a click.
+    ///
+    /// This is a name reconciliation, not a widening: both spellings resolve to the same
+    /// `PrivacyDomain`, so an alias reaches no capability the canonical name could not, and a
+    /// write is still gated by the `id + verb` receipt rather than by this string.
+    public static func namespace(accepting text: String) -> PrivacyToolNamespace? {
+        let wanted = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let direct = PrivacyToolNamespace(rawValue: wanted) { return direct }
+        guard let domain = PrivacyDomain(rawValue: wanted) else { return nil }
+        let resolved = domain.toolNamespace
+        return resolved.rawValue == wanted ? nil : resolved
+    }
+
     /// `nil` when the path is not a tool path or names an action that does not exist.
     public static func parse(path: String, source: String = "bot-studio") -> PrivacyToolCall? {
         let trimmed = path.hasSuffix("/") ? String(path.dropLast()) : path
@@ -116,7 +169,7 @@ public enum PrivacyToolRoute {
         let pieces = trimmed.dropFirst(ConsoleRoute.toolPrefix.count)
             .split(separator: "/", omittingEmptySubsequences: true)
             .map(String.init)
-        guard pieces.count >= 2, let namespace = PrivacyToolNamespace(rawValue: pieces[0]) else { return nil }
+        guard pieces.count >= 2, let namespace = namespace(accepting: pieces[0]) else { return nil }
         if pieces.count == 4, pieces[1] == PrivacyToolAction.proposals {
             let candidate = pieces[2]
             let verb = pieces[3]
@@ -129,6 +182,10 @@ public enum PrivacyToolRoute {
 
     /// The command-channel form. An unparsable payload is not a refusal: the action
     /// may legitimately need no arguments.
+    ///
+    /// `parse` accepts either name and this does not, on purpose: the path side is the
+    /// owner's own loopback, while `serviceId` arrives from a peer, so the peer gets the one
+    /// spelling this node minted in `commandLine(namespace:)` and nothing else.
     public static func parseCommand(serviceId: String, action: String, payload: String) -> PrivacyToolCall? {
         guard let namespace = PrivacyToolNamespace(rawValue: serviceId) else { return nil }
         guard PrivacyToolAction.all.contains(action) else { return nil }
@@ -240,6 +297,11 @@ public struct PrivacyCard: Sendable, Equatable {
 public actor PrivacyExecutorHub: ProposalExecutor {
     private var gateway: any CalendarGateway
     private var sandbox: WorkspaceSandbox
+    /// Attached after construction, not built here: a bridge needs the ledger, the ledger
+    /// needs an executor, and this type *is* the executor. `nil` means the hub domains are
+    /// unattachable, which is a refusal rather than a silent no-op.
+    private var mcp: MCPBridge?
+    private var smartHome: SmartHomeBridge?
 
     public init(gateway: any CalendarGateway, sandbox: WorkspaceSandbox) {
         self.gateway = gateway
@@ -251,6 +313,11 @@ public actor PrivacyExecutorHub: ProposalExecutor {
         self.sandbox = sandbox
     }
 
+    public func attachHub(mcp: MCPBridge?, smartHome: SmartHomeBridge?) {
+        self.mcp = mcp
+        self.smartHome = smartHome
+    }
+
     public func execute(_ proposal: PrivacyProposal) async -> PrivacyExecution {
         switch proposal.domain {
         case .calendar:
@@ -260,6 +327,19 @@ public actor PrivacyExecutorHub: ProposalExecutor {
                 return .failed("提案缺少文件内容 / the proposal carries no file payload")
             }
             return sandbox.apply(payload)
+        case .mcp:
+            guard let mcp else {
+                return .failed("MCP 桥接未装配 / the MCP bridge is not attached to this node")
+            }
+            // Every admission decision — switch, allow-list, tool whitelist, high-risk
+            // entity — is re-checked inside the bridge, because the proposal may have been
+            // created before the owner changed the config.
+            return await mcp.executeApproved(proposal)
+        case .smartHome:
+            guard let smartHome else {
+                return .failed("家居桥接未装配 / the smart-home bridge is not attached to this node")
+            }
+            return await smartHome.executeApproved(proposal)
         }
     }
 
@@ -317,6 +397,13 @@ public actor PrivacyToolEngine {
     private var sandbox: WorkspaceSandbox
     private let hub: PrivacyExecutorHub
     private let ledger: PrivacyProposalLedger
+    /// The hub switches, mirrored from `NodeSettings` so one authorization table governs both
+    /// the privacy bridges and the protocol bridges. The bridges hold their own copy for their
+    /// own admission checks; this one is what the dispatch reads first.
+    private var hubConfig: HubConfig = .disabled
+    private var mcpBridge: MCPBridge?
+    private var homeBridge: SmartHomeBridge?
+    private var calDavBridge: CalDavBridge?
 
     public init(
         config: PrivacyBridgeConfig,
@@ -324,7 +411,10 @@ public actor PrivacyToolEngine {
         ledger: PrivacyProposalLedger,
         hub: PrivacyExecutorHub,
         sandbox: WorkspaceSandbox,
-        nodeReference: String
+        nodeReference: String,
+        mcp: MCPBridge? = nil,
+        smartHome: SmartHomeBridge? = nil,
+        calDav: CalDavBridge? = nil
     ) {
         self.config = config.normalised
         self.gateway = gateway
@@ -332,6 +422,15 @@ public actor PrivacyToolEngine {
         self.hub = hub
         self.sandbox = sandbox
         self.nodeReference = nodeReference
+        self.mcpBridge = mcp
+        self.homeBridge = smartHome
+        self.calDavBridge = calDav
+    }
+
+    /// Hands the bridges to the executor, which is the only road from an approved proposal to
+    /// a device. Called once at startup, after the ledger has been given this executor.
+    public func attachHubBridges() async {
+        await hub.attachHub(mcp: mcpBridge, smartHome: homeBridge)
     }
 
     /// Settings changed: re-derive the sandbox, hand it to the hub, and void any
@@ -354,6 +453,27 @@ public actor PrivacyToolEngine {
     public func currentConfig() -> PrivacyBridgeConfig { config }
     public func currentSandbox() -> WorkspaceSandbox { sandbox }
 
+    /// The hub switches changed: forward to both bridges, which re-derive their own endpoints,
+    /// then void any proposal whose bridge was just switched off. An approval the node may no
+    /// longer honor must not stay clickable on the phone.
+    public func applyHubConfig(_ next: HubConfig) async {
+        let previous = hubConfig
+        hubConfig = next.normalised
+        await mcpBridge?.update(config: hubConfig)
+        await homeBridge?.update(config: hubConfig)
+        await calDavBridge?.update(config: hubConfig)
+        if previous.allowMcpBridge, !hubConfig.allowMcpBridge {
+            await ledger.cancelPendingProposals(domain: .mcp, reason: "MCP 桥接已关闭 / the MCP bridge was switched off")
+        }
+        if previous.allowSmartHomeBridge, !hubConfig.allowSmartHomeBridge {
+            await ledger.cancelPendingProposals(domain: .smartHome, reason: "家居桥接已关闭 / the smart-home bridge was switched off")
+        }
+        // No CalDAV branch: that bridge is free/busy only, so it never creates a proposal —
+        // cancelling the calendar domain here would void real bookings.
+    }
+
+    public func currentHubConfig() -> HubConfig { hubConfig }
+
     // MARK: Dispatch
 
     public func handle(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
@@ -371,6 +491,29 @@ public actor PrivacyToolEngine {
             return await summarize(call)
         case (.workspace, PrivacyToolAction.proposals):
             return await proposeWorkspace(call)
+        // The hub bridges. Read-shaped actions answer from the bridge's own cards; every
+        // write-shaped one can only produce a proposal, and the refusal text says which switch
+        // is missing rather than pretending the call was malformed.
+        case (.mcp, PrivacyToolAction.status):
+            return await mcpStatus(call)
+        case (.mcp, PrivacyToolAction.servers):
+            return await mcpServers()
+        case (.mcp, PrivacyToolAction.tools):
+            return await mcpTools(call)
+        case (.mcp, PrivacyToolAction.invoke):
+            return await mcpInvoke(call)
+        case (.home, PrivacyToolAction.status):
+            return await homeStatus(call)
+        case (.home, PrivacyToolAction.entities):
+            return await homeEntities(call)
+        case (.home, PrivacyToolAction.control):
+            return await homeControl(call)
+        case (.home, PrivacyToolAction.publish):
+            return await homePublish(call)
+        case (.calDav, PrivacyToolAction.status):
+            return await calDavStatus(call)
+        case (.mcp, PrivacyToolAction.proposals), (.home, PrivacyToolAction.proposals):
+            return await hubProposals(call)
         case (_, PrivacyToolAction.approve):
             return await decide(call, verb: "approve")
         case (_, PrivacyToolAction.reject):
@@ -426,6 +569,22 @@ public actor PrivacyToolEngine {
                 ]
             )
         }
+        // Remote calendars, asked *after* the local answer so a CalDAV host that is down cannot
+        // stall an EventKit result the node already has. The merge happens on the free side:
+        // the gateway's own busy intervals never leave the calendar layer, and this bridge must
+        // not become the reason they do.
+        let remote: ICalendarFreeBusy
+        if hubConfig.allowCalDavBridge, let calDavBridge {
+            remote = await calDavBridge.read(
+                window: DateInterval(start: probe.start, end: probe.end),
+                zone: TimeZone(identifier: probe.timeZoneIdentifier) ?? .autoupdatingCurrent
+            ).freeBusy
+        } else {
+            remote = .empty
+        }
+        let slots = remote.busy.isEmpty
+            ? outcome.freeSlots
+            : CalDavBridge.subtract(busy: remote.busy, from: outcome.freeSlots)
         // The controlled-reference index: only bookings POPOPX minted, and only their
         // status. The owner's other events are represented by aggregate counts alone.
         let index: [JSONValue] = await ledger.activeBookings().map { booking in
@@ -445,23 +604,35 @@ public actor PrivacyToolEngine {
                 "end": .string(PrivacyStamp.iso(probe.end))
             ]),
             // The response contract, exactly: freeSlots: [{ start, end }].
-            "freeSlots": .array(outcome.freeSlots.map { slot in
+            "freeSlots": .array(slots.map { slot in
                 .object([
                     "start": .string(PrivacyStamp.iso(slot.start)),
                     "end": .string(PrivacyStamp.iso(slot.end))
                 ])
             }),
-            "slotCount": .int(outcome.freeSlots.count),
+            "slotCount": .int(slots.count),
             "busyCount": .int(outcome.busyCount),
             "busyMinutes": .int(outcome.busyMinutes),
             "popopxBookings": .array(index)
         ]
+        if !remote.busy.isEmpty {
+            // Reported separately rather than folded into `busyCount`, which is an EventKit
+            // event count: the two sources are not the same unit, and adding them would be a
+            // number that means nothing.
+            fields["remoteBusyCount"] = .int(remote.busy.count)
+            fields["remoteBusyMinutes"] = .int(CalDavBridge.busyMinutes(remote.busy))
+            fields["remoteApproximated"] = .bool(remote.approximated)
+            fields["sources"] = .array([.string("eventkit"), .string("caldav")])
+        } else {
+            fields["sources"] = .array([.string("eventkit")])
+        }
         fields.merge(PrivacyToolResponse.redactionFields()) { current, _ in current }
         await ledger.record(PrivacyAuditEntry(
             domain: PrivacyDomain.calendar.rawValue,
             action: PrivacyToolAction.availability,
             outcome: "answered",
-            detail: "\(outcome.freeSlots.count) slots / \(outcome.busyCount) busy"
+            detail: "\(slots.count) slots / \(outcome.busyCount) busy"
+                + (remote.busy.isEmpty ? "" : " / \(remote.busy.count) remote busy")
         ))
         return PrivacyToolResponse(ok: true, fields: fields)
     }
@@ -664,7 +835,7 @@ public actor PrivacyToolEngine {
     ) async -> PrivacyToolResponse {
         let approveReceipt = await ledger.receipt(id: proposal.id, verb: "approve")
         let rejectReceipt = await ledger.receipt(id: proposal.id, verb: "reject")
-        let namespace = PrivacyToolNamespace(rawValue: proposal.domain.rawValue) ?? .calendar
+        let namespace = proposal.domain.toolNamespace
         let window = proposal.draft.map { draft in
             "\(PrivacyStamp.display(draft.start, timeZone: timeZone)) → \(PrivacyStamp.display(draft.end, timeZone: timeZone))"
         } ?? ""
@@ -704,9 +875,13 @@ public actor PrivacyToolEngine {
             "rejectReceipt": .string(rejectReceipt),
             "approvePath": .string(ConsoleRoute.proposalDecision(proposal.domain.rawValue, id: proposal.id, verb: "approve")),
             "rejectPath": .string(ConsoleRoute.proposalDecision(proposal.domain.rawValue, id: proposal.id, verb: "reject")),
-            "ics": .string(ics(for: proposal, method: method)),
             "card": .string(card.text)
         ]
+        // Only a calendar proposal has an iCalendar object to carry. Emitting one for an MCP or
+        // device call would describe a booking that does not exist.
+        if proposal.domain == .calendar {
+            fields["ics"] = .string(ics(for: proposal, method: method))
+        }
         if let draft = proposal.draft {
             fields["event"] = .object([
                 "start": .string(PrivacyStamp.iso(draft.start)),
@@ -723,6 +898,392 @@ public actor PrivacyToolEngine {
             fields["preview"] = .string(String(file.content.prefix(600)))
         }
         return PrivacyToolResponse(ok: true, status: status, fields: fields)
+    }
+
+    // MARK: Hub bridges
+    //
+    // These handlers are thin on purpose: every admission decision lives in the bridge, so the
+    // console and a paired phone cannot disagree about whether a call was allowed. What this
+    // layer adds is the switch check in front, the card shape on the way out, and the rule
+    // that a write-shaped action ends in a proposal and nothing else.
+
+    private func requireMCP() -> PrivacyToolResponse? {
+        guard hubConfig.allowMcpBridge else {
+            return .failure(
+                403,
+                "MCP 桥接未开启：请在控制台「协议桥接」中显式授权 / the MCP bridge is off; enable it in the Protocol Bridges panel",
+                extra: ["switch": .string("allowMcpBridge")]
+            )
+        }
+        guard mcpBridge != nil else {
+            return .failure(503, "本节点未装配 MCP 桥接 / this node has no MCP bridge attached")
+        }
+        return nil
+    }
+
+    private func requireHome() -> PrivacyToolResponse? {
+        guard hubConfig.allowSmartHomeBridge else {
+            return .failure(
+                403,
+                "家居桥接未开启：请在控制台「协议桥接」中显式授权 / the smart-home bridge is off; enable it in the Protocol Bridges panel",
+                extra: ["switch": .string("allowSmartHomeBridge")]
+            )
+        }
+        guard homeBridge != nil else {
+            return .failure(503, "本节点未装配家居桥接 / this node has no smart-home bridge attached")
+        }
+        return nil
+    }
+
+    private func mcpStatus(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
+        if let refusal = requireMCP() { return refusal }
+        let cards = await mcpBridge?.serverCards() ?? []
+        var fields: [String: JSONValue] = [
+            "ok": .bool(true),
+            "allowMcpBridge": .bool(true),
+            "servers": .array(cards.map { Self.json($0) }),
+            "serverCount": .int(cards.count),
+            "connectedCount": .int(cards.filter { $0.connected }.count),
+            "toolCount": .int(cards.reduce(0) { $0 + $1.toolCount }),
+            "mutatingToolCount": .int(cards.reduce(0) { $0 + $1.mutatingCount }),
+            "gate": .string("只读工具直接执行，变更类工具进入待确认提案队列 / read-only tools run, mutating tools wait for the owner"),
+            "source": .string("config/mcp_servers.json")
+        ]
+        if let bridge = mcpBridge { fields.merge(await bridge.registrySummary()) { current, _ in current } }
+        return Self.hubResponse(fields)
+    }
+
+    private func mcpServers() async -> PrivacyToolResponse {
+        if let refusal = requireMCP() { return refusal }
+        let cards = await mcpBridge?.serverCards() ?? []
+        return Self.hubResponse([
+            "ok": .bool(true),
+            "servers": .array(cards.map { Self.json($0) }),
+            "count": .int(cards.count)
+        ])
+    }
+
+    private func mcpTools(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
+        if let refusal = requireMCP() { return refusal }
+        guard let serverID = value(call, "serverId", "server") else {
+            return .failure(400, "缺少 serverId / missing serverId")
+        }
+        let cards = await mcpBridge?.toolCards(serverID: serverID) ?? []
+        return Self.hubResponse([
+            "ok": .bool(true),
+            "serverId": .string(serverID),
+            "tools": .array(cards.map { Self.json($0) }),
+            "count": .int(cards.count),
+            "approvalRequired": .int(cards.filter { $0.requiresApproval }.count),
+            "refusal": .string(cards.isEmpty ? "该服务器没有可用工具 / this server advertised no usable tools" : "")
+        ])
+    }
+
+    private func mcpInvoke(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
+        if let refusal = requireMCP() { return refusal }
+        guard let bridge = mcpBridge else { return .failure(503, "本节点未装配 MCP 桥接 / no MCP bridge") }
+        guard let serverID = value(call, "serverId", "server") else {
+            return .failure(400, "缺少 serverId / missing serverId")
+        }
+        guard let tool = value(call, "tool", "toolName", "name") else {
+            return .failure(400, "缺少 tool / missing tool name")
+        }
+        let arguments = call.payload["arguments"]?.objectValue ?? [:]
+        switch await bridge.invoke(serverID: serverID, toolName: tool, arguments: arguments, source: call.source) {
+        case .executed(let text, let truncated):
+            return Self.hubResponse([
+                "ok": .bool(true),
+                "executed": .bool(true),
+                "requiresUserConfirmation": .bool(false),
+                "serverId": .string(serverID),
+                "tool": .string(tool),
+                "result": .string(text),
+                "truncated": .bool(truncated)
+            ])
+        case .proposed(let proposal):
+            return await hubProposalResponse(proposal, status: 201)
+        case .refused(let reason):
+            await ledger.record(PrivacyAuditEntry(
+                domain: PrivacyDomain.mcp.rawValue,
+                action: PrivacyToolAction.invoke,
+                outcome: "refused",
+                detail: "\(serverID)/\(tool): \(reason)"
+            ))
+            return .failure(403, reason)
+        }
+    }
+
+    private func homeStatus(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
+        if let refusal = requireHome() { return refusal }
+        let status = await homeBridge?.status() ?? SmartHomeStatusCard(enabled: false)
+        let telemetry = await homeBridge?.telemetryCards() ?? []
+        let entities = await homeBridge?.entityCards() ?? []
+        let fields: [String: JSONValue] = [
+            "ok": .bool(true),
+            "allowSmartHomeBridge": .bool(true),
+            "status": Self.json(status),
+            "entities": .array(entities.map { Self.json($0) }),
+            "entityCount": .int(entities.count),
+            "telemetry": .array(telemetry.map { Self.json($0) }),
+            "telemetryCount": .int(telemetry.count),
+            "credentialNote": .string("凭据存于 macOS 钥匙串，配置文件与日志中均无明文 / credentials live in the macOS Keychain; never in a file or a log"),
+            "gate": .string("只读模式仅取状态；任何控制动作进入待确认提案队列 / read-only mode reports state; every control action waits for the owner")
+        ]
+        return Self.hubResponse(fields)
+    }
+
+    private func homeEntities(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
+        if let refusal = requireHome() { return refusal }
+        let cards = await homeBridge?.entityCards() ?? []
+        let telemetry = await homeBridge?.telemetryCards() ?? []
+        return Self.hubResponse([
+            "ok": .bool(true),
+            "entities": .array(cards.map { Self.json($0) }),
+            "count": .int(cards.count),
+            "exposedOnly": .bool(true),
+            "highRiskCount": .int(cards.filter { $0.highRisk }.count),
+            "telemetry": .array(telemetry.map { Self.json($0) })
+        ])
+    }
+
+    private func homeControl(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
+        if let refusal = requireHome() { return refusal }
+        guard let bridge = homeBridge else { return .failure(503, "本节点未装配家居桥接 / no smart-home bridge") }
+        guard let entity = value(call, "entity", "entityId") else {
+            return .failure(400, "缺少 entity / missing entity id")
+        }
+        guard let service = value(call, "service", "action") else {
+            return .failure(400, "缺少 service / missing service name")
+        }
+        let data = call.payload["data"]?.objectValue ?? call.payload["serviceData"]?.objectValue ?? [:]
+        switch await bridge.call(entity: entity, service: service, data: data, source: call.source) {
+        case .executed(let text, let truncated):
+            // Reachable only when the bridge's own read-only path allows it; the proposal is
+            // still the normal answer for anything that moves a device.
+            return Self.hubResponse([
+                "ok": .bool(true),
+                "executed": .bool(true),
+                "entity": .string(entity),
+                "service": .string(service),
+                "result": .string(text),
+                "truncated": .bool(truncated)
+            ])
+        case .proposed(let proposal):
+            return await hubProposalResponse(proposal, status: 201)
+        case .refused(let reason):
+            return .failure(403, reason)
+        }
+    }
+
+    private func homePublish(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
+        if let refusal = requireHome() { return refusal }
+        guard let bridge = homeBridge else { return .failure(503, "本节点未装配家居桥接 / no smart-home bridge") }
+        guard let entity = value(call, "entity", "entityId") else {
+            return .failure(400, "缺少 entity / missing entity id")
+        }
+        let data = call.payload["payload"]?.objectValue ?? call.payload["data"]?.objectValue ?? [:]
+        guard !data.isEmpty else { return .failure(400, "缺少下发内容 / missing payload") }
+        switch await bridge.publish(entity: entity, payload: data, source: call.source) {
+        case .executed(let text, let truncated):
+            return Self.hubResponse([
+                "ok": .bool(true), "executed": .bool(true), "entity": .string(entity),
+                "result": .string(text), "truncated": .bool(truncated)
+            ])
+        case .proposed(let proposal):
+            return await hubProposalResponse(proposal, status: 201)
+        case .refused(let reason):
+            return .failure(403, reason)
+        }
+    }
+
+    private func requireCalDav() -> PrivacyToolResponse? {
+        guard hubConfig.allowCalDavBridge else {
+            return .failure(
+                403,
+                "CalDAV 桥接未开启：请在控制台「协议桥接」中显式授权 / the CalDAV bridge is off; enable it in the Protocol Bridges panel",
+                extra: ["switch": .string("allowCalDavBridge")]
+            )
+        }
+        guard calDavBridge != nil else {
+            return .failure(503, "本节点未装配 CalDAV 桥接 / this node has no CalDAV bridge attached")
+        }
+        return nil
+    }
+
+    /// Probes the configured servers once and answers with what the *windows* said. There is no
+    /// event list in this response by construction — `ICalendarFreeBusy` has no field that
+    /// could carry a title, so the redaction claim here is a type fact, not a promise.
+    private func calDavStatus(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
+        if let refusal = requireCalDav() { return refusal }
+        let days = max(1, min(hubConfig.calDav.normalised.lookaheadDays, CalDav.maximumWindowDays))
+        let now = Date()
+        let window = DateInterval(start: now, end: now.addingTimeInterval(TimeInterval(days * 86_400)))
+        let zone = TimeZone(identifier: zone(from: call)) ?? .autoupdatingCurrent
+        let reading = await calDavBridge?.read(window: window, zone: zone) ?? CalDavReading()
+        let fields: [String: JSONValue] = [
+            "ok": .bool(true),
+            "allowCalDavBridge": .bool(true),
+            "servers": .array(reading.cards.map { Self.json($0) }),
+            "serverCount": .int(reading.cards.count),
+            "serversReached": .int(reading.serversAsked),
+            "lookaheadDays": .int(days),
+            "busyCount": .int(reading.freeBusy.busy.count),
+            "busyMinutes": .int(CalDavBridge.busyMinutes(reading.freeBusy.busy)),
+            "eventCount": .int(reading.freeBusy.eventCount),
+            "discardedCount": .int(reading.freeBusy.discardedCount),
+            "approximated": .bool(reading.freeBusy.approximated),
+            "unknownTimeZone": .bool(reading.freeBusy.unknownTimeZone),
+            "windows": .array(reading.freeBusy.busy.map {
+                .object(["start": .string(PrivacyStamp.iso($0.start)), "end": .string(PrivacyStamp.iso($0.end))])
+            }),
+            "redaction": .string("仅保留起止时间：SUMMARY、DESCRIPTION、LOCATION、ATTENDEE 在解析当场丢弃 / only the windows survive parsing; titles, notes, places and attendees are dropped inside the parser")
+        ]
+        return Self.hubResponse(fields)
+    }
+
+    /// Stores one bridge credential. Console-only by construction: there is no
+    /// `PrivacyToolAction` for it, so neither a `/v1/tools/` path nor a phone command can name
+    /// this, and the response carries the Keychain *reference* rather than the value.
+    ///
+    /// The switches are deliberately not checked here. Storing a token is the setup act that
+    /// comes before a switch can be honored at all — `HubConfig.normalised` turns
+    /// `allowSmartHomeBridge` off while the credential reference is missing.
+    public func storeHubCredential(bridge: String, serverID: String, secret: String) async -> PrivacyToolResponse {
+        let kind = bridge.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !secret.isEmpty, secret.utf8.count <= HubSecrets.maximumSecretLength else {
+            return .failure(400, "凭据为空或过长 / the credential is empty or too long")
+        }
+        let outcome: HubSecretOutcome
+        switch kind {
+        case "hometoken":
+            guard let homeBridge else { return .failure(503, "请先保存家居桥接设置 / save the smart-home settings first") }
+            outcome = await homeBridge.storeHomeAssistantToken(secret)
+        case "mqttpassword":
+            guard let homeBridge else { return .failure(503, "请先保存家居桥接设置 / save the smart-home settings first") }
+            outcome = await homeBridge.storeBrokerPassword(secret)
+        case "caldav":
+            guard let calDavBridge else { return .failure(503, "请先保存 CalDAV 服务器 / save the CalDAV server first") }
+            outcome = await calDavBridge.storePassword(secret, for: serverID)
+        default:
+            return .failure(400, "未知的凭据类别 / unknown credential kind")
+        }
+        guard let reference = outcome.reference else {
+            var reason = "钥匙串写入失败 / the credential store refused"
+            if case .refused(let text) = outcome { reason = text }
+            return .failure(500, reason)
+        }
+        return .init(ok: true, status: 200, fields: [
+            "ok": .bool(true),
+            "reference": .string(reference),
+            "stored": .bool(true),
+            "bridge": .string(kind),
+            "detail": .string("已加密存入 macOS 钥匙串；设置文件与本响应均不含明文 / stored encrypted in the macOS Keychain; neither the settings document nor this reply contains the value")
+        ])
+    }
+
+    /// Pending proposals for one hub domain. Deliberately not the whole ledger: a phone
+    /// asking about `home` must not be handed the owner's calendar bookings.
+    private func hubProposals(_ call: PrivacyToolCall) async -> PrivacyToolResponse {
+        let domain = call.namespace.domain
+        let rows = await ledger.pending().filter { $0.domain == domain }
+        return Self.hubResponse([
+            "ok": .bool(true),
+            "domain": .string(domain.rawValue),
+            "proposals": .array(rows.map { .object(Self.proposalJSON($0)) }),
+            "count": .int(rows.count)
+        ])
+    }
+
+    /// The answer to "I asked the bridge to change something": a proposal, receipts, and the
+    /// two command lines — the same contract a calendar booking gives the phone, minus the
+    /// iCalendar payload, because there is no event to describe.
+    private func hubProposalResponse(_ proposal: PrivacyProposal, status: Int) async -> PrivacyToolResponse {
+        let approveReceipt = await ledger.receipt(id: proposal.id, verb: "approve")
+        let rejectReceipt = await ledger.receipt(id: proposal.id, verb: "reject")
+        let namespace = proposal.domain.toolNamespace
+        let card = PrivacyCard(
+            kind: proposal.domain.rawValue,
+            action: proposal.action.rawValue,
+            proposalId: proposal.id,
+            title: proposal.title,
+            window: proposal.hubCall?.destination ?? "",
+            expires: PrivacyStamp.iso(proposal.expiresAt),
+            receipt: approveReceipt,
+            state: proposal.state.rawValue,
+            approveCommand: PrivacyToolRoute.commandLine(
+                namespace: namespace, action: PrivacyToolAction.approve, id: proposal.id, receipt: approveReceipt
+            ),
+            rejectCommand: PrivacyToolRoute.commandLine(
+                namespace: namespace, action: PrivacyToolAction.reject, id: proposal.id, receipt: rejectReceipt
+            )
+        )
+        var fields = Self.proposalJSON(proposal)
+        fields["ok"] = .bool(true)
+        fields["requiresUserConfirmation"] = .bool(true)
+        fields["executed"] = .bool(false)
+        fields["approvalReceipt"] = .string(approveReceipt)
+        fields["rejectReceipt"] = .string(rejectReceipt)
+        fields["approvePath"] = .string(ConsoleRoute.proposalDecision(proposal.domain.rawValue, id: proposal.id, verb: "approve"))
+        fields["rejectPath"] = .string(ConsoleRoute.proposalDecision(proposal.domain.rawValue, id: proposal.id, verb: "reject"))
+        fields["card"] = .string(card.text)
+        return PrivacyToolResponse(ok: true, status: status, fields: Self.boundary(fields))
+    }
+
+    /// One proposal as fields, for both the list and the answer. `hubCall` is included because
+    /// its `preview` is already the redacted, bounded description of the write.
+    static func proposalJSON(_ proposal: PrivacyProposal) -> [String: JSONValue] {
+        var fields: [String: JSONValue] = [
+            "proposalId": .string(proposal.id),
+            "domain": .string(proposal.domain.rawValue),
+            "action": .string(proposal.action.rawValue),
+            "state": .string(proposal.state.rawValue),
+            "title": .string(proposal.title),
+            "detail": .string(proposal.detail),
+            "createdAt": .string(PrivacyStamp.iso(proposal.createdAt)),
+            "expiresAt": .string(PrivacyStamp.iso(proposal.expiresAt)),
+            "secondsLeft": .int(proposal.secondsLeft()),
+            "source": .string(proposal.source)
+        ]
+        if let payload = proposal.hubCall {
+            fields["preview"] = .string(payload.preview)
+            fields["target"] = .string(payload.destination)
+            fields["argumentCount"] = .int(payload.arguments.count)
+        }
+        if !proposal.lastMessage.isEmpty { fields["message"] = .string(proposal.lastMessage) }
+        return fields
+    }
+
+    /// First payload key that holds usable text. A phone and the console do not have to agree
+    /// on one spelling of an argument for the call to be understood.
+    private func value(_ call: PrivacyToolCall, _ keys: String...) -> String? {
+        for key in keys {
+            if let text = Self.text(call.payload[key]?.stringValue ?? "") { return text }
+        }
+        return nil
+    }
+
+    /// Adds the two promises every hub answer owes the owner, in one place.
+    static func boundary(_ fields: [String: JSONValue]) -> [String: JSONValue] {
+        var merged = fields
+        merged.merge([
+            "boundary": .string("仅回环与内网 / loopback, RFC 1918 and .local addresses only"),
+            "egress": .string("公网地址由代码拒绝，不是策略提示 / public addresses are refused in code, not by convention")
+        ]) { current, _ in current }
+        return merged
+    }
+
+    static func hubResponse(_ fields: [String: JSONValue]) -> PrivacyToolResponse {
+        let merged = boundary(fields)
+        return PrivacyToolResponse(ok: merged["ok"]?.boolValue ?? true, fields: merged)
+    }
+
+    /// An `Encodable` card becomes JSON here rather than field by field: the card type is
+    /// already the console's contract, and restating its fields is how a row goes stale.
+    static func json<T: Encodable>(_ value: T) -> JSONValue {
+        guard let data = NodeJSON.encodeLine(value), let parsed = NodeJSON.decode(JSONValue.self, from: data) else {
+            return .null
+        }
+        return parsed
     }
 
     // MARK: Decisions
@@ -766,9 +1327,11 @@ public actor PrivacyToolEngine {
             "calendarWritten": .bool(proposal.domain == .calendar && verb == "approve"),
             "fileWritten": .bool(proposal.domain == .workspace && verb == "approve"),
             "sequence": .int(proposal.sequence),
-            "executedAt": .string(PrivacyStamp.iso(proposal.resolvedAt ?? Date())),
-            "ics": .string(ics(for: proposal, method: method))
+            "executedAt": .string(PrivacyStamp.iso(proposal.resolvedAt ?? Date()))
         ]
+        if proposal.domain == .calendar {
+            fields["ics"] = .string(ics(for: proposal, method: method))
+        }
         if !proposal.eventIdentifier.isEmpty { fields["eventIdentifier"] = .string(proposal.eventIdentifier) }
         if let file = proposal.file { fields["target"] = .string(file.path) }
         _ = timeZone

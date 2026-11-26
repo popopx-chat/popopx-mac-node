@@ -14,7 +14,7 @@ import EventKit
 /// summary, location, notes and attendees die there and cannot reach a response
 /// builder, an audit row, a log line or the snapshot. A test asserts the
 /// serialised response carries no text-valued key at all.
-public struct RedactedBusyInterval: Sendable, Equatable {
+public struct RedactedBusyInterval: Sendable, Equatable, Codable {
     public let start: Date
     public let end: Date
 

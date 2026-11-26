@@ -147,7 +147,20 @@ public actor NodeConsole: NodeConsoleFacade {
         let executor: PrivacyExecutorHub
         let ledger: PrivacyProposalLedger
         let engine: PrivacyToolEngine
+        let mcp: MCPBridge
+        let smartHome: SmartHomeBridge
+        let calDav: CalDavBridge
     }
+
+    /// Reads `config/mcp_servers.json`. Built unconditionally, unlike the stack: the console's
+    /// 「协议桥接」 card has to be able to say *why* nothing is reachable — no file, no enabled
+    /// entry, or the switch is off — and that answer comes from the registry, not from a bridge.
+    private let hubRegistry = MCPServerRegistry(fileURL: AppPaths.mcpServersFile)
+
+    /// Also unconditional, and deliberately holding neither a gateway nor a sandbox until the
+    /// stack exists: it reports `off` for those rows rather than being absent, because "the
+    /// owner switched it off" and "this node cannot answer" are different cards.
+    private let discovery = LocalCapabilityDiscovery()
 
     private var consoleURLString = ""
     /// Short node fingerprint, used only inside minted call links and UIDs.
@@ -289,12 +302,22 @@ public actor NodeConsole: NodeConsoleFacade {
     ///
     /// The gateway is created here and nowhere earlier: an `EKEventStore` is not
     /// something the node should hold while the owner has switched the bridge off.
+    ///
+    /// The hub bridges are constructed with the stack rather than separately because a
+    /// write-shaped MCP or home call *is* a ledger proposal: the approval queue, its HMAC
+    /// receipts and its audit log are the gate the feature depends on, and a second queue
+    /// would be a second answer to "was this approved".
     private func configurePrivacy(from settings: NodeSettings, nodeReference: String = "") async {
         if !nodeReference.isEmpty { self.nodeReference = nodeReference }
         var bridges = settings.bridges.normalised
         if bridges.timezoneIdentifier.isEmpty {
             bridges.timezoneIdentifier = TimeZone.current.identifier
         }
+        let hubs = settings.hubs.normalised
+        // The file is re-read on every settings save, never watched: an owner edits
+        // `config/mcp_servers.json` with an editor and then clicks 「重新载入」 or toggles a
+        // switch. A watcher would change what this node is willing to execute with no click.
+        await hubRegistry.reload()
         // The digest runs on whatever this Mac is already meant to be running: the
         // owner's pin if there is one, otherwise the hardware ladder.
         let sandbox = WorkspaceSandbox(
@@ -306,14 +329,19 @@ public actor NodeConsole: NodeConsoleFacade {
         )
         if let stack = privacy {
             await stack.engine.applyConfig(bridges, sandbox: sandbox)
+            await stack.engine.applyHubConfig(hubs)
             await stack.executor.update(gateway: stack.gateway, sandbox: sandbox)
+            await discovery.update(config: hubs, gateway: stack.gateway, sandbox: sandbox)
             return
         }
+        let hubAsked = hubs.allowMcpBridge || hubs.allowSmartHomeBridge || hubs.allowCalDavBridge
+            || !hubs.discovery.lanTargets.isEmpty || hubs.calDav.servers.contains { $0.enabled }
         guard bridges.allowCalendarAccess || bridges.allowWorkspaceRead || bridges.allowWorkspaceWrite
-            || !bridges.workspaceDirectories.isEmpty else {
+            || !bridges.workspaceDirectories.isEmpty || hubAsked else {
             // Nothing is switched on yet, so nothing is constructed: no event store,
             // no key file, no ledger. A disabled bridge must cost the process
             // nothing it could later be accused of holding.
+            await discovery.update(config: hubs, gateway: nil, sandbox: sandbox)
             return
         }
         let gateway = EventKitCalendarGateway()
@@ -325,18 +353,33 @@ public actor NodeConsole: NodeConsoleFacade {
             fileURL: AppPaths.privacyLedgerFile
         )
         await ledger.setNotificationsEnabled(bridges.notifyOnProposal)
+        let secrets = HubSecrets.makeStore()
+        let mcp = MCPBridge(registry: hubRegistry, ledger: ledger, config: hubs)
+        let smartHome = SmartHomeBridge(config: hubs, secrets: secrets, ledger: ledger)
+        let calDav = CalDavBridge(config: hubs, secrets: secrets)
+        let engine = PrivacyToolEngine(
+            config: bridges,
+            gateway: gateway,
+            ledger: ledger,
+            hub: executor,
+            sandbox: sandbox,
+            nodeReference: self.nodeReference,
+            mcp: mcp,
+            smartHome: smartHome,
+            calDav: calDav
+        )
+        // After the ledger has this executor, so an approval executed from the phone finds the
+        // hub bridges attached rather than failing with "桥接未装配".
+        await engine.attachHubBridges()
+        await discovery.update(config: hubs, gateway: gateway, sandbox: sandbox)
         privacy = PrivacyStack(
             gateway: gateway,
             executor: executor,
             ledger: ledger,
-            engine: PrivacyToolEngine(
-                config: bridges,
-                gateway: gateway,
-                ledger: ledger,
-                hub: executor,
-                sandbox: sandbox,
-                nodeReference: self.nodeReference
-            )
+            engine: engine,
+            mcp: mcp,
+            smartHome: smartHome,
+            calDav: calDav
         )
     }
 
@@ -695,7 +738,7 @@ public actor NodeConsole: NodeConsoleFacade {
     /// walk one validated road to the executor and neither can approve a proposal other
     /// than the one it was shown.
     public func privacyDecision(domain: String, id: String, verb: String) async -> PrivacyToolResponse {
-        guard let privacy, let namespace = PrivacyToolNamespace(rawValue: domain) else {
+        guard let privacy, let namespace = PrivacyToolRoute.namespace(accepting: domain) else {
             return PrivacyToolResponse.failure(
                 503,
                 "隐私桥接未启用 / the privacy bridge is switched off",
@@ -740,6 +783,65 @@ public actor NodeConsole: NodeConsoleFacade {
         return state
     }
 
+    /// The 「本地能力发现」 card. `force` is the 「立即探测」 button, so it is the only path
+    /// that waits; a poll reads the cache.
+    public func discoverySnapshot(force: Bool) async -> DiscoverySnapshot {
+        let snapshot = await discovery.snapshot(force: force)
+        if force {
+            await hub.publish(
+                .system,
+                "本地能力探测完成 · \(snapshot.capabilities.count) 项 / capability scan finished",
+                level: .notice,
+                payload: [
+                    "capabilities": .int(snapshot.capabilities.count),
+                    "scannedAt": .string(snapshot.scannedAt)
+                ]
+            )
+        }
+        return snapshot
+    }
+
+    /// Console-only: one credential into the Keychain, and the *reference* into the settings
+    /// document. The value itself is never stored, echoed, or logged — the settings write
+    /// carries `smarthome/mqtt/password`, not the password.
+    public func storeHubCredential(bridge: String, serverID: String, secret: String) async -> PrivacyToolResponse {
+        guard let privacy else {
+            return PrivacyToolResponse.failure(503, "本节点没有桥接栈 / this node has no bridge stack")
+        }
+        let outcome = await privacy.engine.storeHubCredential(bridge: bridge, serverID: serverID, secret: secret)
+        guard outcome.ok, let reference = outcome.fields["reference"]?.stringValue else {
+            // The refusal text names the reason and never the value, so forwarding it whole is
+            // safe; nothing here concatenates `secret`.
+            return outcome
+        }
+        let current = await settings.current()
+        var hubs = current.hubs
+        switch bridge.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "hometoken": hubs.smartHome.homeAssistantTokenRef = reference
+        case "mqttpassword": hubs.smartHome.mqttPasswordRef = reference
+        case "caldav":
+            if let index = hubs.calDav.servers.firstIndex(where: { $0.id == serverID }) {
+                hubs.calDav.servers[index].passwordRef = reference
+            }
+        default: break
+        }
+        let stored = await settings.apply(current.withHubs(hubs))
+        await privacy.engine.applyHubConfig(stored.hubs)
+        await hub.publish(
+            .privacy,
+            "凭据已存入钥匙串 · \(bridge) / credential stored in the Keychain",
+            level: .success,
+            payload: ["bridge": .string(bridge), "reference": .string(reference)]
+        )
+        return PrivacyToolResponse(ok: true, status: 200, fields: [
+            "ok": .bool(true),
+            "reference": .string(reference),
+            "stored": .bool(true),
+            "revision": .int(stored.revision),
+            "detail": .string("已加密存入 macOS 钥匙串，设置文件仅记录引用 / stored encrypted in the Keychain; the settings document holds the reference only")
+        ])
+    }
+
     /// Delegates to the wire parser in the contract so the console, the bridge and
     /// the test target all share one copy of the grammar.
     public static func parse(wire: String) -> NodeCommand? {
@@ -748,6 +850,7 @@ public actor NodeConsole: NodeConsoleFacade {
 }
 
 // MARK: - Host model
+
 
 /// Owns the process lifetime: creates the directories, builds the subsystems,
 /// binds the console, and keeps a polled snapshot for SwiftUI to render.
