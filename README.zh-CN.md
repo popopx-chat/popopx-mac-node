@@ -57,7 +57,7 @@ iOS 客户端「发现」里 10 个业务的指令，通过 **你自己的 popop
 
 5. 启动。应用**静默驻留菜单栏**（`LSUIElement`，不占 Dock），并自动在你的默认浏览器打开本地向导 **http://127.0.0.1:18920**。
 6. 向导第 1 步：点 **“一键自动部署本地 AI 引擎”** —— 节点自动体检芯片 / 统一内存 / SSD，按内存档位拉取适配的 Qwen3.8 量化权重，初始化 `ltx2` 工作区，安装日志实时流回网页。
-7. 向导第 2 步：屏幕出现 **`PPXNODE1-…`** 端到端加密配对二维码。
+7. 向导第 2 步：屏幕出现 **`https://popopx.chat/i/v1/…`** 加密配对二维码 —— 它是本机 `PPXNODE1-…` 凭据的加密封装，截图或转发的链接都不会暴露信令节点域名。
 8. **iOS 端漏斗**：打开 POPOPX App → 底部 **「发现」** Tab → **「Mac Node 配对」** → 扫一扫。网页端会立刻跳到 “✅ 已成功与 iPhone 建立加密隧道”。
 9. 向导第 3 步：10 大业务独立开关、空闲算力共享、物理哨兵挂载卷 / Webhook、时光方舟心跳周期 —— 按需开启。配完这一屏，iPhone 上的「发现」页就从“演示态”变成“你家的算力真的在跑”。
 
@@ -116,7 +116,7 @@ bash Scripts/build_dmg.sh --skip-build --output dist --version 1.0.2 --build 3
    |[ iOS CLIENT - POPOPX app ]             |
    |Tab "Discover" > "Mac Node"             |
    |                                        |
-   |scan the PPXNODE1-... QR once:          |
+   |scan the /i/v1/ encrypted QR link once: |
    |that pins one device keypair            |
    |per iPhone. No account, no              |
    |e-mail, no server-side ID.              |

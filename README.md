@@ -57,7 +57,7 @@ Commands for the 10 Discover businesses arrive from the iOS client over **your o
 
 5. Launch. The app **quietly lives in the menu bar** (`LSUIElement`, no Dock tile) and opens the local wizard at **http://127.0.0.1:18920** in your default browser.
 6. Wizard step 1: hit **“Deploy local AI engines automatically”** — the node profiles your chip / unified memory / SSD, pulls the Qwen3.8 quantisation that fits your memory tier, initialises the `ltx2` workspace, and streams the terminal log to the page live.
-7. Wizard step 2: a **`PPXNODE1-…`** end-to-end encrypted pairing QR code appears.
+7. Wizard step 2: an **`https://popopx.chat/i/v1/…`** encrypted pairing QR appears — the sealed form of this node's `PPXNODE1-…` credential, so a screenshot or a forwarded link never names a relay.
 8. **iOS funnel**: open the POPOPX app → bottom **“Discover”** tab → **“Mac Node pairing”** → scan. The web page flips to “✅ encrypted tunnel to your iPhone established”.
 9. Wizard step 3: per-engine switches, idle compute sharing, physical-sentinel volumes/webhooks, Chrono Ark heartbeat period — turn on what you actually use. This is the screen where Discover stops being a demo and starts being your hardware.
 
@@ -123,7 +123,7 @@ The rule at the top of the diagram is the whole point of this project: **there i
    |[ iOS CLIENT - POPOPX app ]             |
    |Tab "Discover" > "Mac Node"             |
    |                                        |
-   |scan the PPXNODE1-... QR once:          |
+   |scan the /i/v1/ encrypted QR link once: |
    |that pins one device keypair            |
    |per iPhone. No account, no              |
    |e-mail, no server-side ID.              |

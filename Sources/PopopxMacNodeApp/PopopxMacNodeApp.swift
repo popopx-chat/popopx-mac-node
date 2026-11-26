@@ -571,7 +571,15 @@ public actor NodeConsole: NodeConsoleFacade {
                 .pairing,
                 "已生成新的配对二维码 / new pairing offer minted",
                 level: .notice,
-                payload: ["expiresIn": .int(offer.secondsRemaining()), "code": .string(offer.code)]
+                payload: [
+                    "expiresIn": .int(offer.secondsRemaining()),
+                    // The event log outlives the offer and is readable from the
+                    // drawer, so it keeps the masked envelope, never the credential.
+                    "pairing": .string(
+                        (try? OpaquePairingCodec.pairingLink(offer.code))
+                            .map(OpaquePairingCodec.mask) ?? "…"
+                    )
+                ]
             )
         }
         return offer

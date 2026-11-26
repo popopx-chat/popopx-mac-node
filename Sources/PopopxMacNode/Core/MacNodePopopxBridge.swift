@@ -1235,28 +1235,33 @@ public actor MacNodePopopxBridge: NodeSignaling {
             publish("\(lastError ?? "")", level: .warning, channel: .pairing)
             return nil
         }
-        // The QR carries the *signed credential*, not the bare link: the code embeds
-        // nodeId + node key + link, so iOS can prove it came from this node.
-        // `invitationURI` stays available for long-press / manual paste.
-        var payload = offer.code
-        if payload.utf8.count > SBChatWire.qrPayloadBudget {
-            // A long full link pushes the module grid past what a phone camera
-            // resolves at arm's length. Degrade to the short link and say so,
-            // rather than emit a QR that silently fails to scan.
-            if SBChatWire.isSafeLink(offer.invitationURI), offer.invitationURI.utf8.count <= SBChatWire.qrPayloadBudget {
-                payload = offer.invitationURI
+        // The QR carries the *envelope* of the signed credential, never the
+        // credential: a screenshot, a forwarded link or a chat-app preview must not
+        // name a relay. The envelope still embeds nodeId + node key + link, so iOS
+        // can prove the QR came from this node once it opens it.
+        var sealed = (try? OpaquePairingCodec.pairingLink(offer.code))
+            .flatMap { $0.utf8.count <= SBChatWire.qrPayloadBudget ? $0 : nil }
+        if sealed == nil {
+            // The credential is either too large to seal or its envelope scans past
+            // what a phone camera resolves at arm's length. Degrade to the *sealed*
+            // short link — opaque either way — and say so instead of emitting a QR
+            // that silently fails to scan.
+            if SBChatWire.isSafeLink(offer.invitationURI) {
+                sealed = (try? OpaquePairingCodec.link(for: offer.invitationURI))
+                    .flatMap { $0.utf8.count <= SBChatWire.qrPayloadBudget ? $0 : nil }
                 publish(
-                    "签名码 \(offer.code.utf8.count) 字节超出二维码预算，改编码短链；请改用文本码复制 / signed code exceeded the QR budget, encoding the short link instead",
+                    "签名码 \(offer.code.utf8.count) 字节超出二维码预算，改封装短邀请链 / the signed code does not fit the QR budget, so the sealed short link is encoded instead",
                     level: .warning,
                     channel: .pairing
                 )
-            } else {
-                lastError = SBChatWire.sanitized(
-                    "配对载荷 \(payload.utf8.count) 字节，超过二维码预算 \(SBChatWire.qrPayloadBudget) / pairing payload is over the QR budget"
-                )
-                publish("\(lastError ?? "")", level: .error, channel: .pairing)
-                return nil
             }
+        }
+        guard let payload = sealed else {
+            lastError = SBChatWire.sanitized(
+                "配对载荷 \(offer.code.utf8.count) 字节，封装后超过二维码预算 \(SBChatWire.qrPayloadBudget) / the sealed pairing payload is over the QR budget"
+            )
+            publish("\(lastError ?? "")", level: .error, channel: .pairing)
+            return nil
         }
         let render = SBQRCode.render(payload, pixelSize: pixelSize)
         guard let png = render.png else {

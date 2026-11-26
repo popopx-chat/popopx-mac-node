@@ -408,15 +408,27 @@ public extension JSONValue {
 
 // MARK: - JSON plumbing
 
+public extension CodingUserInfoKey {
+    /// Set on an encoder that feeds a *displayed* surface — the console snapshot, the
+    /// rotate response — rather than the node's own store. Objects use it to add
+    /// derived privacy fields (an opaque link, a mask) without those values ever
+    /// being written to disk, where a fresh nonce would rewrite the file on every
+    /// poll and put a second copy of a credential in the store.
+    static let popopxDisplaysOpaqueLinks = CodingUserInfoKey(rawValue: "popopxDisplaysOpaqueLinks")!
+}
+
 /// One encoder/decoder configuration for the whole node so that file formats,
 /// the REST console and the SMP wire never disagree about dates or key order.
 public enum NodeJSON {
-    public static func encoder(prettyPrinted: Bool = false) -> JSONEncoder {
+    public static func encoder(prettyPrinted: Bool = false, displayingOpaqueLinks: Bool = false) -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = prettyPrinted
             ? [.prettyPrinted, .sortedKeys]
             : [.sortedKeys]
+        if displayingOpaqueLinks {
+            encoder.userInfo[.popopxDisplaysOpaqueLinks] = true
+        }
         return encoder
     }
 
@@ -1337,10 +1349,12 @@ public struct NodeIdentity: Codable, Sendable, Equatable {
 
 /// The QR payload minted on wizard step 2.
 ///
-/// Two strings, two jobs. `invitationURI` is what the QR **encodes**, because that
-/// is the only thing the iOS scanner knows how to open; `code` is the signed
-/// credential printed next to it, so a user who cannot scan can still read the
-/// node identity out of it and it is what the pairing whitelist records.
+/// Three strings, three jobs. The QR and every copyable link carry
+/// `OpaquePairingCodec`'s envelope of `code`, so nothing that leaves the Mac names
+/// a relay; `code` itself is the signed credential the pairing whitelist records and
+/// what the diagnostics panel shows the node's owner; `invitationURI` is the raw
+/// daemon link, kept for the same panel and for a manual paste that cannot work
+/// without it.
 public struct PairingOffer: Codable, Sendable, Equatable, Identifiable {
     public var id: String { code }
 
@@ -1357,6 +1371,16 @@ public struct PairingOffer: Codable, Sendable, Equatable, Identifiable {
     public var expiresAt: Date
     public var oneTime: Bool
     public var used: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case code, invitationURI, nodePublicKey, issuedAt, expiresAt, oneTime, used
+    }
+
+    /// Not stored properties, so they stay out of `init(from:)`: the envelope a
+    /// displayed surface shows is derived from `code` on every encode.
+    private enum DerivedKeys: String, CodingKey {
+        case pairingLink, pairingMask
+    }
 
     public init(
         code: String,
@@ -1380,6 +1404,24 @@ public struct PairingOffer: Codable, Sendable, Equatable, Identifiable {
 
     public func secondsRemaining(at now: Date = Date()) -> Int {
         max(0, Int(expiresAt.timeIntervalSince(now)))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(code, forKey: .code)
+        try box.encode(invitationURI, forKey: .invitationURI)
+        try box.encode(nodePublicKey, forKey: .nodePublicKey)
+        try box.encode(issuedAt, forKey: .issuedAt)
+        try box.encode(expiresAt, forKey: .expiresAt)
+        try box.encode(oneTime, forKey: .oneTime)
+        try box.encode(used, forKey: .used)
+        // A displayed surface shows the envelope, never the raw credential: the same
+        // bytes the QR carries, so what a user copies is what a phone scans.
+        guard encoder.userInfo[.popopxDisplaysOpaqueLinks] != nil,
+              let link = try? OpaquePairingCodec.pairingLink(code) else { return }
+        var derived = encoder.container(keyedBy: DerivedKeys.self)
+        try derived.encode(link, forKey: .pairingLink)
+        try derived.encode(OpaquePairingCodec.mask(link), forKey: .pairingMask)
     }
 }
 

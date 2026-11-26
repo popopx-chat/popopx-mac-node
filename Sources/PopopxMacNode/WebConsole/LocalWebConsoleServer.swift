@@ -1149,6 +1149,11 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
   </button>
   <div class="drawer__body" id="dev-body" hidden>
     <div class="stack">
+      <span class="field__label" data-i18n="pairDiagTitle"></span>
+      <div class="stack" id="pair-diag"></div>
+      <p class="field__note" data-i18n="pairDiagNote"></p>
+    </div>
+    <div class="stack">
       <div class="btn-row">
         <button class="btn btn--mini" onclick="PPX.fetchRaw()" data-i18n="rawFetch"></button>
         <button class="btn btn--mini" onclick="PPX.rawCopy()" data-i18n="rawCopy"></button>
@@ -1381,11 +1386,17 @@ var I18N = {
   qrRetry: { zh: "重新载入二维码", en: "Reload the QR" },
   qrLoading: { zh: "正在渲染二维码…", en: "Rendering the QR…" },
   qrLoadFailed: { zh: "二维码图片读取失败", en: "Could not load the QR image" },
-  noQR: { zh: "节点暂时无法输出二维码图片；下方配对码仍然有效，可在 iOS 端手动粘贴。", en: "The node cannot render the QR image right now; the code below is still valid and can be pasted manually in iOS." },
+  noQR: { zh: "节点暂时无法输出二维码图片；下方加密链接仍然有效，可在 iOS 端手动粘贴。", en: "The node cannot render the QR image right now; the encrypted link below is still valid and can be pasted manually in iOS." },
   code: { zh: "端到端加密配对码", en: "End-to-end encrypted pairing code" },
   copyCode: { zh: "复制配对码", en: "Copy code" },
   uri: { zh: "/*PPX_SCHEME*/ 邀请链接", en: "/*PPX_SCHEME*/ invitation URI" },
   copyURI: { zh: "复制邀请链接", en: "Copy URI" },
+  pairLink: { zh: "加密配对链接", en: "Encrypted pairing link" },
+  copyLink: { zh: "复制配对链接", en: "Copy link" },
+  pairLinkNote: { zh: "链接按全生态统一的邀请封装加密，不含信令节点域名；扫码内容与复制内容完全一致。", en: "The link is sealed with the ecosystem invite format, so it names no signalling node; the QR holds the very same bytes." },
+  pairDiagTitle: { zh: "原始配对凭据（仅本机可见）", en: "Raw pairing credentials (this Mac only)" },
+  pairDiagNote: { zh: "以下配对码与邀请链接包含 SMP 队列地址，仅供排障；对外分享请使用上方加密链接。", en: "The code and invitation URI below carry the SMP queue address and are for troubleshooting; share the encrypted link above." },
+  pairDiagEmpty: { zh: "当前没有配对凭据；重新生成后这里会显示原始值。", en: "No pairing credential yet; rotate an offer and the raw values appear here." },
   pubkey: { zh: "节点公钥", en: "Node public key" },
   expiry: { zh: "有效期至", en: "Valid for" },
   expired: { zh: "此配对码已过期", en: "This pairing code has expired" },
@@ -2648,6 +2659,7 @@ function renderPairing() {
     if (offer && offer.nodePublicKey) { S.copyable.pubkey = String(offer.nodePublicKey); }
     if (PAIR_VIEW.name !== "done") {
       clear(slot);
+      renderPairingDiag(offer);
       var first = devices[0];
       slot.appendChild(h("div", { cls: "pair-success" }, [
         h("div", { cls: "pair-success__title" }, [svgIcon("done", 20), h("span", { text: t("tunnel") })]),
@@ -2671,6 +2683,7 @@ function renderPairing() {
       clear(slot);
       PAIR_VIEW.name = "none";
       PAIR_VIEW.code = "";
+      renderPairingDiag(null);
       slot.appendChild(h("div", { cls: "stack" }, [
         emptyState("noPairing"),
         h("button", { cls: "btn", text: t("rotate"), onclick: "PPX.rotatePairing()" })
@@ -2679,8 +2692,6 @@ function renderPairing() {
     return;
   }
   S.copyable.pubkey = String(offer.nodePublicKey || "");
-  S.copyable.code = String(offer.code || "");
-  S.copyable.uri = String(offer.invitationURI || "");
   var expired = new Date(offer.expiresAt).getTime() < nodeNow();
   badge.className = "tag " + (offer.used ? "tag--accent" : expired ? "tag--bad" : "tag--ok");
   badge.textContent = offer.used ? t("used") : expired ? t("expired") : t("oneTime");
@@ -2699,13 +2710,11 @@ function renderPairing() {
     ])));
     slot.appendChild(h("div", { cls: "btn-row" }, [
       h("span", { cls: "countdown", id: "pair-countdown", text: "" }),
-      h("button", { cls: "btn btn--mini", text: t("copyCode"), onclick: "PPX.copyThis('code')" }),
-      h("button", { cls: "btn btn--mini", text: t("copyURI"), onclick: "PPX.copyThis('uri')" })
+      h("button", { cls: "btn btn--mini", text: t("copyLink"), onclick: "PPX.copyThis('link')" })
     ]));
     slot.appendChild(h("div", { cls: "stack" }, [
-      valueBlock("code", offer.code),
-      valueBlock("uri", offer.invitationURI),
-      valueBlock("pubkey", offer.nodePublicKey),
+      valueBlock("link", offer.pairingLink),
+      h("p", { cls: "field__note", text: t("pairLinkNote") }),
       h("p", {
         cls: "field__note",
         text: t("expiry") + " · " + stampOf(dateOf(offer.issuedAt)) + " → " + stampOf(dateOf(offer.expiresAt)) +
@@ -2713,9 +2722,32 @@ function renderPairing() {
       }),
       h("button", { cls: "btn btn--primary", text: t("rotate"), onclick: "PPX.rotatePairing()" })
     ]));
+    renderPairingDiag(offer);
     loadQR(code);
   }
   updatePairCountdown();
+}
+/* The raw credential belongs to the developer drawer and nowhere else on the page:
+   the signed code and the daemon link both carry the signalling queue address, and
+   the drawer body stays hidden until the owner opens it. */
+function renderPairingDiag(offer) {
+  var host = el("pair-diag");
+  if (!host) { return; }
+  clear(host);
+  if (!offer) {
+    S.copyable.code = "";
+    S.copyable.uri = "";
+    S.copyable.link = "";
+    host.appendChild(h("p", { cls: "field__note", text: t("pairDiagEmpty") }));
+    return;
+  }
+  S.copyable.code = String(offer.code || "");
+  S.copyable.uri = String(offer.invitationURI || "");
+  S.copyable.pubkey = String(offer.nodePublicKey || "");
+  S.copyable.link = String(offer.pairingLink || "");
+  host.appendChild(valueBlock("code", offer.code));
+  host.appendChild(valueBlock("uri", offer.invitationURI));
+  host.appendChild(valueBlock("pubkey", offer.nodePublicKey));
 }
 function loadQR(code) {
   var image = el("qr-img");
@@ -2741,8 +2773,8 @@ function renderQRFallback() {
   ]));
 }
 function valueBlock(name, value) {
-  var labelKey = name === "code" ? "code" : name === "uri" ? "uri" : "pubkey";
-  var buttonKey = name === "code" ? "copyCode" : name === "uri" ? "copyURI" : "copyPubkey";
+  var labelKey = name === "link" ? "pairLink" : name === "code" ? "code" : name === "uri" ? "uri" : "pubkey";
+  var buttonKey = name === "link" ? "copyLink" : name === "code" ? "copyCode" : name === "uri" ? "copyURI" : "copyPubkey";
   return h("div", { cls: "stack" }, [
     h("span", { cls: "field__label", text: t(labelKey) }),
     h("div", { cls: "code", text: String(value || "—") }),
@@ -4281,8 +4313,8 @@ function doRotate() {
     PAIR_VIEW.name = "";
     PAIR_VIEW.code = "";
     S.qrNonce = (S.qrNonce || 0) + 1;
-    var code = offer && offer.code ? String(offer.code) : "";
-    toast("ok", t("rotate") + " · " + code.slice(0, 20) + (code.length > 20 ? "…" : ""));
+    var mask = offer && offer.pairingMask ? String(offer.pairingMask) : "…";
+    toast("ok", t("rotate") + " · " + mask);
     return refreshSnapshot(true);
   }).catch(function (error) { fail("rotateFailed", error); });
 }
@@ -4718,7 +4750,9 @@ public actor LocalWebConsoleServer {
     private var listenerFailure: String?
     private let bootDate = Date()
 
-    private let encoder = NodeJSON.encoder()
+    /// Everything this server hands to a browser is a displayed surface, so
+    /// `PairingOffer` gains its opaque link here and nowhere in the node's own store.
+    private let encoder = NodeJSON.encoder(displayingOpaqueLinks: true)
     private let decoder = NodeJSON.decoder()
 
     // MARK: Life and death

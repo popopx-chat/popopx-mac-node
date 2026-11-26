@@ -488,3 +488,77 @@ extension WebConsoleBindTests {
                       "the engine's verdict travels in `status` so the panel can tell 409 from 403: \(stale?.body ?? "nil")")
     }
 }
+
+/// A facade that hands the console one live pairing offer, so the served document can
+/// be read the way the browser reads it.
+private struct PairingConsoleFacade: NodeConsoleFacade {
+    let offer: PairingOffer
+
+    func snapshot() async -> ConsoleSnapshot {
+        var snap = PrivacyConsoleFacade.stubSnapshot()
+        snap.pairing = offer
+        return snap
+    }
+    func events() -> AsyncStream<ConsoleEvent> { AsyncStream { $0.finish() } }
+    func rotatePairing() async -> PairingOffer? { offer }
+    func startInstall() async {}
+    func cancelInstall() async {}
+    func setEngineEnabled(_ kind: EngineKind, enabled: Bool) async {}
+    func pairingQR(pixelSize: Int) async -> QRAsset? { nil }
+    func revokePairing(publicKey: String) async {}
+    func updateSettings(_ settings: NodeSettings) async -> NodeSettings { settings }
+    func submitWireCommand(_ text: String) async -> CommandResult {
+        fatalError("the pairing route does not run commands")
+    }
+    func invokeEngine(_ kind: EngineKind, action: String, payload: [String: JSONValue]) async -> CommandResult {
+        fatalError("the pairing route does not run engines")
+    }
+    func openInFinder(path: String) async {}
+}
+
+extension WebConsoleBindTests {
+    /// The wire fact behind the card: the console's own encoder is the flagged one, so
+    /// a browser — and nothing on disk — receives the envelope the card prints and the
+    /// mask the toast prints. `OpaquePairingTests` covers the store side.
+    func test_servedPairingCardCarriesTheOpaqueLink() async throws {
+        let issued = Date(timeIntervalSince1970: 1_766_400_000)
+        let body = Data(#"{"link":"popopx:/i#a/b","node":"ppxnode-1","v":6}"#.utf8)
+        let offer = PairingOffer(
+            code: "\(NodeWire.pairingCodePrefix)-\(TextKit.base64URL(body)).\(String(repeating: "A", count: 86))",
+            invitationURI: "popopx:/invitation#/?v=6-8&smp=smp://smp8.popopx.im:443/abcdef",
+            nodePublicKey: "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+            issuedAt: issued,
+            expiresAt: issued.addingTimeInterval(900)
+        )
+        let port: UInt16 = 19013
+        let server = LocalWebConsoleServer(facade: PairingConsoleFacade(offer: offer), port: port)
+        try await server.start()
+        let snapshot = request(port: port, method: "GET", path: ConsoleRoute.snapshot, token: await server.token)
+        let rotated = post(port: port, path: ConsoleRoute.pairingRotate, body: "{}", token: await server.token)
+        let anonymous = request(port: port, method: "GET", path: ConsoleRoute.snapshot, token: nil)
+        await server.stop()
+
+        XCTAssertEqual(anonymous?.status, 401, "control: the console must not answer without the bearer")
+        XCTAssertEqual(snapshot?.status, 200, "the snapshot route did not answer")
+        let pairing = try XCTUnwrap(paired(in: snapshot?.body), "the served snapshot lost its pairing card")
+        let link = try XCTUnwrap(pairing["pairingLink"] as? String, "the served pairing card carries no envelope")
+        XCTAssertTrue(link.hasPrefix(OpaquePairingCodec.linkPrefix), "the served link is not the published form")
+        XCTAssertFalse(link.contains(NodeWire.pairingCodePrefix), "the envelope holds the credential itself")
+        XCTAssertEqual(try OpaquePairingCodec.openPairing(link), offer.code, "the served link must open back to the credential")
+        XCTAssertEqual(pairing["pairingMask"] as? String, OpaquePairingCodec.mask(link))
+        // The drawer needs the raw values, so they stay served — they are simply no
+        // longer what the card shows or what the QR encodes.
+        XCTAssertEqual(pairing["code"] as? String, offer.code)
+
+        let rotatedPairing = try XCTUnwrap(paired(in: rotated?.body), "rotate must answer with the offer itself")
+        XCTAssertNotNil(rotatedPairing["pairingLink"] as? String, "the rotate reply has no link for the toast to mask")
+    }
+
+    private func paired(in body: String?) throws -> [String: Any]? {
+        guard let body, let root = try JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any] else {
+            return nil
+        }
+        // `/api/pairing/rotate` answers with the offer, `/api/snapshot` with the snapshot.
+        return (root["pairing"] as? [String: Any]) ?? (root["code"] != nil ? root : nil)
+    }
+}
