@@ -2130,6 +2130,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     public var hubBridges: HubConfig?
     public var updates: UpdateConfig?
     public var discover: DiscoverConfig?
+    public var godsEye: GodsEyeViewConfig?
     public var revision: Int
     public var updatedAt: Date
 
@@ -2153,6 +2154,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         hubBridges: HubConfig? = nil,
         updates: UpdateConfig? = nil,
         discover: DiscoverConfig? = nil,
+        godsEye: GodsEyeViewConfig? = nil,
         revision: Int = 0,
         updatedAt: Date = Date()
     ) {
@@ -2175,6 +2177,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         self.hubBridges = hubBridges
         self.updates = updates
         self.discover = discover
+        self.godsEye = godsEye
         self.revision = revision
         self.updatedAt = updatedAt
     }
@@ -2235,6 +2238,15 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     public func withDiscover(_ config: DiscoverConfig) -> NodeSettings {
         var copy = self
         copy.discover = config
+        return copy
+    }
+
+    /// Gods Eye View switches, read like the bridges: absent means off.
+    public var godsEyeConfig: GodsEyeViewConfig { godsEye ?? .disabled }
+
+    public func withGodsEye(_ config: GodsEyeViewConfig) -> NodeSettings {
+        var copy = self
+        copy.godsEye = config
         return copy
     }
 }
@@ -2851,6 +2863,7 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
     public var privacy: PrivacyBridgeSnapshot
     public var update: UpdateSnapshot
     public var discover: DiscoverSnapshot
+    public var godsEye: GodsEyeViewSnapshot
 
     public init(
         node: NodeIdentity,
@@ -2873,7 +2886,8 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         eventsBacklog: [ConsoleEvent] = [],
         privacy: PrivacyBridgeSnapshot = PrivacyBridgeSnapshot.empty,
         update: UpdateSnapshot = .disabled,
-        discover: DiscoverSnapshot = .disabled
+        discover: DiscoverSnapshot = .disabled,
+        godsEye: GodsEyeViewSnapshot = .disabled
     ) {
         self.node = node
         self.version = NodeVersion.current.semanticString
@@ -2898,6 +2912,7 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         self.privacy = privacy
         self.update = update
         self.discover = discover
+        self.godsEye = godsEye
     }
 }
 
@@ -3142,6 +3157,11 @@ public enum AppPaths {
     public static var discoverFeedFile: URL { discover.appendingPathComponent("feed.json") }
     public static var discoverStateFile: URL { discover.appendingPathComponent("state.json") }
     public static var discoverSigningKeyFile: URL { vault.appendingPathComponent("discover-signing.key") }
+    /// The Gods Eye View bridge keeps its own JSONL audit and process log apart
+    /// from the node's own, so the external tool's transitions can be read and
+    /// rotated without touching `node.log`.
+    public static var godsEyeAuditFile: URL { logs.appendingPathComponent("godseyeview-audit.jsonl") }
+    public static var godsEyeLogFile: URL { logs.appendingPathComponent("godseyeview.log") }
 
     /// Subpaths used by the LTX-2.5 MLX workspace.
     public static var ltxRepo: URL { ltxWorkspace.appendingPathComponent("ltx-2-mlx", isDirectory: true) }
@@ -3808,6 +3828,12 @@ public protocol NodeConsoleFacade: Sendable {
     func discoverStatus() async -> DiscoverSnapshot
     /// Runs the aggregator now. A no-op refusal when the feature is off.
     func discoverRefresh() async -> DiscoverRefreshReport
+    /// One owner click on the 「全球情报地图」 card. The bridge checks the switches
+    /// inside, so a facade cannot answer a start it was not authorized to run.
+    func godsEyeControl(verb: String) async -> GodsEyeControlReport
+    /// Console-only: stores one optional third-party data-source key in the Keychain
+    /// and answers with its reference. The value is never echoed.
+    func storeGodsEyeCredential(sourceID: String, secret: String) async -> PrivacyToolResponse
 }
 
 public extension NodeConsoleFacade {
@@ -3858,6 +3884,19 @@ public extension NodeConsoleFacade {
 
     func discoverRefresh() async -> DiscoverRefreshReport {
         DiscoverRefreshReport(outcome: "disabled", detail: "本节点没有发现聚合器 / this facade has no aggregator", discover: .disabled)
+    }
+
+    func godsEyeControl(verb: String) async -> GodsEyeControlReport {
+        GodsEyeControlReport(
+            outcome: verb.isEmpty ? "disabled" : verb,
+            ok: false,
+            detail: "本节点没有 Gods Eye View 桥 / this facade has no Gods Eye View bridge",
+            godsEye: .disabled
+        )
+    }
+
+    func storeGodsEyeCredential(sourceID: String, secret: String) async -> PrivacyToolResponse {
+        PrivacyToolResponse.failure(503, "本节点没有钥匙串存储 / this facade has no credential store")
     }
 }
 
@@ -3922,6 +3961,17 @@ public enum ConsoleRoute {
     public static let updateDecision = "/api/update/decision"
     public static let discoverRefresh = "/api/discover/refresh"
 
+    // MARK: Gods Eye View
+    //
+    // Console-only, for the same reason `/api/hub/credential` is: both write state
+    // that a paired caller must never be able to change on its own. The control
+    // path carries one verb the bridge allow-lists; the credential path stores a
+    // third-party key in the Keychain and answers with its reference, never the
+    // value.
+
+    public static let godsEyeControl = "/api/godseye/control"
+    public static let godsEyeCredential = "/api/godseye/credential"
+
     /// `/v1/tools/{domain}/proposals/{id}/{verb}` — the approval gate, addressed by
     /// proposal id.
     public static func proposalDecision(_ domain: String, id: String, verb: String) -> String {
@@ -3946,7 +3996,8 @@ public enum ConsoleRoute {
         pairingRotate, pairingQR, pairingRevoke, settings,
         engineToggle, engineInvoke, commandInject, health, privacyAuthorize, privacyDecision,
         hubCredential, discoveryCapabilities, discoveryScan,
-        updateCheck, updateDecision, discoverRefresh
+        updateCheck, updateDecision, discoverRefresh,
+        godsEyeControl, godsEyeCredential
     ]
 
     /// The tool endpoints, kept out of `all` because `all` is the SPA surface the

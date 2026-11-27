@@ -1210,6 +1210,60 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
     </div>
   </div>
 
+  <div class="grid grid--split" style="margin-top:12px">
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="geTitle"></h3>
+          <span class="tag" id="ge-badge">—</span>
+        </div>
+        <p class="panel__sub" data-i18n="geDesc"></p>
+        <div class="grid grid--stats" id="ge-stats"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--mini" id="ge-start" onclick="PPX.geStart()" data-i18n="geStart"></button>
+          <button class="btn btn--mini" id="ge-stop" onclick="PPX.geStop()" data-i18n="geStop"></button>
+          <button class="btn btn--mini" id="ge-health" onclick="PPX.geHealth()" data-i18n="geHealth"></button>
+        </div>
+        <div class="pv" id="ge-state"></div>
+        <p class="field__note" id="ge-bound"></p>
+        <p class="field__note" id="ge-policy"></p>
+        <p class="field__note" id="ge-licence"></p>
+      </section>
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="geMcpTitle"></h3>
+          <span class="tag" id="ge-mcp-tag">—</span>
+        </div>
+        <div class="list" id="ge-tools"><div class="empty" data-i18n="geToolsIdle"></div></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--tiny" onclick="PPX.geControl('register')" data-i18n="geMcpRegister"></button>
+          <button class="btn btn--tiny" onclick="PPX.geControl('syncTools')" data-i18n="geMcpSync"></button>
+          <button class="btn btn--tiny" onclick="PPX.geControl('unregister')" data-i18n="geMcpUnregister"></button>
+        </div>
+        <p class="field__note" id="ge-mcp-note"></p>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="geConfigTitle"></h3></div>
+        <div id="ge-switch"></div>
+        <p class="field__note" data-i18n="geSwitchNote"></p>
+        <hr class="hair">
+        <div class="fields" id="ge-fields"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--tiny" onclick="PPX.geControl('verify')" data-i18n="geVerify"></button>
+          <button class="btn btn--tiny" onclick="PPX.geControl('install')" data-i18n="geInstall"></button>
+        </div>
+        <p class="field__note" data-i18n="geInstallNote"></p>
+        <hr class="hair">
+        <span class="field__label" data-i18n="geCredTitle"></span>
+        <div class="list" id="ge-creds"></div>
+        <p class="field__note" data-i18n="geCredNote"></p>
+      </section>
+    </div>
+  </div>
+
   <div class="savebar">
     <div class="savebar__state">
       <span class="savebar__text" id="hv-save-text" data-i18n="saved"></span>
@@ -1326,7 +1380,11 @@ var ROUTE = {
   // this call, so neither a tool path nor a phone command can reach them.
   updateCheck: "/api/update/check",
   updateDecision: "/api/update/decision",
-  discoverRefresh: "/api/discover/refresh"
+  discoverRefresh: "/api/discover/refresh",
+  // The local globe's two console-only paths: one control verb per click, and the
+  // one-way credential save whose reply is a Keychain reference, never the value.
+  godsEyeControl: "/api/godseye/control",
+  godsEyeCredential: "/api/godseye/credential"
 };
 
 var LEVEL_GLYPH = { debug: "·", info: "›", notice: "•", success: "✓", warning: "!", error: "✕" };
@@ -1909,6 +1967,76 @@ var I18N = {
   dcKindMCP: { zh: "MCP", en: "MCP" },
   dcStateOk: { zh: "正常", en: "ok" },
   dcStateRefused: { zh: "已拒绝", en: "refused" },
+  geTitle: { zh: "全球情报地图（God's Eye View）", en: "Global intelligence map (God's Eye View)" },
+  geDesc: { zh: "独立第三方程序，由你本机安装并运行；本节点只校验固定版本、以 127.0.0.1 启动它，并把已验证的 MCP 入口登记为只读优先的工具。", en: "A separate third-party program that you install and run on this Mac; this node only verifies a pinned version, launches it on 127.0.0.1, and registers the verified MCP entry as a read-first tool." },
+  geStart: { zh: "启动", en: "Start" },
+  geStop: { zh: "停止", en: "Stop" },
+  geHealth: { zh: "检查", en: "Check" },
+  geBadgeRunning: { zh: "运行中", en: "Running" },
+  geBadgeOn: { zh: "已启用", en: "On" },
+  geBadgeOff: { zh: "未启用", en: "Off" },
+  geStatNode: { zh: "Node.js", en: "Node.js" },
+  geStatInstall: { zh: "安装校验", en: "Install" },
+  geStatPort: { zh: "回环端口", en: "Loopback port" },
+  geStatHealth: { zh: "健康检查", en: "Health" },
+  geRunning: { zh: "运行中", en: "running" },
+  geStopped: { zh: "已停止", en: "stopped" },
+  geAbsent: { zh: "未检测到", en: "absent" },
+  geUnverified: { zh: "未校验", en: "unverified" },
+  geNoPath: { zh: "未绑定", en: "unbound" },
+  geStatePath: { zh: "安装目录", en: "Install directory" },
+  geStateMode: { zh: "模式", en: "Mode" },
+  geStateProcess: { zh: "本地进程", en: "Local process" },
+  geStateVerified: { zh: "上次校验", en: "Last verified" },
+  geStateError: { zh: "最近错误", en: "Last error" },
+  geModeExisting: { zh: "仅绑定现有安装", en: "Bind an existing install" },
+  geModePinned: { zh: "拉取固定版本", en: "Clone a pinned version" },
+  geMode: { zh: "安装方式", en: "Install mode" },
+  geModeNote: { zh: "固定版本模式在一次点击后克隆指定 commit，需要显式打开网络拉取。", en: "The pinned mode clones one commit after a click and requires the network pull switch." },
+  geMcpTitle: { zh: "MCP 工具", en: "MCP tools" },
+  geMcpRegister: { zh: "重新注册", en: "Re-register" },
+  geMcpSync: { zh: "同步工具", en: "Sync tools" },
+  geMcpUnregister: { zh: "移除注册", en: "Unregister" },
+  geMcpRegistered: { zh: "已注册", en: "registered" },
+  geMcpOff: { zh: "未注册", en: "not registered" },
+  geToolsIdle: { zh: "启动并同步后，这里会列出已登记的工具", en: "Tools appear here after a start and a sync" },
+  geToolRead: { zh: "只读", en: "read-only" },
+  geToolWrite: { zh: "写操作 · 需批准", en: "write · approval" },
+  geConfigTitle: { zh: "程序与端口（仅机主配置）", en: "Program and port (owner configured)" },
+  geSwitch: { zh: "启用全球情报地图", en: "Enable God's Eye View" },
+  geSwitchNote: { zh: "默认关闭。先保存开关与路径，再点「启动」；本节点不会在开机时自行运行它。", en: "Off by default. Save the switch and paths first, then press Start; this node never runs it at boot." },
+  gePath: { zh: "安装目录", en: "Install directory" },
+  gePathPlaceholder: { zh: "~/Tools/gods-eye-view", en: "~/Tools/gods-eye-view" },
+  gePathNote: { zh: "绝对路径或以 ~ 开头；系统目录、钥匙串目录与本节点数据目录会被拒绝。", en: "An absolute or ~ path; system, Keychain and node-data directories are refused." },
+  geVersion: { zh: "固定版本", en: "Pinned version" },
+  geVersionNote: { zh: "package.json 必须报告这个版本，否则拒绝启动。", en: "package.json must report exactly this version or the start is refused." },
+  gePort: { zh: "回环端口", en: "Loopback port" },
+  gePortNote: { zh: "只绑定 127.0.0.1；端口已被占用时拒绝启动。", en: "Bound to 127.0.0.1 only; an occupied port is refused." },
+  geNodePath: { zh: "Node.js 可执行文件", en: "Node.js executable" },
+  geNodePlaceholder: { zh: "留空则自动检测", en: "empty means auto-detect" },
+  geNodeNote: { zh: "需要 Node.js 20 或更新；留空时用 PATH 中的 node。", en: "Requires Node.js 20 or newer; empty uses node from PATH." },
+  gePull: { zh: "允许一次性拉取固定 commit", en: "Allow a one-time pinned clone" },
+  gePullNote: { zh: "默认关闭；只在你点击「安装」时联网，并用 40 位 commit 校验 HEAD。", en: "Off by default; only the Install click dials, and HEAD must equal the 40-hex commit." },
+  geRepo: { zh: "源码仓库（https）", en: "Source repository (https)" },
+  geRepoNote: { zh: "不允许凭据、查询参数或片段。", en: "No credentials, query or fragment." },
+  geRef: { zh: "固定 tag 或分支", en: "Pinned tag or branch" },
+  geRefNote: { zh: "与 commit 一起使用；标签移动不会改变实际运行的内容。", en: "Used with the commit; a moved tag cannot change what runs." },
+  geCommit: { zh: "固定 commit（40 位）", en: "Pinned commit (40 hex)" },
+  geCommitNote: { zh: "克隆后 HEAD 必须与之完全一致。", en: "The clone's HEAD must equal it exactly." },
+  geVerify: { zh: "校验安装", en: "Verify install" },
+  geInstall: { zh: "安装 / 校验", en: "Install / verify" },
+  geInstallNote: { zh: "现有模式只校验不拉取；固定版本模式会先克隆到临时目录，校验通过后才替换目标。", en: "Existing mode only verifies; pinned mode clones into a staging directory and replaces the target only after it verifies." },
+  geCredTitle: { zh: "可选数据源（macOS 钥匙串）", en: "Optional feeds (macOS Keychain)" },
+  geCredNote: { zh: "值只写入钥匙串，设置文件只记引用；启动时作为环境变量交给本机程序，绝不出现在页面、审计或快照中。", en: "Values go only to the Keychain; settings hold references, which become launch-time environment variables and never appear in the page, the audit or a snapshot." },
+  geCredStore: { zh: "存入钥匙串", en: "Store in Keychain" },
+  geCredMissing: { zh: "未存入", en: "not stored" },
+  geSourceOn: { zh: "启动时交给本机程序", en: "hand to the local program at launch" },
+  geCredEmpty: { zh: "凭据为空", en: "The credential is empty" },
+  geCredStored: { zh: "已存入钥匙串", en: "Stored in the Keychain" },
+  geCredFailed: { zh: "凭据存入失败", en: "The credential was not stored" },
+  geActionFailed: { zh: "操作失败", en: "The action failed" },
+  geActionDone: { zh: "已受理", en: "Accepted" },
+  geSaveFirst: { zh: "请先保存配置，再启动", en: "Save the settings before starting" },
   dcStateFailed: { zh: "失败", en: "failed" },
   dcStateOff: { zh: "已停用", en: "off" },
   dcLabel: { zh: "名称", en: "label" },
@@ -3938,6 +4066,210 @@ function hvStatus() {
    reply carries only the Keychain reference, and nothing is written into `S.form`, so the
    settings document the save bar posts can never carry a token. Implemented as `hvStore`,
    next to the draft holder it reads. */
+/* --------------------------------------------------- global intelligence map */
+/* One card, two sources of truth: the saved document says what the owner asked for,
+   the snapshot says what the node measured. Every button posts one verb; the bridge
+   re-checks each precondition, so a stale page cannot start a program that was just
+   switched off. Credentials follow the hub card's one-way path: the value leaves in a
+   POST body and only a Keychain reference comes back. */
+var GE_BUSY = false;
+var GE_SOURCES = [
+  { id: "aisstream", env: "AISSTREAM_API_KEY" },
+  { id: "opensky-client-id", env: "OPENSKY_CLIENT_ID" },
+  { id: "opensky-client-secret", env: "OPENSKY_CLIENT_SECRET" }
+];
+function geSaved() { return (S.snap && S.snap.settings && S.snap.settings.godsEye) || {}; }
+function geSnap() { return (S.snap && S.snap.godsEye) || {}; }
+function geConfig() {
+  if (!S.form) { return null; }
+  if (!S.form.godsEye) { S.form.godsEye = clone(geSaved()); }
+  var cfg = S.form.godsEye;
+  if (cfg.mode !== "pinnedSource") { cfg.mode = "existing"; }
+  if (!cfg.pinnedVersion) { cfg.pinnedVersion = "1.0.0"; }
+  if (!cfg.port) { cfg.port = 18931; }
+  cfg.credentials = cfg.credentials || {};
+  return cfg;
+}
+function geCredSlot(id) {
+  var cfg = geConfig();
+  if (!cfg) { return { enabled: false, reference: "" }; }
+  if (!cfg.credentials[id]) { cfg.credentials[id] = { enabled: false, reference: "" }; }
+  return cfg.credentials[id];
+}
+function geModeLabel(mode) { return mode === "pinnedSource" ? t("geModePinned") : t("geModeExisting"); }
+function geToolLabel(safety) { return safety === "readOnly" ? t("geToolRead") : t("geToolWrite"); }
+function geRow(label, value, mono) {
+  return h("div", { cls: "list__row" }, [
+    h("span", { cls: "pv-line", text: label }),
+    h("span", { cls: "pv-meta" + (mono ? " mono" : ""), text: String(value === undefined || value === null || value === "" ? "—" : value) })
+  ]);
+}
+function renderGodsEye() {
+  var snap = geSnap();
+  var badge = el("ge-badge");
+  if (badge) {
+    badge.textContent = snap.enabled ? (snap.running ? t("geBadgeRunning") : t("geBadgeOn")) : t("geBadgeOff");
+    badge.className = "tag" + (snap.enabled && (snap.running || snap.installVerified) ? " tag--ok" : " tag--off");
+  }
+  var stats = el("ge-stats");
+  if (stats) {
+    clear(stats);
+    stats.appendChild(statCard("geStatNode", snap.nodeOK ? "v" + String(snap.nodeMajor || "") : t("geAbsent"),
+      String(snap.nodeVersion || snap.nodeDetail || ""), true));
+    stats.appendChild(statCard("geStatInstall",
+      snap.installVerified ? String(snap.installedVersion || snap.pinnedVersion || "") : t("geUnverified"),
+      snap.installVerified ? "" : String(snap.installDetail || ""), true));
+    stats.appendChild(statCard("geStatPort", String(snap.bindHost || "127.0.0.1") + ":" + String(snap.port || 0),
+      snap.running ? t("geRunning") : t("geStopped"), true));
+    stats.appendChild(statCard("geStatHealth",
+      snap.healthStatus === null || snap.healthStatus === undefined ? "—" : String(snap.healthStatus),
+      snap.lastHealthAt ? pvWhen(snap.lastHealthAt) : "", true));
+  }
+  var state = el("ge-state");
+  if (state) {
+    clear(state);
+    state.appendChild(geRow(t("geStatePath"), snap.installPath || t("geNoPath"), true));
+    state.appendChild(geRow(t("geStateMode"), geModeLabel(snap.mode) + " · " + String(snap.pinnedVersion || ""), false));
+    state.appendChild(geRow(t("geStateProcess"),
+      snap.running ? "pid " + String(snap.pid || "") + (snap.startedAt ? " · " + pvWhen(snap.startedAt) : "") : t("geStopped"), false));
+    state.appendChild(geRow(t("geStateVerified"),
+      snap.installVerified
+        ? String(snap.installDetail || "") + (snap.verifiedAt ? " · " + pvWhen(snap.verifiedAt) : "")
+        : t("geUnverified"), false));
+    if (snap.lastError) { state.appendChild(geRow(t("geStateError"), String(snap.lastError).slice(0, 240), false)); }
+  }
+  setText("ge-bound", String(snap.boundary || ""));
+  setText("ge-policy", String(snap.dataPolicy || ""));
+  setText("ge-licence", String(snap.licence || ""));
+  var mcpTag = el("ge-mcp-tag");
+  if (mcpTag) {
+    mcpTag.textContent = snap.mcpRegistered ? t("geMcpRegistered") : t("geMcpOff");
+    mcpTag.className = "tag" + (snap.mcpRegistered ? " tag--ok" : " tag--off");
+  }
+  var tools = el("ge-tools");
+  if (tools) {
+    clear(tools);
+    var rows = snap.mcpTools || [];
+    if (!rows.length) { tools.appendChild(h("div", { cls: "empty", text: t("geToolsIdle") })); }
+    rows.forEach(function (row) {
+      var readOnly = row.safety === "readOnly";
+      tools.appendChild(h("div", { cls: "list__row" }, [
+        h("span", { cls: "dot dot--" + (readOnly ? "ok" : "bad") }),
+        h("span", { cls: "pv-line mono", text: String(row.name || "") }),
+        pvTag(geToolLabel(row.safety), readOnly ? "ok" : "warn")
+      ]));
+    });
+  }
+  var mcpNote = el("ge-mcp-note");
+  if (mcpNote) { mcpNote.textContent = String(snap.mcpDetail || ""); }
+}
+function geModeSelect(cfg) {
+  var select = h("select");
+  [["existing", t("geModeExisting")], ["pinnedSource", t("geModePinned")]].forEach(function (pair) {
+    select.appendChild(h("option", { value: pair[0], text: pair[1] }));
+  });
+  select.value = cfg.mode === "pinnedSource" ? "pinnedSource" : "existing";
+  select.addEventListener("change", function () { cfg.mode = select.value; markDirty(); });
+  return select;
+}
+function buildGodsEyeControls() {
+  var host = el("ge-switch"), fields = el("ge-fields"), cfg = geConfig();
+  if (!cfg) { return; }
+  if (host) {
+    clear(host);
+    host.appendChild(checkField("geSwitch", function () { return cfg.enabled; },
+      function (value) { cfg.enabled = value; }));
+  }
+  if (!fields) { return; }
+  clear(fields);
+  fields.appendChild(fieldWrap("geMode", geModeSelect(cfg), note(t("geModeNote"))));
+  fields.appendChild(textField("gePath", function () { return cfg.installPath; },
+    function (value) { cfg.installPath = value; }, "gePathPlaceholder", "gePathNote"));
+  fields.appendChild(textField("geVersion", function () { return cfg.pinnedVersion; },
+    function (value) { cfg.pinnedVersion = value; }, null, "geVersionNote"));
+  fields.appendChild(numField("gePort", function () { return cfg.port || 18931; },
+    function (value) { cfg.port = value; }, 1024, 65535, t("gePortNote")));
+  fields.appendChild(textField("geNodePath", function () { return cfg.nodePath; },
+    function (value) { cfg.nodePath = value; }, "geNodePlaceholder", "geNodeNote"));
+  fields.appendChild(urlField("geRepo", function () { return cfg.repositoryURL; },
+    function (value) { cfg.repositoryURL = value; }, "https://github.com/", "geRepoNote"));
+  fields.appendChild(textField("geRef", function () { return cfg.pinnedRef; },
+    function (value) { cfg.pinnedRef = value; }, null, "geRefNote"));
+  fields.appendChild(textField("geCommit", function () { return cfg.pinnedCommit; },
+    function (value) { cfg.pinnedCommit = value; }, null, "geCommitNote"));
+  fields.appendChild(checkField("gePull", function () { return cfg.allowSourcePull; },
+    function (value) { cfg.allowSourcePull = value; }));
+}
+function renderGodsEyeCredentials() {
+  var host = el("ge-creds"), cfg = geConfig(), snap = geSnap();
+  if (!host || !cfg) { return; }
+  clear(host);
+  var byID = {};
+  (snap.credentials || []).forEach(function (row) { byID[String(row.id || "")] = row; });
+  GE_SOURCES.forEach(function (source) {
+    var row = byID[source.id] || {};
+    var slot = geCredSlot(source.id);
+    var input = h("input", { type: "password", spellcheck: "false", autocomplete: "off", placeholder: source.env });
+    var store = h("button", { cls: "btn btn--tiny", text: t("geCredStore"), type: "button" });
+    store.addEventListener("click", function () { geStoreCredential(source.id, input, store); });
+    var on = h("input", { type: "checkbox" });
+    on.checked = Boolean(slot.enabled || row.enabled);
+    on.addEventListener("change", function () {
+      geCredSlot(source.id).enabled = on.checked;
+      markDirty();
+    });
+    host.appendChild(h("div", { cls: "list__row" }, [
+      h("span", { cls: "pv-line mono", text: source.env }),
+      pvTag(row.stored ? t("geCredStored") : t("geCredMissing"), row.stored ? "ok" : "off"),
+      h("label", { cls: "check" }, [on, h("span", { text: t("geSourceOn") })]),
+      input,
+      store
+    ]));
+  });
+}
+function geStoreCredential(sourceId, input, button) {
+  var secret = String(input.value || "");
+  if (!secret) { toast("warn", t("geCredEmpty")); return; }
+  if (button) { button.classList.add("is-disabled"); }
+  api(ROUTE.godsEyeCredential, { method: "POST", json: { source: sourceId, secret: secret } })
+    .then(function (reply) {
+      input.value = "";
+      if (button) { button.classList.remove("is-disabled"); }
+      var ok = Boolean(reply && reply.ok);
+      toast(ok ? "ok" : "err",
+        String((reply && reply.detail) || t(ok ? "geCredStored" : "geCredFailed")) + " · " + String((reply && reply.reference) || ""));
+      return refreshSnapshot(true);
+    })
+    .catch(function (error) {
+      input.value = "";
+      if (button) { button.classList.remove("is-disabled"); }
+      fail("geCredFailed", error);
+    });
+}
+function geInvoke(verb) {
+  if (GE_BUSY) { return; }
+  if (S.dirty) { toast("warn", t("geSaveFirst")); return; }
+  var button = el(verb === "start" ? "ge-start" : verb === "stop" ? "ge-stop" : verb === "health" ? "ge-health" : null);
+  GE_BUSY = true;
+  if (button) { button.classList.add("is-disabled"); }
+  function done() {
+    GE_BUSY = false;
+    if (button) { button.classList.remove("is-disabled"); }
+  }
+  api(ROUTE.godsEyeControl, { method: "POST", json: { verb: verb } }).then(function (report) {
+    done();
+    if (report && report.godsEye) { S.snap.godsEye = report.godsEye; }
+    renderGodsEye();
+    var ok = Boolean(report && report.ok);
+    var outcome = String((report && report.outcome) || "");
+    toast(ok ? "ok" : outcome === "disabled" ? "warn" : "err",
+      String((report && report.detail) || t(ok ? "geActionDone" : "geActionFailed")));
+    return refreshSnapshot(true);
+  }).catch(function (error) { done(); fail("geActionFailed", error); });
+}
+function geStart() { geInvoke("start"); }
+function geStop() { geInvoke("stop"); }
+function geHealth() { geInvoke("health"); }
 function renderStep5() {
   ensureForm(S.snap);
   renderHubStats();
@@ -3952,6 +4284,9 @@ function renderStep5() {
   renderDiscoverPanel();
   buildDiscoverControls();
   renderDiscoverSources();
+  renderGodsEye();
+  buildGodsEyeControls();
+  renderGodsEyeCredentials();
   renderSaveBar();
 }
 function renderHubStats() {
@@ -5240,6 +5575,10 @@ var PPX = {
   dcRemoveFeed: dcRemoveFeed,
   dcAddMcp: dcAddMcp,
   dcRemoveMcp: dcRemoveMcp,
+  geStart: geStart,
+  geStop: geStop,
+  geHealth: geHealth,
+  geControl: geInvoke,
   windowAdd: windowAdd,
   windowRemove: windowRemove,
   mountAdd: mountAdd,
@@ -5904,6 +6243,34 @@ public actor LocalWebConsoleServer {
             let line = text.hasPrefix(NodeWire.commandPrefix) ? text : NodeWire.commandPrefix + text
             return try json(await facade.submitWireCommand(line))
 
+        case ConsoleRoute.godsEyeControl:
+            // Console-only. The verb allow-list lives in the bridge, so the route and
+            // the page cannot disagree about what a click may ask for.
+            let body: WEBGodsEyeControlRequest = try decode(WEBGodsEyeControlRequest.self, from: request)
+            let verb = body.verb.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard GodsEyeViewBridge.supportedVerbs.contains(verb) else {
+                throw WEBConsoleError.badEngine("未知控制指令 / unknown control verb: \(verb)")
+            }
+            return try json(await facade.godsEyeControl(verb: verb))
+
+        case ConsoleRoute.godsEyeCredential:
+            // Console-only, like `/api/hub/credential`: the value is handed straight to
+            // the store and never echoed. The reply is the reference.
+            let body: WEBGodsEyeCredentialRequest = try decode(WEBGodsEyeCredentialRequest.self, from: request)
+            let source = body.source.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard GodsEyeDataSource(rawValue: source) != nil, !body.secret.isEmpty else {
+                throw WEBConsoleError.badEngine("数据源与凭据均需填写 / source and credential must both be present")
+            }
+            let outcome = await facade.storeGodsEyeCredential(sourceID: source, secret: body.secret)
+            return try json(WEBGodsEyeCredentialResponse(
+                ok: outcome.ok,
+                detail: outcome.fields["detail"]?.stringValue
+                    ?? outcome.fields["refusal"]?.stringValue
+                    ?? (outcome.ok ? "已存入 / stored" : "未存入 / not stored"),
+                reference: outcome.fields["reference"]?.stringValue,
+                status: outcome.status
+            ))
+
         default:
             throw WEBConsoleError.notFound(path)
         }
@@ -6205,6 +6572,24 @@ public actor LocalWebConsoleServer {
     /// `POST /api/update/decision` — only the two owner verbs. `check` takes no
     /// body: there is nothing for the page to choose.
     struct WEBUpdateDecisionRequest: Codable { let verb: String }
+
+    /// `POST /api/godseye/control` — one card action. The verb is checked against
+    /// the bridge's own list here and again inside `control`, so an unknown action
+    /// dies at the route boundary.
+    struct WEBGodsEyeControlRequest: Codable { let verb: String }
+
+    /// `POST /api/godseye/credential` — the value goes in, a reference comes out.
+    /// The source id is one of the fixed `GodsEyeDataSource` raw values.
+    struct WEBGodsEyeCredentialRequest: Codable {
+        let source: String
+        let secret: String
+    }
+    struct WEBGodsEyeCredentialResponse: Encodable {
+        let ok: Bool
+        let detail: String
+        let reference: String?
+        let status: Int
+    }
 
     // MARK: - Dispatch outcome
 

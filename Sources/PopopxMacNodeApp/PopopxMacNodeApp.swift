@@ -168,6 +168,13 @@ public actor NodeConsole: NodeConsoleFacade {
     private var updateCenter: UpdateCenter?
     private var discoverCenter: DiscoverCenter?
 
+    /// Owns the local God's Eye View process and its one MCP registration. Built at
+    /// `start()`; until then the card reads the saved document and nothing runs.
+    private var godsEye: GodsEyeViewBridge?
+    /// Its own store instance: the Keychain service is shared, and in a bare
+    /// executable this is the same process-volatile answer the hub bridges get.
+    private let godsEyeSecrets: any HubSecretStoring = HubSecrets.makeStore()
+
     private var consoleURLString = ""
     /// Short node fingerprint, used only inside minted call links and UIDs.
     private var nodeReference = ""
@@ -201,13 +208,21 @@ public actor NodeConsole: NodeConsoleFacade {
         consoleURLString = consoleURL
         await signaling.start()
         let identity = await signaling.identity()
-        let current = await settings.current()
+        var current = await settings.current()
+        // The card's association is an MCP registration, so switching the card on is
+        // also a decision to let the MCP tier run. The writer applies it once, where
+        // it is visible in the settings document, not only in this process's memory.
+        let synchronised = Self.synchronisingGodsEyeMCP(current)
+        if synchronised != current {
+            current = await settings.apply(synchronised)
+        }
         await configurePrivacy(
             from: current,
             nodeReference: Digest.short(Data(identity.nodeId.utf8), length: 8)
         )
         await configureUpdates(from: current)
         await configureDiscover(from: current)
+        await configureGodsEye(from: current)
         guard routerTask == nil else { return }
         routerTask = Task { [weak self] in
             guard let self else { return }
@@ -233,6 +248,7 @@ public actor NodeConsole: NodeConsoleFacade {
         routerTask = nil
         clockTask?.cancel()
         clockTask = nil
+        await godsEye?.shutdown()
         await signaling.stop()
         await hub.publish(.system, "节点已停止 / node stopped", level: .warning)
     }
@@ -352,6 +368,14 @@ public actor NodeConsole: NodeConsoleFacade {
             bridges.timezoneIdentifier = TimeZone.current.identifier
         }
         let hubs = settings.hubs.normalised
+        // The association is an MCP registration: a Gods Eye View card that is on
+        // while the MCP tier is off would register a server nobody can reach, so the
+        // effective config carries the switch even if a hand edit dropped it. The
+        // settings writer persists the same decision on save.
+        var effectiveHubs = hubs
+        if settings.godsEyeConfig.enabled, !effectiveHubs.allowMcpBridge {
+            effectiveHubs.allowMcpBridge = true
+        }
         // The file is re-read on every settings save, never watched: an owner edits
         // `config/mcp_servers.json` with an editor and then clicks 「重新载入」 or toggles a
         // switch. A watcher would change what this node is willing to execute with no click.
@@ -367,19 +391,21 @@ public actor NodeConsole: NodeConsoleFacade {
         )
         if let stack = privacy {
             await stack.engine.applyConfig(bridges, sandbox: sandbox)
-            await stack.engine.applyHubConfig(hubs)
+            await stack.engine.applyHubConfig(effectiveHubs)
             await stack.executor.update(gateway: stack.gateway, sandbox: sandbox)
-            await discovery.update(config: hubs, gateway: stack.gateway, sandbox: sandbox)
+            await discovery.update(config: effectiveHubs, gateway: stack.gateway, sandbox: sandbox)
             return
         }
-        let hubAsked = hubs.allowMcpBridge || hubs.allowSmartHomeBridge || hubs.allowCalDavBridge
-            || !hubs.discovery.lanTargets.isEmpty || hubs.calDav.servers.contains { $0.enabled }
+        let hubAsked = effectiveHubs.allowMcpBridge || effectiveHubs.allowSmartHomeBridge
+            || effectiveHubs.allowCalDavBridge
+            || !effectiveHubs.discovery.lanTargets.isEmpty
+            || effectiveHubs.calDav.servers.contains { $0.enabled }
         guard bridges.allowCalendarAccess || bridges.allowWorkspaceRead || bridges.allowWorkspaceWrite
             || !bridges.workspaceDirectories.isEmpty || hubAsked else {
             // Nothing is switched on yet, so nothing is constructed: no event store,
             // no key file, no ledger. A disabled bridge must cost the process
             // nothing it could later be accused of holding.
-            await discovery.update(config: hubs, gateway: nil, sandbox: sandbox)
+            await discovery.update(config: effectiveHubs, gateway: nil, sandbox: sandbox)
             return
         }
         let gateway = EventKitCalendarGateway()
@@ -392,9 +418,12 @@ public actor NodeConsole: NodeConsoleFacade {
         )
         await ledger.setNotificationsEnabled(bridges.notifyOnProposal)
         let secrets = HubSecrets.makeStore()
-        let mcp = MCPBridge(registry: hubRegistry, ledger: ledger, config: hubs)
-        let smartHome = SmartHomeBridge(config: hubs, secrets: secrets, ledger: ledger)
-        let calDav = CalDavBridge(config: hubs, secrets: secrets)
+        let mcp = MCPBridge(
+            registry: hubRegistry, ledger: ledger, config: effectiveHubs,
+            toolGate: GodsEyeViewToolGate()
+        )
+        let smartHome = SmartHomeBridge(config: effectiveHubs, secrets: secrets, ledger: ledger)
+        let calDav = CalDavBridge(config: effectiveHubs, secrets: secrets)
         let engine = PrivacyToolEngine(
             config: bridges,
             gateway: gateway,
@@ -409,7 +438,7 @@ public actor NodeConsole: NodeConsoleFacade {
         // After the ledger has this executor, so an approval executed from the phone finds the
         // hub bridges attached rather than failing with "桥接未装配".
         await engine.attachHubBridges()
-        await discovery.update(config: hubs, gateway: gateway, sandbox: sandbox)
+        await discovery.update(config: effectiveHubs, gateway: gateway, sandbox: sandbox)
         privacy = PrivacyStack(
             gateway: gateway,
             executor: executor,
@@ -480,6 +509,36 @@ public actor NodeConsole: NodeConsoleFacade {
 
     private func currentNodeID() async -> String {
         await signaling.identity().nodeId
+    }
+
+    // MARK: God's Eye View
+
+    /// Switches the card on ⇒ the MCP tier is available to carry the association.
+    /// The reverse is not implied: switching the card off leaves the owner's other
+    /// MCP servers exactly as they were.
+    private static func synchronisingGodsEyeMCP(_ settings: NodeSettings) -> NodeSettings {
+        guard settings.godsEyeConfig.enabled, !settings.hubs.allowMcpBridge else { return settings }
+        var hubs = settings.hubs
+        hubs.allowMcpBridge = true
+        return settings.withHubs(hubs)
+    }
+
+    /// Built once and re-configured in place, like the update centre: the bridge owns
+    /// a verified-install cache and the running process, and replacing the actor on a
+    /// settings save would lose both. The MCP bridge is handed in on every update
+    /// because the privacy stack may have been rebuilt with a new ledger.
+    private func configureGodsEye(from settings: NodeSettings) async {
+        let config = settings.godsEyeConfig.normalised
+        if let godsEye {
+            await godsEye.update(config: config, mcp: privacy?.mcp)
+            return
+        }
+        godsEye = GodsEyeViewBridge(
+            config: config,
+            registry: hubRegistry,
+            mcp: privacy?.mcp,
+            secrets: godsEyeSecrets
+        )
     }
 
     private func discoverMCPText(_ source: DiscoverMCPSource) async -> Result<String, DiscoverMCPFailure> {
@@ -577,6 +636,19 @@ public actor NodeConsole: NodeConsoleFacade {
             intervalMinutes: config.intervalMinutes,
             boundary: DiscoverCenter.boundaryText
         )
+    }
+
+    /// Polled by every open console tab. The bridge answers from cached measurements
+    /// and starts at most one background health probe, so this never waits on a socket.
+    private func godsEyeSnapshotValue() async -> GodsEyeViewSnapshot {
+        guard let godsEye else {
+            var snapshot = GodsEyeViewSnapshot.disabled
+            let config = (await settings.current()).godsEyeConfig
+            snapshot.enabled = config.enabled
+            snapshot.pinnedVersion = config.pinnedVersion
+            return snapshot
+        }
+        return await godsEye.snapshot()
     }
 
     /// The phone card goes out with detection, not with approval: it carries the
@@ -897,7 +969,8 @@ public actor NodeConsole: NodeConsoleFacade {
             eventsBacklog: Array(backlog.suffix(60)),
             privacy: await privacySnapshot(saved: current),
             update: await updateSnapshotValue(),
-            discover: await discoverSnapshotValue()
+            discover: await discoverSnapshotValue(),
+            godsEye: await godsEyeSnapshotValue()
         )
     }
 
@@ -987,12 +1060,16 @@ public actor NodeConsole: NodeConsoleFacade {
         merged.sentinel.lastLockAt = existing.sentinel.lastLockAt
         merged.ark.lastHeartbeatAt = existing.ark.lastHeartbeatAt
         merged.ark.releasedAt = existing.ark.releasedAt
+        merged = Self.synchronisingGodsEyeMCP(merged)
         let stored = await settings.apply(merged)
         // The bridges read their switches, directories and timezone out of the same
         // document, so saving it is the only way they change.
         await configurePrivacy(from: stored)
         await configureUpdates(from: stored)
         await configureDiscover(from: stored)
+        // After the privacy stack: a save may have rebuilt it, and the Gods Eye
+        // bridge must hold the MCP bridge that is actually serving requests.
+        await configureGodsEye(from: stored)
         await hub.publish(
             .settings,
             "配置已保存（修订 \(stored.revision)）/ settings saved",
@@ -1307,6 +1384,62 @@ public actor NodeConsole: NodeConsoleFacade {
             payload: ["outcome": .string(report.outcome), "items": .int(report.itemCount)]
         )
         return report
+    }
+
+    /// One owner click on the 「全球情报地图」 card. Every verb still passes the
+    /// bridge's own switch checks; this method only records that the click happened.
+    public func godsEyeControl(verb: String) async -> GodsEyeControlReport {
+        guard let godsEye else {
+            return GodsEyeControlReport(
+                outcome: verb.isEmpty ? "disabled" : verb,
+                ok: false,
+                detail: "Gods Eye View 桥未装配 / the Gods Eye View bridge is not assembled",
+                godsEye: .disabled
+            )
+        }
+        let report = await godsEye.control(verb: verb)
+        await hub.publish(
+            .system,
+            "全球情报地图 · \(report.outcome) → \(report.ok ? "ok" : "refused")",
+            level: report.ok ? .notice : .warning,
+            payload: ["verb": .string(report.outcome), "running": .bool(report.godsEye.running)]
+        )
+        return report
+    }
+
+    /// Console-only: the value goes to the bridge's Keychain store and only the
+    /// reference is written into the settings document. Nothing here echoes it.
+    public func storeGodsEyeCredential(sourceID: String, secret: String) async -> PrivacyToolResponse {
+        guard let godsEye else {
+            return PrivacyToolResponse.failure(503, "Gods Eye View 桥未装配 / the bridge is not assembled")
+        }
+        let outcome = await godsEye.storeCredential(sourceID: sourceID, secret: secret)
+        guard case let .stored(reference) = outcome,
+              let source = GodsEyeDataSource(rawValue: sourceID) else {
+            if case let .refused(reason) = outcome {
+                return PrivacyToolResponse.failure(400, reason)
+            }
+            return PrivacyToolResponse.failure(400, "凭据未存入 / the credential was not stored")
+        }
+        let current = await settings.current()
+        var config = current.godsEyeConfig
+        config.credentials[source.rawValue] = GodsEyeCredentialSlot(enabled: true, reference: reference)
+        let stored = await settings.apply(current.withGodsEye(config))
+        await godsEye.update(config: stored.godsEyeConfig, mcp: privacy?.mcp)
+        await hub.publish(
+            .system,
+            "全球情报地图凭据 · \(source.rawValue) 已存入钥匙串 / credential stored in the Keychain",
+            level: .success,
+            payload: ["source": .string(source.rawValue), "reference": .string(reference)]
+        )
+        return PrivacyToolResponse(ok: true, status: 200, fields: [
+            "ok": .bool(true),
+            "source": .string(source.rawValue),
+            "reference": .string(reference),
+            "stored": .bool(true),
+            "revision": .int(stored.revision),
+            "detail": .string("已加密存入 macOS 钥匙串，设置文件仅记录引用 / stored encrypted in the Keychain; the settings document holds the reference only")
+        ])
     }
 
     /// Delegates to the wire parser in the contract so the console, the bridge and

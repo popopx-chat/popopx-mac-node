@@ -24,6 +24,16 @@
 
 import Foundation
 
+/// A bridge-specific second opinion on a tool's tier.
+///
+/// The contract is one-way: the bridge takes the stricter of this answer and the
+/// server's own hint, so a gate can turn a read into a write but never the reverse.
+/// It exists because one integration (God's Eye View) has a canvas where `mark_route`
+/// is a shared write even when a server advertises it as a harmless operation.
+public protocol MCPToolGate: Sendable {
+    func effectiveSafety(serverID: String, tool: MCPTool) -> MCPToolSafety
+}
+
 /// The console's row for one registered server.
 public struct MCPServerCard: Codable, Sendable, Equatable {
     public var id: String
@@ -109,6 +119,9 @@ public actor MCPBridge {
     private let registry: MCPServerRegistry
     private let ledger: PrivacyProposalLedger
     private var config: HubConfig
+    /// Optional, and consulted through `effectiveSafety` only. It cannot downgrade a
+    /// tool the protocol already called mutating.
+    private let toolGate: MCPToolGate?
     /// How a server becomes a channel. Injectable so the whole gate — including the
     /// mutating-tool refusal — is testable without spawning a process or binding a socket.
     private let makeLink: @Sendable (MCPServerConfig, [String]) -> MCPLink?
@@ -121,6 +134,7 @@ public actor MCPBridge {
         registry: MCPServerRegistry,
         ledger: PrivacyProposalLedger,
         config: HubConfig = .disabled,
+        toolGate: MCPToolGate? = nil,
         linkFactory: @escaping @Sendable (MCPServerConfig, [String]) -> MCPLink? = { spec, allowed in
             MCPBridge.defaultLink(spec: spec, allowedCommands: allowed)
         }
@@ -128,6 +142,7 @@ public actor MCPBridge {
         self.registry = registry
         self.ledger = ledger
         self.config = config
+        self.toolGate = toolGate
         self.makeLink = linkFactory
     }
 
@@ -161,6 +176,7 @@ public actor MCPBridge {
             let rejection = spec.acceptance(inside: document.allowedCommands)
             let client = clients[spec.id]
             let tools = listedTools[spec.id] ?? []
+            let mutating = tools.filter { safety(of: $0, serverID: spec.id) == .mutating }.count
             cards.append(MCPServerCard(
                 id: spec.id,
                 label: spec.displayName,
@@ -168,8 +184,8 @@ public actor MCPBridge {
                 enabled: spec.enabled && config.allowMcpBridge,
                 connected: client != nil && !tools.isEmpty,
                 toolCount: tools.count,
-                readOnlyCount: tools.filter { $0.isReadOnly }.count,
-                mutatingCount: tools.filter { !$0.isReadOnly }.count,
+                readOnlyCount: tools.count - mutating,
+                mutatingCount: mutating,
                 reason: rejection ?? (spec.enabled ? "" : "已停用 / disabled")
             ))
         }
@@ -182,14 +198,15 @@ public actor MCPBridge {
         guard let tools = await loadTools(serverID: serverID) else { return [] }
         let allowed = await registry.server(id: serverID)?.allowedTools ?? []
         return tools.map { tool in
-            MCPToolCard(
+            let tier = safety(of: tool, serverID: serverID)
+            return MCPToolCard(
                 serverID: serverID,
                 name: tool.name,
                 title: tool.title.isEmpty ? tool.name : tool.title,
                 summary: String(tool.description.prefix(160)),
-                safety: tool.safety.rawValue,
-                requiresApproval: tool.safety == .mutating,
-                permitted: Self.permits(tool: tool, allowed: allowed)
+                safety: tier.rawValue,
+                requiresApproval: tier == .mutating,
+                permitted: Self.permits(tool: tool, allowed: allowed, safety: tier)
             )
         }
     }
@@ -244,7 +261,8 @@ public actor MCPBridge {
             ))
             return .refused("服务器未提供该工具 / the server did not list tool: \(toolName)")
         }
-        guard Self.permits(tool: tool, allowed: spec.allowedTools) else {
+        let tier = safety(of: tool, serverID: serverID)
+        guard Self.permits(tool: tool, allowed: spec.allowedTools, safety: tier) else {
             await ledger.record(PrivacyAuditEntry(
                 domain: PrivacyDomain.mcp.rawValue,
                 action: PrivacyProposalAction.invoke.rawValue,
@@ -262,7 +280,7 @@ public actor MCPBridge {
             destination: Self.describe(spec)
         )
 
-        if tool.safety == .readOnly {
+        if tier == .readOnly {
             guard let result = await run(payload: payload, allowMutating: false) else {
                 return .refused("调用失败 / the call failed: \(lastFailureText())")
             }
@@ -330,6 +348,18 @@ public actor MCPBridge {
         lastFailure = ""
     }
 
+    public func isEnabled() -> Bool { config.allowMcpBridge }
+
+    /// Drops one server's session and cached tool list. The Gods Eye bridge calls this
+    /// when its local instance stops or moves port: a cached channel to a dead base URL
+    /// must not keep answering "connected" in the console.
+    public func disconnect(serverID: String) async {
+        if let client = clients.removeValue(forKey: serverID) {
+            await client.shutdown()
+        }
+        listedTools.removeValue(forKey: serverID)
+    }
+
     /// Where a call is going, in the words the owner typed in the config. `stdio` shows the
     /// allow-listed command; HTTP shows the validated origin, never the raw URL, so a
     /// userinfo or query component cannot ride onto a card.
@@ -345,10 +375,21 @@ public actor MCPBridge {
     // MARK: - Internals
 
     /// `allowedTools` is a *widen-only* list: empty means every read-only tool the server
-    /// advertised, and a mutating tool is reachable only when it is named there.
-    static func permits(tool: MCPTool, allowed: [String]) -> Bool {
-        guard !allowed.isEmpty else { return tool.safety == .readOnly }
+    /// advertised, and a mutating tool is reachable only when it is named there. The tier
+    /// passed in is the effective one, so a gate that tightened a read to a write cannot be
+    /// dodged by an empty list.
+    static func permits(tool: MCPTool, allowed: [String], safety: MCPToolSafety? = nil) -> Bool {
+        let tier = safety ?? tool.safety
+        guard !allowed.isEmpty else { return tier == .readOnly }
         return allowed.contains { $0.caseInsensitiveCompare(tool.name) == .orderedSame }
+    }
+
+    /// The stricter of the server's own hint and any bridge-specific gate.
+    private func safety(of tool: MCPTool, serverID: String) -> MCPToolSafety {
+        guard let toolGate else { return tool.safety }
+        let gated = toolGate.effectiveSafety(serverID: serverID, tool: tool)
+        if tool.safety == .mutating || gated == .mutating { return .mutating }
+        return .readOnly
     }
 
     private func client(for spec: MCPServerConfig, allowed: [String]) async -> MCPClient? {
