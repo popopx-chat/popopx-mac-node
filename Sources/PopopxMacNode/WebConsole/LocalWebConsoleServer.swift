@@ -1130,6 +1130,86 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
     </div>
   </div>
 
+  <div class="grid grid--split" style="margin-top:12px">
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="upTitle"></h3>
+          <span class="tag" id="up-badge">—</span>
+        </div>
+        <p class="panel__sub" data-i18n="upDesc"></p>
+        <div class="grid grid--stats" id="up-stats"></div>
+        <div class="pv" id="up-pending"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--mini" id="up-check" onclick="PPX.upCheck()" data-i18n="upCheck"></button>
+        </div>
+        <p class="field__note" id="up-bound"></p>
+      </section>
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="dcFeedTitle"></h3>
+          <span class="tag" id="dc-feed-tag">0</span>
+        </div>
+        <div class="grid grid--stats" id="dc-stats"></div>
+        <div class="list" id="dc-list"><div class="empty" data-i18n="dcEmpty"></div></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--mini" id="dc-refresh" onclick="PPX.dcRefresh()" data-i18n="dcRefresh"></button>
+        </div>
+        <p class="field__note" data-i18n="dcRefreshNote"></p>
+      </section>
+    </div>
+
+    <div class="stack">
+      <section class="panel">
+        <div class="panel__head"><h3 data-i18n="upConfigTitle"></h3></div>
+        <div id="up-switch"></div>
+        <p class="field__note" data-i18n="upSwitchNote"></p>
+        <hr class="hair">
+        <div class="fields" id="up-fields"></div>
+        <p class="field__note" data-i18n="upGateNote"></p>
+      </section>
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="dcConfigTitle"></h3>
+          <span class="tag" id="dc-badge">—</span>
+        </div>
+        <div id="dc-switch"></div>
+        <p class="field__note" data-i18n="dcSwitchNote"></p>
+        <hr class="hair">
+        <div class="fields" id="dc-fields"></div>
+        <hr class="hair">
+        <span class="field__label" data-i18n="dcFoldersTitle"></span>
+        <div id="dc-folders"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--tiny" id="dc-folder-add" onclick="PPX.dcAddFolder()" data-i18n="dcFolderAdd"></button>
+        </div>
+        <p class="field__note" data-i18n="dcFolderNote"></p>
+        <hr class="hair">
+        <span class="field__label" data-i18n="dcFeedsTitle"></span>
+        <div id="dc-feeds"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--tiny" id="dc-feed-add" onclick="PPX.dcAddFeed()" data-i18n="dcFeedAdd"></button>
+        </div>
+        <p class="field__note" data-i18n="dcFeedNote"></p>
+        <hr class="hair">
+        <span class="field__label" data-i18n="dcMcpTitle"></span>
+        <div id="dc-mcp"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--tiny" id="dc-mcp-add" onclick="PPX.dcAddMcp()" data-i18n="dcMcpAdd"></button>
+        </div>
+        <p class="field__note" data-i18n="dcMcpNote"></p>
+      </section>
+      <section class="panel">
+        <div class="panel__head">
+          <h3 data-i18n="dcSourcesTitle"></h3>
+          <span class="tag" id="dc-src-tag">0</span>
+        </div>
+        <div class="list" id="dc-sources"><div class="empty" data-i18n="dcSourcesIdle"></div></div>
+        <p class="field__note" data-i18n="dcSourcesNote"></p>
+      </section>
+    </div>
+  </div>
+
   <div class="savebar">
     <div class="savebar__state">
       <span class="savebar__text" id="hv-save-text" data-i18n="saved"></span>
@@ -1240,7 +1320,13 @@ var ROUTE = {
   // 「is this bridge up」, and the two would disagree about the switch.
   toolMCPStatus: "/v1/tools/mcp/status",
   toolHomeStatus: "/v1/tools/home/status",
-  toolCalDavStatus: "/v1/tools/caldav/status"
+  toolCalDavStatus: "/v1/tools/caldav/status",
+  // Signed updates and Discover are console-only actions: the check fetches a
+  // signed manifest, and the decision mints its receipt inside the node from
+  // this call, so neither a tool path nor a phone command can reach them.
+  updateCheck: "/api/update/check",
+  updateDecision: "/api/update/decision",
+  discoverRefresh: "/api/discover/refresh"
 };
 
 var LEVEL_GLYPH = { debug: "·", info: "›", notice: "•", success: "✓", warning: "!", error: "✕" };
@@ -1741,6 +1827,96 @@ var I18N = {
   hvTargetNote: { zh: "格式为 主机:端口。仅一次 TCP 连接尝试，350 毫秒超时；公网地址会被拒绝并计入上面的「被拒绝的目标」。", en: "Host and port. One TCP attempt with a 350 ms timeout; a public address is refused and counted under refused targets above." },
   hvTargetEmpty: { zh: "未列出目标：仅探测本机", en: "No target listed, so only this Mac is probed" },
   hvTargetLimit: { zh: "探测目标已达上限", en: "The probe list is at its ceiling" },
+  upTitle: { zh: "签名更新", en: "Signed updates" },
+  upDesc: { zh: "只向机主固定的一项官方清单发起 HTTPS 请求；验签失败或版本不高于当前版本时静默忽略。", en: "One owner-pinned HTTPS manifest is the only fetch; a bad signature or a version that is not newer is ignored without a card." },
+  upCheck: { zh: "检查更新", en: "Check for updates" },
+  upChecking: { zh: "检查中", en: "checking" },
+  upCheckFailed: { zh: "检查失败", en: "The check failed" },
+  upFound: { zh: "发现新版本", en: "A new version is available" },
+  upUpToDate: { zh: "已是最新版本", en: "Already current" },
+  upIgnored: { zh: "已静默忽略", en: "ignored quietly" },
+  upFailed: { zh: "更新操作失败", en: "The update action failed" },
+  upDone: { zh: "已完成", en: "done" },
+  upBadgeReady: { zh: "等你确认", en: "Awaiting you" },
+  upBadgeOn: { zh: "已启用", en: "Updates on" },
+  upBadgeIncomplete: { zh: "配置不完整", en: "Incomplete" },
+  upBadgeOff: { zh: "未启用", en: "Updates off" },
+  upCurrent: { zh: "当前版本", en: "Current version" },
+  upKey: { zh: "清单公钥指纹", en: "Manifest key" },
+  upLastCheck: { zh: "上次检查", en: "Last check" },
+  upInstalled: { zh: "已安装", en: "installed" },
+  upPendingTitle: { zh: "新版本可安装", en: "ready to install" },
+  upNoPending: { zh: "没有待处理的版本", en: "No release awaits a decision" },
+  upBuild: { zh: "构建", en: "build" },
+  upReleased: { zh: "发布日期", en: "released" },
+  upPackage: { zh: "安装包", en: "package" },
+  upSummary: { zh: "更新说明", en: "What is new" },
+  upApprove: { zh: "立即更新", en: "Update now" },
+  upSnooze: { zh: "稍后提醒", en: "Remind me later" },
+  upConfirmAgain: { zh: "再点一次确认", en: "Click again to confirm" },
+  upRefused: { zh: "已拒绝", en: "refused" },
+  upConfigTitle: { zh: "更新来源（仅机主配置）", en: "Update feed (owner configured)" },
+  upSwitchNote: { zh: "清单位置与公钥都由你填写；节点不会从清单自身的主机获取公钥，也不会跟随重定向。", en: "You supply both the manifest and the key; the node never fetches a key from the manifest host and never follows a redirect." },
+  upEnabled: { zh: "启用签名更新检查", en: "Enable signed update checks" },
+  upManifestURL: { zh: "清单地址", en: "Manifest URL" },
+  upManifestNote: { zh: "必须是 https、端口 443，且主机名与你填写的一致；重定向一律拒绝。", en: "Must be https on port 443 with exactly the host you typed; every redirect is refused." },
+  upPublicKey: { zh: "Ed25519 公钥（base64url）", en: "Ed25519 public key (base64url)" },
+  upKeyNote: { zh: "32 字节公钥；指纹显示在上面的统计里，验签只用这个值。", en: "A 32-byte key; its fingerprint appears in the stats above and verification uses only this value." },
+  upPackageHosts: { zh: "允许的安装包主机（逗号分隔）", en: "Allowed package hosts (comma separated)" },
+  upPackageNote: { zh: "清单主机始终被允许；这里只添加签名清单可能指向的额外主机，例如 CDN。", en: "The manifest host is always allowed; list only extra hosts a signed manifest may point at, such as a CDN." },
+  upInterval: { zh: "检查间隔（分钟）", en: "Check interval (minutes)" },
+  upSnoozeHours: { zh: "稍后提醒时长（小时）", en: "Snooze length (hours)" },
+  upGateNote: { zh: "检测是自动的，安装不是：在你点击「立即更新」之前，节点不会下载任何安装包；下载后先核对字节数与 SHA-256，再交给 macOS 打开。", en: "Detection is automatic, installation is not: nothing is downloaded before you press Update now, and a downloaded package is checked for byte size and SHA-256 before macOS opens it." },
+  dcFeedTitle: { zh: "最新发现", en: "Latest items" },
+  dcEmpty: { zh: "还没有条目，点「立即刷新」", en: "No items yet; press refresh" },
+  dcRefresh: { zh: "立即刷新", en: "Refresh now" },
+  dcRefreshing: { zh: "刷新中", en: "refreshing" },
+  dcRefreshFailed: { zh: "刷新失败", en: "The refresh failed" },
+  dcRefreshNote: { zh: "卡片只带可读摘要；带签名的完整载荷是 feed.json，随同一条加密会话送达，并写入本地审计日志。", en: "The card carries a readable index; the signed payload is feed.json, delivered in the same encrypted session and written to the local audit log." },
+  dcConfigTitle: { zh: "聚合配置", en: "Aggregator settings" },
+  dcSwitchNote: { zh: "默认关闭；即使打开，没有本地文件夹、RSS/JSON 源或 MCP 源时仍读作关闭。", en: "Off by default; even switched on it reads as off until a folder, feed or MCP source exists." },
+  dcEnabled: { zh: "启用发现聚合", en: "Enable the Discover aggregator" },
+  dcBadgeOn: { zh: "已启用", en: "Aggregator on" },
+  dcBadgeOff: { zh: "未启用", en: "Aggregator off" },
+  dcInterval: { zh: "刷新间隔（分钟）", en: "Refresh interval (minutes)" },
+  dcMaxItems: { zh: "每次最多条目", en: "Maximum items per run" },
+  dcFoldersTitle: { zh: "本地文件夹（只读文本）", en: "Local folders (text only)" },
+  dcFolderAdd: { zh: "添加文件夹", en: "Add folder" },
+  dcFolderNote: { zh: "只读取你主目录内的纯文本类文件；符号链接、超限文件与层级过深的位置会被跳过。", en: "Only plain-text files under your home folder are read; symlinks, oversize files and folders nested too deep are skipped." },
+  dcFolderEmpty: { zh: "未添加文件夹", en: "No folder added" },
+  dcFolderLimit: { zh: "文件夹已达上限", en: "The folder list is at its ceiling" },
+  dcFeedsTitle: { zh: "RSS / JSON 源（仅内网）", en: "RSS / JSON feeds (private network only)" },
+  dcFeedAdd: { zh: "添加源", en: "Add feed" },
+  dcFeedOn: { zh: "启用", en: "on" },
+  dcFeedNote: { zh: "公网地址在发起连接前由 EdgeBoundary 拒绝；被拒绝的源会显示在下方状态里。", en: "A public address is refused by EdgeBoundary before a socket exists and appears in the source status below." },
+  dcFeedEmpty: { zh: "未添加源", en: "No feed added" },
+  dcFeedLimit: { zh: "源已达上限", en: "The feed list is at its ceiling" },
+  dcMcpTitle: { zh: "MCP 只读源", en: "Read-only MCP sources" },
+  dcMcpAdd: { zh: "添加 MCP 源", en: "Add MCP source" },
+  dcMcpNote: { zh: "只允许只读工具；变更类工具永远不会因为聚合而被运行。", en: "Read-only tools only; a mutating tool is never run by the aggregator." },
+  dcMcpEmpty: { zh: "未添加 MCP 源", en: "No MCP source added" },
+  dcMcpLimit: { zh: "MCP 源已达上限", en: "The MCP list is at its ceiling" },
+  dcSourcesTitle: { zh: "源状态", en: "Source status" },
+  dcSourcesIdle: { zh: "尚未运行", en: "not run yet" },
+  dcSourcesNote: { zh: "每次刷新都会写入本地审计日志；推送仍走已绑定的端到端会话。", en: "Every run is written to the local audit log; delivery still uses the bound end-to-end session." },
+  dcStatItems: { zh: "条目", en: "Items" },
+  dcStatSources: { zh: "源", en: "Sources" },
+  dcStatLastRun: { zh: "上次运行", en: "Last run" },
+  dcStatDelivered: { zh: "上次推送", en: "Last delivered" },
+  dcKindFolder: { zh: "文件夹", en: "folder" },
+  dcKindRSS: { zh: "RSS / Atom", en: "RSS / Atom" },
+  dcKindJSON: { zh: "JSON 源", en: "JSON feed" },
+  dcKindMCP: { zh: "MCP", en: "MCP" },
+  dcStateOk: { zh: "正常", en: "ok" },
+  dcStateRefused: { zh: "已拒绝", en: "refused" },
+  dcStateFailed: { zh: "失败", en: "failed" },
+  dcStateOff: { zh: "已停用", en: "off" },
+  dcLabel: { zh: "名称", en: "label" },
+  dcUrl: { zh: "地址", en: "URL" },
+  dcKindField: { zh: "类型", en: "kind" },
+  dcServer: { zh: "服务器标识", en: "server id" },
+  dcTool: { zh: "工具名", en: "tool" },
+  dcArgs: { zh: "参数 JSON", en: "arguments JSON" },
   hvRemove: { zh: "移除", en: "remove" }
 };
 
@@ -3771,6 +3947,11 @@ function renderStep5() {
   renderHubTargetRows();
   renderHubStatus();
   renderHubProposals();
+  renderUpdatePanel();
+  buildUpdateControls();
+  renderDiscoverPanel();
+  buildDiscoverControls();
+  renderDiscoverSources();
   renderSaveBar();
 }
 function renderHubStats() {
@@ -4046,6 +4227,434 @@ function hvRemoveTarget(index) {
   cfg.discovery.lanTargets.splice(index, 1);
   markDirty();
   renderHubTargetRows();
+}
+
+/* ------------------------------------------ signed updates & discover feed */
+/* The update feed is the node's, not the page's. The manifest URL and public key are
+   typed here and stored in the settings document; the console never receives a receipt,
+   because the route mints it inside the node from the click itself. The four ceilings
+   are the node's numbers (`DiscoverConfig`), copied here so the page refuses to add a
+   row the node would silently drop. */
+var DC_FOLDER_LIMIT = 4;
+var DC_FEED_LIMIT = 8;
+var DC_MCP_LIMIT = 4;
+function upSaved() { return (S.snap && S.snap.settings && S.snap.settings.updates) || {}; }
+function upConfig() {
+  if (!S.form) { return null; }
+  if (!S.form.updates) { S.form.updates = clone(upSaved()); }
+  var cfg = S.form.updates;
+  cfg.packageHosts = cfg.packageHosts || [];
+  if (cfg.intervalMinutes === undefined) { cfg.intervalMinutes = 360; }
+  if (cfg.snoozeHours === undefined) { cfg.snoozeHours = 24; }
+  return cfg;
+}
+function upSnap() { return (S.snap && S.snap.update) || {}; }
+function dcSaved() { return (S.snap && S.snap.settings && S.snap.settings.discover) || {}; }
+function dcConfig() {
+  if (!S.form) { return null; }
+  if (!S.form.discover) { S.form.discover = clone(dcSaved()); }
+  var cfg = S.form.discover;
+  cfg.folders = cfg.folders || [];
+  cfg.feeds = cfg.feeds || [];
+  cfg.mcpSources = cfg.mcpSources || [];
+  if (cfg.intervalMinutes === undefined) { cfg.intervalMinutes = 60; }
+  if (cfg.maxItems === undefined) { cfg.maxItems = 20; }
+  return cfg;
+}
+function dcSnap() { return (S.snap && S.snap.discover) || {}; }
+
+function renderUpdatePanel() {
+  var upd = upSnap(), release = upd.available;
+  var badge = el("up-badge");
+  if (badge) {
+    badge.textContent = release ? t("upBadgeReady") + " " + String(release.version || "")
+      : upd.enabled ? (upd.usable ? t("upBadgeOn") : t("upBadgeIncomplete")) : t("upBadgeOff");
+    badge.className = "tag" + (release ? " tag--warn" : upd.enabled && upd.usable ? " tag--ok" : " tag--off");
+  }
+  var stats = el("up-stats");
+  if (stats) {
+    clear(stats);
+    stats.appendChild(statCard("upCurrent", String(upd.currentVersion || "—"),
+      upd.installedVersion ? t("upInstalled") + " " + String(upd.installedVersion) : "", true));
+    stats.appendChild(statCard("upKey", String(upd.keyFingerprint || "—"), String(upd.manifestHost || ""), true));
+    stats.appendChild(statCard("upLastCheck", upd.lastCheckAt ? pvWhen(upd.lastCheckAt) : t("never"), "", true));
+  }
+  var bound = el("up-bound");
+  if (bound) {
+    var lines = [String(upd.boundary || "")];
+    if (upd.lastIgnored) { lines.push(t("upIgnored") + " · " + String(upd.lastIgnored)); }
+    if (upd.lastError) { lines.push(String(upd.lastError)); }
+    bound.textContent = lines.filter(function (line) { return line.length; }).join(" · ");
+  }
+  var host = el("up-pending");
+  if (host) {
+    clear(host);
+    if (!release) { host.appendChild(h("div", { cls: "empty", text: t("upNoPending") })); }
+    else { host.appendChild(upPendingCard(upd, release)); }
+  }
+  var check = el("up-check");
+  if (check && !check.dataset.busy) { check.textContent = t("upCheck"); }
+}
+function upPendingCard(upd, release) {
+  var pkg = release.package || {};
+  var box = h("div", { cls: "pv-card is-live" });
+  box.appendChild(h("div", { cls: "pv-top" }, [
+    h("span", { cls: "pv-title", text: String(release.version || "") }),
+    pvTag(t("upPendingTitle"), "warn"),
+    upd.snoozedUntil ? pvTag(t("upSnooze") + " · " + pvWhen(upd.snoozedUntil), "off") : null
+  ]));
+  var meta = [];
+  if (release.build) { meta.push(t("upBuild") + " " + String(release.build)); }
+  if (release.releasedAt) { meta.push(t("upReleased") + " " + String(release.releasedAt)); }
+  if (pkg.sha256) { meta.push(t("upPackage") + " " + String(pkg.sha256).slice(0, 12) + " · " + bytes(pkg.size)); }
+  if (meta.length) { box.appendChild(h("div", { cls: "pv-meta", text: meta.join("  ·  ") })); }
+  var summary = release.summary || [];
+  if (summary.length) {
+    box.appendChild(h("div", { cls: "pv-meta", text: t("upSummary") }));
+    summary.slice(0, 8).forEach(function (line) {
+      box.appendChild(h("div", { cls: "pv-line", text: String(line).slice(0, 200) }));
+    });
+  }
+  var acts = h("div", { cls: "pv-acts" });
+  ["approve", "snooze"].forEach(function (verb) {
+    acts.appendChild(h("button", {
+      cls: "btn btn--mini " + (verb === "approve" ? "btn--ok" : "btn--ghost"),
+      text: verb === "approve" ? t("upApprove") : t("upSnooze"),
+      type: "button",
+      onclick: "PPX.upDecide(this, '" + verb + "')"
+    }));
+  });
+  box.appendChild(acts);
+  return box;
+}
+function buildUpdateControls() {
+  var host = el("up-switch"), fields = el("up-fields"), cfg = upConfig();
+  if (!cfg) { return; }
+  if (host) {
+    clear(host);
+    host.appendChild(checkField("upEnabled", function () { return cfg.enabled; },
+      function (value) { cfg.enabled = value; }));
+  }
+  if (!fields) { return; }
+  clear(fields);
+  fields.appendChild(urlField("upManifestURL", function () { return cfg.manifestURL; },
+    function (value) { cfg.manifestURL = value; }, "https://downloads.popopx.chat/manifest.json", "upManifestNote"));
+  fields.appendChild(textField("upPublicKey", function () { return cfg.publicKey; },
+    function (value) { cfg.publicKey = value; }, null, "upKeyNote"));
+  var hosts = h("input", {
+    type: "text", spellcheck: "false",
+    value: String((cfg.packageHosts || []).join(", ")), placeholder: "cdn.popopx.chat"
+  });
+  hosts.addEventListener("input", function () {
+    cfg.packageHosts = hosts.value.split(",")
+      .map(function (part) { return part.trim(); })
+      .filter(function (part) { return part.length; });
+    markDirty();
+  });
+  fields.appendChild(fieldWrap("upPackageHosts", hosts, note(t("upPackageNote"))));
+  fields.appendChild(numField("upInterval", function () { return cfg.intervalMinutes || 360; },
+    function (value) { cfg.intervalMinutes = value; }, 15, 10080, null));
+  fields.appendChild(numField("upSnoozeHours", function () { return cfg.snoozeHours || 24; },
+    function (value) { cfg.snoozeHours = value; }, 1, 168, null));
+}
+
+function renderDiscoverPanel() {
+  var disc = dcSnap();
+  var tag = el("dc-feed-tag");
+  if (tag) { tag.textContent = String(disc.itemCount || 0); }
+  var badge = el("dc-badge");
+  if (badge) {
+    badge.textContent = disc.enabled ? t("dcBadgeOn") : t("dcBadgeOff");
+    badge.className = "tag" + (disc.enabled ? " tag--ok" : " tag--off");
+  }
+  var stats = el("dc-stats");
+  if (stats) {
+    clear(stats);
+    stats.appendChild(statCard("dcStatItems", String(disc.itemCount || 0), "", false));
+    stats.appendChild(statCard("dcStatSources", String((disc.sources || []).length), "", true));
+    stats.appendChild(statCard("dcStatLastRun", disc.lastRunAt ? pvWhen(disc.lastRunAt) : t("never"), "", true));
+    stats.appendChild(statCard("dcStatDelivered", disc.lastDeliveredAt ? pvWhen(disc.lastDeliveredAt) : t("never"), "", true));
+  }
+  var host = el("dc-list");
+  if (!host) { return; }
+  clear(host);
+  var items = disc.items || [];
+  if (!items.length) {
+    host.appendChild(h("div", { cls: "empty", text: disc.lastError ? String(disc.lastError) : t("dcEmpty") }));
+    return;
+  }
+  items.forEach(function (item) {
+    host.appendChild(h("div", { cls: "pv-card" }, [
+      h("div", { cls: "pv-top" }, [
+        h("span", { cls: "pv-title", text: String(item.title || "—").slice(0, 160) }),
+        pvTag(String(item.sourceLabel || ""), "accent")
+      ]),
+      item.summary ? h("div", { cls: "pv-line", text: String(item.summary).slice(0, 240) }) : null,
+      h("div", { cls: "pv-meta mono", text: String(item.timestamp || "") })
+    ]));
+  });
+}
+function dcKindLabel(kind) {
+  if (kind === "folder") { return t("dcKindFolder"); }
+  if (kind === "json") { return t("dcKindJSON"); }
+  if (kind === "mcp") { return t("dcKindMCP"); }
+  if (kind === "rss") { return t("dcKindRSS"); }
+  return String(kind || "—");
+}
+function dcStateLabel(state) {
+  if (state === "ok") { return t("dcStateOk"); }
+  if (state === "refused") { return t("dcStateRefused"); }
+  if (state === "failed") { return t("dcStateFailed"); }
+  return t("dcStateOff");
+}
+function dcStateKind(state) {
+  if (state === "ok") { return "ok"; }
+  if (state === "refused" || state === "failed") { return "bad"; }
+  return "off";
+}
+function renderDiscoverSources() {
+  var host = el("dc-sources"), tag = el("dc-src-tag"), disc = dcSnap();
+  var sources = disc.sources || [];
+  if (tag) { tag.textContent = String(sources.length); }
+  if (!host) { return; }
+  clear(host);
+  if (!sources.length) { host.appendChild(h("div", { cls: "empty", text: t("dcSourcesIdle") })); return; }
+  sources.forEach(function (row) {
+    var state = String(row.state || "off");
+    host.appendChild(h("div", { cls: "list__row" }, [
+      h("span", { cls: "dot dot--" + dcStateKind(state) }),
+      h("span", { cls: "pv-line", text: String(row.label || row.id || "") }),
+      pvTag(dcKindLabel(row.kind), "accent"),
+      pvTag(dcStateLabel(state), state === "ok" ? "ok" : state === "off" ? "off" : "bad")
+    ]));
+    if (row.detail) { host.appendChild(h("div", { cls: "pv-meta", text: String(row.detail).slice(0, 240) })); }
+    host.appendChild(h("div", { cls: "pv-meta", text: t("dcStatItems") + " " + String(row.itemCount || 0) }));
+  });
+}
+function buildDiscoverControls() {
+  var host = el("dc-switch"), fields = el("dc-fields"), cfg = dcConfig();
+  if (!cfg) { return; }
+  if (host) {
+    clear(host);
+    host.appendChild(checkField("dcEnabled", function () { return cfg.enabled; },
+      function (value) { cfg.enabled = value; }));
+  }
+  if (fields) {
+    clear(fields);
+    fields.appendChild(numField("dcInterval", function () { return cfg.intervalMinutes || 60; },
+      function (value) { cfg.intervalMinutes = value; }, 15, 1440, null));
+    fields.appendChild(numField("dcMaxItems", function () { return cfg.maxItems || 20; },
+      function (value) { cfg.maxItems = value; }, 1, 60, null));
+  }
+  renderDiscoverFolders();
+  renderDiscoverFeeds();
+  renderDiscoverMCP();
+}
+function renderDiscoverFolders() {
+  var host = el("dc-folders"), cfg = dcConfig();
+  if (!host || !cfg) { return; }
+  clear(host);
+  cfg.folders.forEach(function (item, index) {
+    var input = h("input", { type: "text", spellcheck: "false", value: String(item), placeholder: "~/Documents/notes" });
+    input.addEventListener("input", function () { cfg.folders[index] = input.value; markDirty(); });
+    host.appendChild(h("div", { cls: "list__row" }, [
+      input,
+      h("button", { cls: "btn btn--tiny", text: t("hvRemove"), type: "button", onclick: "PPX.dcRemoveFolder(" + index + ")" })
+    ]));
+  });
+  if (!cfg.folders.length) { host.appendChild(note(t("dcFolderEmpty"))); }
+  var add = el("dc-folder-add");
+  if (add) { add.classList.toggle("is-disabled", cfg.folders.length >= DC_FOLDER_LIMIT); }
+}
+function renderDiscoverFeeds() {
+  var host = el("dc-feeds"), cfg = dcConfig();
+  if (!host || !cfg) { return; }
+  clear(host);
+  cfg.feeds.forEach(function (item, index) {
+    var label = h("input", { type: "text", spellcheck: "false", value: String(item.label || ""), placeholder: t("dcLabel") });
+    label.addEventListener("input", function () { item.label = label.value; markDirty(); });
+    var url = h("input", {
+      type: "text", spellcheck: "false", value: String(item.url || ""),
+      placeholder: "http://192.168.1.10:8080/feed.xml", inputmode: "url"
+    });
+    url.addEventListener("input", function () { item.url = url.value; markDirty(); });
+    var kind = h("select");
+    [["rss", t("dcKindRSS")], ["json", t("dcKindJSON")]].forEach(function (pair) {
+      kind.appendChild(h("option", { value: pair[0], text: pair[1] }));
+    });
+    kind.value = item.kind === "json" ? "json" : "rss";
+    kind.addEventListener("change", function () { item.kind = kind.value; markDirty(); });
+    var enabled = h("input", { type: "checkbox" });
+    enabled.checked = item.enabled !== false;
+    enabled.addEventListener("change", function () { item.enabled = enabled.checked; markDirty(); });
+    host.appendChild(h("div", { cls: "list__row" }, [
+      label, url, kind,
+      h("label", { cls: "check" }, [enabled, h("span", { text: t("dcFeedOn") })]),
+      h("button", { cls: "btn btn--tiny", text: t("hvRemove"), type: "button", onclick: "PPX.dcRemoveFeed(" + index + ")" })
+    ]));
+  });
+  if (!cfg.feeds.length) { host.appendChild(note(t("dcFeedEmpty"))); }
+  var add = el("dc-feed-add");
+  if (add) { add.classList.toggle("is-disabled", cfg.feeds.length >= DC_FEED_LIMIT); }
+}
+function renderDiscoverMCP() {
+  var host = el("dc-mcp"), cfg = dcConfig();
+  if (!host || !cfg) { return; }
+  clear(host);
+  cfg.mcpSources.forEach(function (item, index) {
+    var label = h("input", { type: "text", spellcheck: "false", value: String(item.label || ""), placeholder: t("dcLabel") });
+    label.addEventListener("input", function () { item.label = label.value; markDirty(); });
+    var server = h("input", { type: "text", spellcheck: "false", value: String(item.serverID || ""), placeholder: "notes" });
+    server.addEventListener("input", function () { item.serverID = server.value; markDirty(); });
+    var tool = h("input", { type: "text", spellcheck: "false", value: String(item.toolName || ""), placeholder: "search" });
+    tool.addEventListener("input", function () { item.toolName = tool.value; markDirty(); });
+    var args = h("input", {
+      type: "text", spellcheck: "false", placeholder: "{}",
+      value: JSON.stringify(item.arguments || {})
+    });
+    args.addEventListener("input", function () {
+      try {
+        var parsed = JSON.parse(args.value || "{}");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          item.arguments = parsed;
+          markDirty();
+        }
+      } catch (ignored) { /* an unfinished fragment keeps the last valid object */ }
+    });
+    host.appendChild(h("div", { cls: "list__row" }, [
+      label, server, tool, args,
+      h("button", { cls: "btn btn--tiny", text: t("hvRemove"), type: "button", onclick: "PPX.dcRemoveMcp(" + index + ")" })
+    ]));
+  });
+  if (!cfg.mcpSources.length) { host.appendChild(note(t("dcMcpEmpty"))); }
+  var add = el("dc-mcp-add");
+  if (add) { add.classList.toggle("is-disabled", cfg.mcpSources.length >= DC_MCP_LIMIT); }
+}
+function dcAddFolder() {
+  var cfg = dcConfig();
+  if (!cfg) { return; }
+  if (cfg.folders.length >= DC_FOLDER_LIMIT) { toast("warn", t("dcFolderLimit")); return; }
+  cfg.folders.push("");
+  markDirty();
+  renderDiscoverFolders();
+}
+function dcRemoveFolder(index) {
+  var cfg = dcConfig();
+  if (!cfg) { return; }
+  cfg.folders.splice(index, 1);
+  markDirty();
+  renderDiscoverFolders();
+}
+function dcAddFeed() {
+  var cfg = dcConfig();
+  if (!cfg) { return; }
+  if (cfg.feeds.length >= DC_FEED_LIMIT) { toast("warn", t("dcFeedLimit")); return; }
+  cfg.feeds.push({ id: "", label: "", url: "", kind: "rss", enabled: true });
+  markDirty();
+  renderDiscoverFeeds();
+}
+function dcRemoveFeed(index) {
+  var cfg = dcConfig();
+  if (!cfg) { return; }
+  cfg.feeds.splice(index, 1);
+  markDirty();
+  renderDiscoverFeeds();
+}
+function dcAddMcp() {
+  var cfg = dcConfig();
+  if (!cfg) { return; }
+  if (cfg.mcpSources.length >= DC_MCP_LIMIT) { toast("warn", t("dcMcpLimit")); return; }
+  cfg.mcpSources.push({ id: "", label: "", serverID: "", toolName: "", arguments: {}, enabled: true });
+  markDirty();
+  renderDiscoverMCP();
+}
+function dcRemoveMcp(index) {
+  var cfg = dcConfig();
+  if (!cfg) { return; }
+  cfg.mcpSources.splice(index, 1);
+  markDirty();
+  renderDiscoverMCP();
+}
+function upActionLabel(verb) { return verb === "approve" ? t("upApprove") : t("upSnooze"); }
+function upDisarm(button, verb) {
+  button.dataset.armed = "";
+  button.classList.remove("is-arm");
+  button.textContent = upActionLabel(verb);
+}
+function upDecide(button, verb) {
+  if (button.dataset.armed === "1") {
+    upDisarm(button, verb);
+    postUpdateDecision(verb, button);
+    return;
+  }
+  button.dataset.armed = "1";
+  button.classList.add("is-arm");
+  button.textContent = t("upConfirmAgain");
+  window.setTimeout(function () {
+    if (button.dataset.armed === "1" && button.isConnected) { upDisarm(button, verb); }
+  }, 8000);
+}
+function postUpdateDecision(verb, button) {
+  if (button) { button.classList.add("is-disabled"); }
+  api(ROUTE.updateDecision, { method: "POST", json: { verb: verb } }).then(function (report) {
+    if (report && report.update) { S.snap.update = report.update; }
+    renderUpdatePanel();
+    var ok = Boolean(report && report.ok);
+    toast(ok ? "ok" : "err", String((report && report.detail) || t(ok ? "upDone" : "upRefused")));
+    refreshSnapshot(true);
+  }).catch(function (error) {
+    if (button) { button.classList.remove("is-disabled"); }
+    fail("upFailed", error);
+  });
+}
+function upCheck() {
+  var button = el("up-check");
+  if (button) {
+    button.dataset.busy = "1";
+    button.classList.add("is-disabled");
+    button.textContent = t("upChecking");
+  }
+  function done() {
+    if (!button) { return; }
+    button.dataset.busy = "";
+    button.classList.remove("is-disabled");
+    button.textContent = t("upCheck");
+  }
+  api(ROUTE.updateCheck, { method: "POST", json: {} }).then(function (report) {
+    done();
+    if (report && report.update) { S.snap.update = report.update; }
+    renderUpdatePanel();
+    var outcome = String((report && report.outcome) || "failed");
+    if (outcome === "available") { toast("ok", t("upFound") + " · " + String(report.detail || "")); }
+    else if (outcome === "failed") { toast("err", String((report && report.detail) || t("upCheckFailed"))); }
+    else if (outcome === "ignored") { toast("warn", String((report && report.detail) || t("upIgnored"))); }
+    else if (outcome === "disabled") { toast("warn", String((report && report.detail) || t("upBadgeOff"))); }
+    else { toast("ok", t("upUpToDate")); }
+    refreshSnapshot(true);
+  }).catch(function (error) { done(); fail("upCheckFailed", error); });
+}
+function dcRefresh() {
+  var button = el("dc-refresh");
+  if (button) {
+    button.classList.add("is-disabled");
+    button.textContent = t("dcRefreshing");
+  }
+  function done() {
+    if (!button) { return; }
+    button.classList.remove("is-disabled");
+    button.textContent = t("dcRefresh");
+  }
+  api(ROUTE.discoverRefresh, { method: "POST", json: {} }).then(function (report) {
+    done();
+    if (report && report.discover) { S.snap.discover = report.discover; }
+    renderDiscoverPanel();
+    renderDiscoverSources();
+    var outcome = String((report && report.outcome) || "failed");
+    var detail = String((report && report.detail) || outcome);
+    toast(outcome === "failed" ? "err" : "ok",
+      detail + (report && report.itemCount ? " · " + String(report.itemCount) : ""));
+    refreshSnapshot(true);
+  }).catch(function (error) { done(); fail("dcRefreshFailed", error); });
 }
 
 /* ---------------------------------------------------------------- decisions */
@@ -4622,6 +5231,15 @@ var PPX = {
   hvRemoveEntity: hvRemoveEntity,
   hvAddTarget: hvAddTarget,
   hvRemoveTarget: hvRemoveTarget,
+  upCheck: upCheck,
+  upDecide: upDecide,
+  dcRefresh: dcRefresh,
+  dcAddFolder: dcAddFolder,
+  dcRemoveFolder: dcRemoveFolder,
+  dcAddFeed: dcAddFeed,
+  dcRemoveFeed: dcRemoveFeed,
+  dcAddMcp: dcAddMcp,
+  dcRemoveMcp: dcRemoveMcp,
   windowAdd: windowAdd,
   windowRemove: windowRemove,
   mountAdd: mountAdd,
@@ -5227,6 +5845,26 @@ public actor LocalWebConsoleServer {
                 privacy: snapshot.privacy
             ))
 
+        case ConsoleRoute.updateCheck:
+            // Detection only. The facade fetches and verifies the signed manifest; no
+            // package is fetched here and the installer is not reachable from this path.
+            return try json(await facade.updateCheck())
+
+        case ConsoleRoute.updateDecision:
+            // The owner's click, and the only console road to a download. The receipt
+            // is minted inside the facade, so the page sends a verb and nothing else.
+            let body: WEBUpdateDecisionRequest = try decode(WEBUpdateDecisionRequest.self, from: request)
+            let verb = body.verb.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard verb == "approve" || verb == "snooze" else {
+                throw WEBConsoleError.badEngine("verb 必须为 approve 或 snooze / verb must be approve or snooze")
+            }
+            return try json(await facade.updateDecision(verb: verb))
+
+        case ConsoleRoute.discoverRefresh:
+            // The 「立即刷新」 button. The aggregator itself enforces the switch and a
+            // 60-second gap, so a double click cannot become two LAN scans.
+            return try json(await facade.discoverRefresh())
+
         case ConsoleRoute.discoveryCapabilities:
             // Read-only and never waiting: the snapshot call answers from the last
             // measurement and starts a background pass when it is stale.
@@ -5563,6 +6201,10 @@ public actor LocalWebConsoleServer {
         let reference: String?
         let status: Int
     }
+
+    /// `POST /api/update/decision` — only the two owner verbs. `check` takes no
+    /// body: there is nothing for the page to choose.
+    struct WEBUpdateDecisionRequest: Codable { let verb: String }
 
     // MARK: - Dispatch outcome
 

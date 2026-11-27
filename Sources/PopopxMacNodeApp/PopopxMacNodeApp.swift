@@ -162,6 +162,12 @@ public actor NodeConsole: NodeConsoleFacade {
     /// owner switched it off" and "this node cannot answer" are different cards.
     private let discovery = LocalCapabilityDiscovery()
 
+    /// Built at `start()` and re-configured on every settings save. Both hold no
+    /// socket: the update centre dials only on an explicit check, and the
+    /// aggregator only on its interval or a click.
+    private var updateCenter: UpdateCenter?
+    private var discoverCenter: DiscoverCenter?
+
     private var consoleURLString = ""
     /// Short node fingerprint, used only inside minted call links and UIDs.
     private var nodeReference = ""
@@ -195,10 +201,13 @@ public actor NodeConsole: NodeConsoleFacade {
         consoleURLString = consoleURL
         await signaling.start()
         let identity = await signaling.identity()
+        let current = await settings.current()
         await configurePrivacy(
-            from: await settings.current(),
+            from: current,
             nodeReference: Digest.short(Data(identity.nodeId.utf8), length: 8)
         )
+        await configureUpdates(from: current)
+        await configureDiscover(from: current)
         guard routerTask == nil else { return }
         routerTask = Task { [weak self] in
             guard let self else { return }
@@ -233,11 +242,40 @@ public actor NodeConsole: NodeConsoleFacade {
     /// nudge even when the browser is closed and nobody is polling.
     private func tick() async {
         await hub.publish(.system, "心跳 \(Date().ppxClock)", level: .debug)
+        // Detection is automatic; installation never is. `tick()` returns a release
+        // only when one verified, is newer, is not snoozed and was not announced.
+        if let release = await updateCenter?.tick() {
+            await announceUpdate(release)
+        }
+        if let outcome = await discoverCenter?.tick(),
+           case let .refreshed(feed, path, newIDs) = outcome,
+           !newIDs.isEmpty {
+            await publishDiscover(feed: feed, path: path)
+        }
     }
 
     /// SMP-originated commands run regardless of the console being open; the
     /// whitelist check already happened inside the bridge.
     private func route(_ command: NodeCommand) async {
+        // The two control namespaces are not subscription businesses: they are
+        // answered here, before engine dispatch, and they share one handler with
+        // the console drawer so a card copied out of chat approves the same road.
+        if command.serviceId == "updates" {
+            let result = await handleUpdateCommand(command, source: command.authenticated ? "phone" : "phone-unauthenticated")
+            record(result)
+            let delivered = await signaling.deliver(result, to: command.serviceId)
+            await hub.publish(
+                .update,
+                delivered ? "更新回执已回传 / update reply delivered" : "更新回执待回传 / queued in outbox",
+                level: result.ok ? .notice : .warning,
+                payload: ["commandId": .string(command.id), "delivered": .bool(delivered)]
+            )
+            return
+        }
+        if command.serviceId == "discover" {
+            await routeDiscover(command)
+            return
+        }
         // The privacy namespaces are tools, not subscription businesses, so they are
         // intercepted before the engine dispatch. They then share one handler with
         // the loopback entry point — a capability cannot be reachable from one side
@@ -383,6 +421,342 @@ public actor NodeConsole: NodeConsoleFacade {
         )
     }
 
+    // MARK: Signed updates and Discover
+
+    /// Built once and re-configured in place: the centre owns persisted state and a
+    /// verified pending offer, and throwing the actor away on every settings save
+    /// would forget both.
+    private func configureUpdates(from settings: NodeSettings) async {
+        let config = settings.updateConfig.normalised
+        if let updateCenter {
+            await updateCenter.update(config: config)
+            return
+        }
+        updateCenter = UpdateCenter(
+            config: config,
+            transport: URLSessionUpdateTransport(),
+            installer: WorkspaceUpdateInstaller(),
+            signer: PrivacyApprovalSigner.loadOrCreate(at: AppPaths.updateApprovalKeyFile),
+            stateStore: UpdateStateStore(url: AppPaths.updateStateFile),
+            stagingDirectory: AppPaths.updateStaging,
+            currentVersion: { NodeVersion.current },
+            audit: { [weak self] entry in
+                await self?.recordUpdateAudit(entry)
+            }
+        )
+    }
+
+    /// The aggregator gets its own scope roots (home and the node tree), its own
+    /// signing key and its own state file. Folders are read locally; feeds leave
+    /// only through `EdgeBoundary.privateNetworkOnly`; MCP output is read-only.
+    private func configureDiscover(from settings: NodeSettings) async {
+        let config = settings.discoverConfig.normalised
+        if let discoverCenter {
+            await discoverCenter.update(config: config)
+            return
+        }
+        discoverCenter = DiscoverCenter(
+            config: config,
+            transport: URLSessionUpdateTransport(),
+            mcpCall: { [weak self] source in
+                guard let self else {
+                    return .failure(DiscoverMCPFailure("节点已停止 / the node is gone"))
+                }
+                return await self.discoverMCPText(source)
+            },
+            keyURL: AppPaths.discoverSigningKeyFile,
+            feedFile: AppPaths.discoverFeedFile,
+            stateFile: AppPaths.discoverStateFile,
+            scopeRoots: [FileManager.default.homeDirectoryForCurrentUser, AppPaths.root],
+            nodeID: { [weak self] in
+                guard let self else { return "" }
+                return await self.currentNodeID()
+            },
+            audit: { [weak self] entry in
+                await self?.recordDiscoverAudit(entry)
+            }
+        )
+    }
+
+    private func currentNodeID() async -> String {
+        await signaling.identity().nodeId
+    }
+
+    private func discoverMCPText(_ source: DiscoverMCPSource) async -> Result<String, DiscoverMCPFailure> {
+        guard let privacy else {
+            return .failure(DiscoverMCPFailure("MCP 桥接未启用 / the MCP bridge is off"))
+        }
+        let outcome = await privacy.mcp.invoke(
+            serverID: source.serverID,
+            toolName: source.toolName,
+            arguments: source.arguments,
+            source: "discover"
+        )
+        switch outcome {
+        case let .executed(text, _):
+            return .success(text)
+        case .proposed:
+            // A write-shaped tool never becomes a feed item: discovery is a read.
+            return .failure(DiscoverMCPFailure("写操作不能作为发现来源 / a mutating tool cannot feed Discover"))
+        case let .refused(reason):
+            return .failure(DiscoverMCPFailure(reason))
+        }
+    }
+
+    private func recordUpdateAudit(_ entry: UpdateAuditEntry) async {
+        appendFeatureAudit(
+            channel: UpdateCenter.auditAction, outcome: entry.outcome,
+            detail: "\(entry.action) \(entry.detail)", at: entry.at
+        )
+        await hub.publish(
+            .update, "更新 · \(entry.action) → \(entry.outcome)",
+            level: Self.auditLevel(entry.outcome),
+            payload: ["action": .string(entry.action), "outcome": .string(entry.outcome)]
+        )
+    }
+
+    private func recordDiscoverAudit(_ entry: DiscoverAuditEntry) async {
+        appendFeatureAudit(
+            channel: DiscoverCenter.auditAction, outcome: entry.outcome,
+            detail: "\(entry.action) \(entry.detail)", at: entry.at
+        )
+        await hub.publish(
+            .discover, "发现 · \(entry.action) → \(entry.outcome)",
+            level: Self.auditLevel(entry.outcome),
+            payload: ["action": .string(entry.action), "outcome": .string(entry.outcome)]
+        )
+    }
+
+    private static func auditLevel(_ outcome: String) -> EventLevel {
+        if outcome.contains("fail") || outcome.contains("refus") || outcome.contains("mismatch") {
+            return .warning
+        }
+        if outcome.contains("install") || outcome == "available" { return .success }
+        return .notice
+    }
+
+    /// One append-only line in `logs/node.log`. The centre is the only writer for
+    /// its own rows and the actor serialises these calls, so lines cannot interleave
+    /// with each other; the SMP bridge writes to the same file from another actor,
+    /// which is the pre-existing behaviour of this log.
+    private func appendFeatureAudit(channel: String, outcome: String, detail: String, at: Date) {
+        let line = "\(PrivacyStamp.iso(at)) [\(channel)] \(outcome) \(detail)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        let url = AppPaths.auditLogFile
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: data)
+            return
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
+    }
+
+    private func updateSnapshotValue() async -> UpdateSnapshot {
+        if let updateCenter { return await updateCenter.snapshot() }
+        let config = (await settings.current()).updateConfig.normalised
+        return UpdateSnapshot(
+            enabled: config.enabled,
+            usable: config.usable,
+            manifestHost: config.manifestHost ?? "",
+            pinnedHosts: config.pinnedHosts.sorted(),
+            keyFingerprint: config.keyFingerprint,
+            boundary: "https · 仅机主固定的主机 / https, owner-pinned hosts only"
+        )
+    }
+
+    private func discoverSnapshotValue() async -> DiscoverSnapshot {
+        if let discoverCenter { return await discoverCenter.snapshot() }
+        let config = (await settings.current()).discoverConfig.normalised
+        return DiscoverSnapshot(
+            enabled: config.hasAnySource,
+            intervalMinutes: config.intervalMinutes,
+            boundary: DiscoverCenter.boundaryText
+        )
+    }
+
+    /// The phone card goes out with detection, not with approval: it carries the
+    /// two commands and nothing executable. `markNotified` runs even when the
+    /// delivery was queued to the outbox, so the same version is not announced twice.
+    private func announceUpdate(_ release: UpdateRelease) async {
+        guard let center = updateCenter, let commands = await center.cardCommands() else { return }
+        guard !(await center.snapshot()).notified else { return }
+        let card = UpdateCard(
+            release: release, approveCommand: commands.approve, snoozeCommand: commands.snooze
+        )
+        let changes = release.summaryLines.isEmpty
+            ? "（无更新说明 / no summary）"
+            : release.summaryLines.prefix(8).map { "· \($0)" }.joined(separator: "\n")
+        let body = """
+        新版本 / new version: \(release.version) · \(release.releasedAt)
+        \(changes)
+        在您点击「立即更新」之前不会下载任何内容。 / Nothing is downloaded until you choose 立即更新.
+        """
+        let result = CommandResult(
+            engine: .shadowCos,
+            ok: true,
+            headline: card.text,
+            body: body,
+            metrics: ["version": .string(release.version), "build": .int(release.build)],
+            cardLabel: "POPOPX 更新 / Update"
+        )
+        record(result)
+        let delivered = await signaling.deliver(result, to: "updates")
+        await center.markNotified(version: release.version)
+        await hub.publish(
+            .update,
+            "发现新版本 v\(release.version) · 等待机主点击 / awaiting owner click",
+            level: .notice,
+            payload: [
+                "version": .string(release.version),
+                "delivered": .bool(delivered)
+            ]
+        )
+    }
+
+    /// The signed feed is the artifact; the card is a readable index. The phone's
+    /// Discover page reads the file and verifies it with the embedded public key.
+    private func publishDiscover(feed: DiscoverFeed, path: String) async {
+        let items = feed.items
+        let body = items.isEmpty
+            ? "本次没有条目 / the feed is empty this run"
+            : items.prefix(8).map { "· \($0.title) — \($0.sourceLabel)" }.joined(separator: "\n")
+        let artifacts = FileManager.default.fileExists(atPath: path) ? [path] : []
+        let result = CommandResult(
+            engine: .shadowCos,
+            ok: true,
+            headline: "\(DiscoverFeed.schemaIdentifier) · \(items.count) 条 / items",
+            body: body,
+            artifacts: artifacts,
+            metrics: [
+                "schema": .string(feed.schema),
+                "items": .int(items.count),
+                "signed": .bool(!feed.signature.isEmpty)
+            ],
+            cardLabel: "POPOPX 发现 / Discover"
+        )
+        record(result)
+        let delivered = await signaling.deliver(result, to: "discover")
+        await discoverCenter?.markDelivered(ids: items.map(\.id))
+        await hub.publish(
+            .discover,
+            "发现已推送 · \(items.count) 条 / feed pushed",
+            level: .notice,
+            payload: ["items": .int(items.count), "delivered": .bool(delivered)]
+        )
+    }
+
+    /// Parses `updates::{approve|snooze}::{"v":"…","rcp":"…"}`. The receipt is
+    /// bound to version and verb inside the centre, so a stale one from another
+    /// release cannot authorize this one.
+    private static func updatePayload(_ text: String) -> (version: String, receipt: String)? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = object["v"] as? String, !version.isEmpty,
+              let receipt = object["rcp"] as? String, !receipt.isEmpty else {
+            return nil
+        }
+        return (version, receipt)
+    }
+
+    private func handleUpdateCommand(_ command: NodeCommand, source: String) async -> CommandResult {
+        let label = "POPOPX 更新 / Update"
+        guard let center = updateCenter else {
+            return CommandResult(
+                commandID: command.id, engine: .shadowCos, ok: false,
+                headline: "更新检查未启用 / the update feed is off", cardLabel: label
+            )
+        }
+        guard command.action == "approve" || command.action == "snooze" else {
+            return CommandResult(
+                commandID: command.id, engine: .shadowCos, ok: false,
+                headline: "未知更新操作 / unknown update action: \(command.action)", cardLabel: label
+            )
+        }
+        guard let payload = Self.updatePayload(command.payload) else {
+            return CommandResult(
+                commandID: command.id, engine: .shadowCos, ok: false,
+                headline: "回执载荷无效 / malformed update payload", cardLabel: label
+            )
+        }
+        let snapshot = await center.snapshot()
+        if let pending = snapshot.available, pending.version != payload.version {
+            return CommandResult(
+                commandID: command.id, engine: .shadowCos, ok: false,
+                headline: "版本不符 / this receipt is for \(payload.version), pending is \(pending.version)",
+                cardLabel: label
+            )
+        }
+        let outcome = await center.decision(verb: command.action, receipt: payload.receipt, source: source)
+        let report = UpdateDecisionReport.make(outcome, snapshot: await center.snapshot())
+        let headline: String
+        switch outcome {
+        case let .installed(version, _):
+            headline = "已校验并交给安装器 v\(version) / verified and handed to the installer"
+        case let .snoozed(until):
+            headline = "已推迟到 \(PrivacyStamp.display(until, timeZone: .current)) / snoozed"
+        case let .refused(detail), let .failed(detail):
+            headline = detail
+        }
+        return CommandResult(
+            commandID: command.id,
+            engine: .shadowCos,
+            ok: report.ok,
+            headline: headline,
+            body: report.detail,
+            metrics: [
+                "verb": .string(command.action),
+                "outcome": .string(report.outcome),
+                "source": .string(source)
+            ],
+            cardLabel: label
+        )
+    }
+
+    @discardableResult
+    private func routeDiscover(_ command: NodeCommand) async -> CommandResult {
+        let label = "POPOPX 发现 / Discover"
+        guard let center = discoverCenter else {
+            let result = CommandResult(
+                commandID: command.id, engine: .shadowCos, ok: false,
+                headline: "发现聚合器未启用 / the aggregator is off", cardLabel: label
+            )
+            record(result)
+            _ = await signaling.deliver(result, to: command.serviceId)
+            return result
+        }
+        guard command.action == "refresh" else {
+            let result = CommandResult(
+                commandID: command.id, engine: .shadowCos, ok: false,
+                headline: "未知发现操作 / unknown discover action: \(command.action)", cardLabel: label
+            )
+            record(result)
+            _ = await signaling.deliver(result, to: command.serviceId)
+            return result
+        }
+        let outcome = await center.refresh()
+        if case let .refreshed(feed, path, _) = outcome {
+            await publishDiscover(feed: feed, path: path)
+            return CommandResult(
+                commandID: command.id, engine: .shadowCos, ok: true,
+                headline: "发现已刷新并推送 / refreshed and pushed", cardLabel: label
+            )
+        }
+        let report = DiscoverRefreshReport.make(outcome, snapshot: await center.snapshot())
+        let result = CommandResult(
+            commandID: command.id, engine: .shadowCos,
+            ok: report.outcome == "unchanged",
+            headline: "发现刷新 · \(report.outcome)", body: report.detail, cardLabel: label
+        )
+        record(result)
+        _ = await signaling.deliver(result, to: command.serviceId)
+        return result
+    }
+
     /// The local Ollama summarizer the workspace digest runs through.
     ///
     /// One loopback POST and nothing else: the file text is already in this
@@ -521,7 +895,9 @@ public actor NodeConsole: NodeConsoleFacade {
             vaults: await vaults,
             consoleURL: consoleURLString,
             eventsBacklog: Array(backlog.suffix(60)),
-            privacy: await privacySnapshot(saved: current)
+            privacy: await privacySnapshot(saved: current),
+            update: await updateSnapshotValue(),
+            discover: await discoverSnapshotValue()
         )
     }
 
@@ -615,6 +991,8 @@ public actor NodeConsole: NodeConsoleFacade {
         // The bridges read their switches, directories and timezone out of the same
         // document, so saving it is the only way they change.
         await configurePrivacy(from: stored)
+        await configureUpdates(from: stored)
+        await configureDiscover(from: stored)
         await hub.publish(
             .settings,
             "配置已保存（修订 \(stored.revision)）/ settings saved",
@@ -641,6 +1019,15 @@ public actor NodeConsole: NodeConsoleFacade {
         }
         // The drawer speaks the same grammar as the phone, so a card copied out of
         // the chat can be pasted here and approved locally.
+        if command.serviceId == "updates" {
+            let result = await handleUpdateCommand(command, source: "console-drawer")
+            record(result)
+            await hub.publish(.update, result.cardText, level: result.ok ? .success : .warning)
+            return result
+        }
+        if command.serviceId == "discover" {
+            return await routeDiscover(command)
+        }
         if let call = PrivacyToolRoute.parseCommand(
             serviceId: command.serviceId,
             action: command.action,
@@ -848,6 +1235,78 @@ public actor NodeConsole: NodeConsoleFacade {
             "revision": .int(stored.revision),
             "detail": .string("已加密存入 macOS 钥匙串，设置文件仅记录引用 / stored encrypted in the Keychain; the settings document holds the reference only")
         ])
+    }
+
+    // MARK: NodeConsoleFacade — signed updates and Discover
+
+    public func updateStatus() async -> UpdateSnapshot {
+        await updateSnapshotValue()
+    }
+
+    public func updateCheck() async -> UpdateCheckReport {
+        guard let center = updateCenter else {
+            return UpdateCheckReport(
+                outcome: "disabled",
+                detail: "更新检查未启用 / the update feed is off",
+                update: await updateSnapshotValue()
+            )
+        }
+        let outcome = await center.check()
+        let report = UpdateCheckReport.make(outcome, snapshot: await center.snapshot())
+        await hub.publish(
+            .update, "更新检查 · \(report.outcome)",
+            level: Self.auditLevel(report.outcome),
+            payload: ["outcome": .string(report.outcome)]
+        )
+        if case let .available(release) = outcome {
+            await announceUpdate(release)
+        }
+        return report
+    }
+
+    /// The console's 「立即更新 / 稍后提醒」. The receipt is minted inside the node
+    /// from this call, exactly like a privacy approval: the page never receives one.
+    public func updateDecision(verb: String) async -> UpdateDecisionReport {
+        guard let center = updateCenter, let receipt = await center.consoleReceipt(verb: verb) else {
+            return UpdateDecisionReport(
+                outcome: "refused", ok: false,
+                detail: "没有待批准的版本 / there is no verified pending release",
+                update: await updateSnapshotValue()
+            )
+        }
+        let outcome = await center.decision(verb: verb, receipt: receipt, source: "console")
+        let report = UpdateDecisionReport.make(outcome, snapshot: await center.snapshot())
+        await hub.publish(
+            .update, "控制台更新操作 · \(report.outcome)",
+            level: report.ok ? .success : .warning,
+            payload: ["verb": .string(verb), "outcome": .string(report.outcome)]
+        )
+        return report
+    }
+
+    public func discoverStatus() async -> DiscoverSnapshot {
+        await discoverSnapshotValue()
+    }
+
+    public func discoverRefresh() async -> DiscoverRefreshReport {
+        guard let center = discoverCenter else {
+            return DiscoverRefreshReport(
+                outcome: "disabled",
+                detail: "发现聚合未启用 / the aggregator is off",
+                discover: await discoverSnapshotValue()
+            )
+        }
+        let outcome = await center.refresh()
+        let report = DiscoverRefreshReport.make(outcome, snapshot: await center.snapshot())
+        if case let .refreshed(feed, path, _) = outcome {
+            await publishDiscover(feed: feed, path: path)
+        }
+        await hub.publish(
+            .discover, "发现刷新 · \(report.outcome)",
+            level: Self.auditLevel(report.outcome),
+            payload: ["outcome": .string(report.outcome), "items": .int(report.itemCount)]
+        )
+        return report
     }
 
     /// Delegates to the wire parser in the contract so the console, the bridge and

@@ -218,11 +218,13 @@ final class MacNodeContractTests: XCTestCase {
         XCTAssertEqual(Set(routes).count, routes.count, "a duplicate route would shadow a handler")
         // 13 console routes, the two privacy-bridge routes the SPA posts to
         // (`/api/privacy/authorize`, `/api/privacy/decision`), the one credential route
-        // (`/api/hub/credential`, POST-only and console-only), and the two discovery
-        // routes (`/v1/discovery/capabilities` GET and `/v1/discovery/scan` POST). The tool
-        // surface under `/v1/tools/` and the discovery prefix are matched by prefix, not
-        // literal, so only their literal endpoints are counted here.
-        XCTAssertEqual(routes.count, 18)
+        // (`/api/hub/credential`, POST-only and console-only), the two discovery
+        // routes (`/v1/discovery/capabilities` GET and `/v1/discovery/scan` POST), and
+        // the three signed-update/Discover routes (`/api/update/check`,
+        // `/api/update/decision`, `/api/discover/refresh`). The tool surface under
+        // `/v1/tools/` and the discovery prefix are matched by prefix, not literal, so
+        // only their literal endpoints are counted here.
+        XCTAssertEqual(routes.count, 21)
         for route in routes {
             XCTAssertTrue(route.hasPrefix("/"), route)
             XCTAssertFalse(route.contains(".."), route)

@@ -562,3 +562,148 @@ extension WebConsoleBindTests {
         return (root["pairing"] as? [String: Any]) ?? (root["code"] != nil ? root : nil)
     }
 }
+
+// MARK: - The signed-update and Discover routes
+
+/// Records which call the console forwarded after authentication. The update routes'
+/// whole contract is: the page names a verb, and the node mints everything else —
+/// the verdict, the receipt and the download.
+private final class UpdateRouteBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var seen: [String] = []
+
+    func note(_ value: String) {
+        lock.lock(); seen.append(value); lock.unlock()
+    }
+
+    var all: [String] { lock.lock(); defer { lock.unlock() }; return seen }
+}
+
+private struct UpdateConsoleFacade: NodeConsoleFacade {
+    let box: UpdateRouteBox
+
+    func snapshot() async -> ConsoleSnapshot { PrivacyConsoleFacade.stubSnapshot() }
+    func events() -> AsyncStream<ConsoleEvent> { AsyncStream { $0.finish() } }
+
+    func updateStatus() async -> UpdateSnapshot {
+        UpdateSnapshot(enabled: true, usable: true, manifestHost: "updates.popopx.test")
+    }
+
+    func updateCheck() async -> UpdateCheckReport {
+        UpdateCheckReport(
+            outcome: "available", detail: "v9.9.9",
+            update: UpdateSnapshot(enabled: true, usable: true, manifestHost: "updates.popopx.test")
+        )
+    }
+
+    func updateDecision(verb: String) async -> UpdateDecisionReport {
+        box.note("update:\(verb)")
+        return UpdateDecisionReport(
+            outcome: "snoozed", ok: true, detail: "已推迟 / snoozed",
+            update: UpdateSnapshot(enabled: true, usable: true)
+        )
+    }
+
+    func discoverStatus() async -> DiscoverSnapshot {
+        DiscoverSnapshot(enabled: true, itemCount: 2)
+    }
+
+    func discoverRefresh() async -> DiscoverRefreshReport {
+        box.note("discover")
+        return DiscoverRefreshReport(
+            outcome: "refreshed", itemCount: 2, detail: "items=2 new=2",
+            discover: DiscoverSnapshot(enabled: true, itemCount: 2)
+        )
+    }
+
+    func startInstall() async {}
+    func cancelInstall() async {}
+    func setEngineEnabled(_ kind: EngineKind, enabled: Bool) async {}
+    func rotatePairing() async -> PairingOffer? { nil }
+    func pairingQR(pixelSize: Int) async -> QRAsset? { nil }
+    func revokePairing(publicKey: String) async {}
+    func updateSettings(_ settings: NodeSettings) async -> NodeSettings { settings }
+    func submitWireCommand(_ text: String) async -> CommandResult {
+        fatalError("the update routes do not run commands")
+    }
+    func invokeEngine(_ kind: EngineKind, action: String, payload: [String: JSONValue]) async -> CommandResult {
+        fatalError("the update routes do not run engines")
+    }
+    func openInFinder(path: String) async {}
+}
+
+extension WebConsoleBindTests {
+    func test_updateCheckIsAWriteRouteThatStillNeedsTheBearer() async throws {
+        let box = UpdateRouteBox()
+        let port: UInt16 = 19021
+        let server = LocalWebConsoleServer(facade: UpdateConsoleFacade(box: box), port: port)
+        try await server.start()
+        let token = await server.token
+        let checked = post(port: port, path: ConsoleRoute.updateCheck, body: "{}", token: token)
+        let got = request(port: port, method: "GET", path: ConsoleRoute.updateCheck, token: token)
+        let anonymous = post(port: port, path: ConsoleRoute.updateCheck, body: "{}", token: nil)
+        await server.stop()
+
+        XCTAssertEqual(checked?.status, 200, "the check route did not answer")
+        XCTAssertTrue(checked?.body.contains("\"outcome\":\"available\"") == true,
+                      "the report's outcome must reach the page: \(checked?.body ?? "nil")")
+        XCTAssertTrue(checked?.body.contains("\"update\"") == true,
+                      "the reply must carry a fresh update snapshot or the panel keeps stale state")
+        XCTAssertEqual(got?.status, 405, "a check costs a public fetch; a navigation must not run one")
+        XCTAssertEqual(anonymous?.status, 401, "an unauthenticated loopback call is not the operator")
+    }
+
+    func test_updateDecisionForwardsOnlyAnAdmissibleVerb() async throws {
+        let box = UpdateRouteBox()
+        let port: UInt16 = 19022
+        let server = LocalWebConsoleServer(facade: UpdateConsoleFacade(box: box), port: port)
+        try await server.start()
+        let token = await server.token
+        let approved = post(port: port, path: ConsoleRoute.updateDecision,
+                            body: "{\"verb\":\"approve\"}", token: token)
+        let snoozed = post(port: port, path: ConsoleRoute.updateDecision,
+                           body: "{\"verb\":\"  snooze  \"}", token: token)
+        let unknown = post(port: port, path: ConsoleRoute.updateDecision,
+                           body: "{\"verb\":\"delete\"}", token: token)
+        let malformed = post(port: port, path: ConsoleRoute.updateDecision,
+                             body: "not json", token: token)
+        let anonymous = post(port: port, path: ConsoleRoute.updateDecision,
+                             body: "{\"verb\":\"approve\"}", token: nil)
+        await server.stop()
+
+        XCTAssertEqual(box.all, ["update:approve", "update:snooze"],
+                       "the route trims whitespace and forwards nothing else")
+        XCTAssertEqual(approved?.status, 200)
+        XCTAssertEqual(snoozed?.status, 200, "a padded but admissible verb still reaches the node")
+        XCTAssertTrue(approved?.body.contains("\"outcome\":\"snoozed\"") == true,
+                      "the verdict travels in the report: \(approved?.body ?? "nil")")
+        XCTAssertEqual(unknown?.status, 400, "a verb the page cannot produce is refused before the node")
+        XCTAssertEqual(malformed?.status, 400, "an undecodable body is refused before the node")
+        XCTAssertEqual(anonymous?.status, 401, "a decision without the bearer never reaches the node")
+    }
+
+    func test_discoverRefreshIsPostOnlyAndTheSnapshotCarriesBothCards() async throws {
+        let box = UpdateRouteBox()
+        let port: UInt16 = 19023
+        let server = LocalWebConsoleServer(facade: UpdateConsoleFacade(box: box), port: port)
+        try await server.start()
+        let token = await server.token
+        let refreshed = post(port: port, path: ConsoleRoute.discoverRefresh, body: "{}", token: token)
+        let got = request(port: port, method: "GET", path: ConsoleRoute.discoverRefresh, token: token)
+        let snapshot = request(port: port, method: "GET", path: ConsoleRoute.snapshot, token: token)
+        let anonymous = post(port: port, path: ConsoleRoute.discoverRefresh, body: "{}", token: nil)
+        await server.stop()
+
+        XCTAssertEqual(refreshed?.status, 200, "the refresh route did not answer")
+        XCTAssertTrue(refreshed?.body.contains("\"outcome\":\"refreshed\"") == true,
+                      refreshed?.body ?? "nil")
+        XCTAssertTrue(refreshed?.body.contains("\"discover\"") == true,
+                      "the reply must carry the aggregator snapshot")
+        XCTAssertEqual(got?.status, 405, "a refresh scans the LAN; a navigation must not trigger one")
+        XCTAssertEqual(anonymous?.status, 401)
+        XCTAssertTrue(snapshot?.body.contains("\"update\"") == true,
+                      "the page's poll must carry the update card even when nothing is pending")
+        XCTAssertTrue(snapshot?.body.contains("\"discover\"") == true,
+                      "the page's poll must carry the Discover card")
+    }
+}

@@ -110,12 +110,16 @@ public enum NodeWire {
     public static let heartbeatInterval: TimeInterval = 20
 
     /// Services this node will run: the ten engines, plus the two privacy-bridge
-    /// namespaces. The bridges are deliberately *not* `EngineKind` cases — that enum
-    /// is the subscription catalogue, it drives the engine grid, the pull ladder and
-    /// the generated `service-table.json` — but a confirmation card has to be
-    /// replayable through this parser, so the grammar accepts both.
+    /// namespaces and the two control namespaces this release adds. None of them
+    /// is an `EngineKind` case — that enum is the subscription catalogue, it drives
+    /// the engine grid, the pull ladder and the generated `service-table.json` — but
+    /// a confirmation card has to be replayable through this parser, so the grammar
+    /// accepts both.
     public static func isKnownService(_ serviceId: String) -> Bool {
-        EngineKind(rawValue: serviceId) != nil || PrivacyToolNamespace(rawValue: serviceId) != nil
+        EngineKind(rawValue: serviceId) != nil
+            || PrivacyToolNamespace(rawValue: serviceId) != nil
+            || serviceId == "updates"
+            || serviceId == "discover"
     }
 
     /// The one and only parser for `::popopx_sys::NODE_CMD::{serviceId}::{action}::{payload}`.
@@ -2124,6 +2128,8 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     public var llmModelOverride: String
     public var privacyBridges: PrivacyBridgeConfig?
     public var hubBridges: HubConfig?
+    public var updates: UpdateConfig?
+    public var discover: DiscoverConfig?
     public var revision: Int
     public var updatedAt: Date
 
@@ -2145,6 +2151,8 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         llmModelOverride: String = "",
         privacyBridges: PrivacyBridgeConfig? = nil,
         hubBridges: HubConfig? = nil,
+        updates: UpdateConfig? = nil,
+        discover: DiscoverConfig? = nil,
         revision: Int = 0,
         updatedAt: Date = Date()
     ) {
@@ -2165,6 +2173,8 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         self.llmModelOverride = llmModelOverride
         self.privacyBridges = privacyBridges
         self.hubBridges = hubBridges
+        self.updates = updates
+        self.discover = discover
         self.revision = revision
         self.updatedAt = updatedAt
     }
@@ -2207,6 +2217,24 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     public func withHubs(_ config: HubConfig) -> NodeSettings {
         var copy = self
         copy.hubBridges = config
+        return copy
+    }
+
+    /// Signed-update switches, read like the bridges: absent means off.
+    public var updateConfig: UpdateConfig { updates ?? UpdateConfig.disabled }
+
+    public func withUpdates(_ config: UpdateConfig) -> NodeSettings {
+        var copy = self
+        copy.updates = config
+        return copy
+    }
+
+    /// Discover aggregator switches, read like the bridges: absent means off.
+    public var discoverConfig: DiscoverConfig { discover ?? DiscoverConfig.disabled }
+
+    public func withDiscover(_ config: DiscoverConfig) -> NodeSettings {
+        var copy = self
+        copy.discover = config
         return copy
     }
 }
@@ -2766,6 +2794,8 @@ public struct ConsoleEvent: Codable, Sendable, Equatable {
         case sentinel
         case settings
         case privacy
+        case update
+        case discover
         case system
     }
 
@@ -2819,6 +2849,8 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
     public var consoleURL: String
     public var eventsBacklog: [ConsoleEvent]
     public var privacy: PrivacyBridgeSnapshot
+    public var update: UpdateSnapshot
+    public var discover: DiscoverSnapshot
 
     public init(
         node: NodeIdentity,
@@ -2839,7 +2871,9 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         vaults: [TimelockEnvelope],
         consoleURL: String,
         eventsBacklog: [ConsoleEvent] = [],
-        privacy: PrivacyBridgeSnapshot = PrivacyBridgeSnapshot.empty
+        privacy: PrivacyBridgeSnapshot = PrivacyBridgeSnapshot.empty,
+        update: UpdateSnapshot = .disabled,
+        discover: DiscoverSnapshot = .disabled
     ) {
         self.node = node
         self.version = NodeVersion.current.semanticString
@@ -2862,6 +2896,8 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         self.consoleURL = consoleURL
         self.eventsBacklog = eventsBacklog
         self.privacy = privacy
+        self.update = update
+        self.discover = discover
     }
 }
 
@@ -3069,6 +3105,13 @@ public enum AppPaths {
     public static var ledger: URL { root.appendingPathComponent("ledger", isDirectory: true) }
     public static var output: URL { root.appendingPathComponent("output", isDirectory: true) }
     public static var quarantine: URL { root.appendingPathComponent("quarantine", isDirectory: true) }
+    /// Signed update offers: state, staged package and the receipt key. The
+    /// staged package is deleted again as soon as the installer has consumed it.
+    public static var updates: URL { root.appendingPathComponent("updates", isDirectory: true) }
+    public static var updateStaging: URL { updates.appendingPathComponent("staging", isDirectory: true) }
+    /// The Discover aggregator's own output and signing key. Separate from
+    /// `pairing/` so this key can never sign a pairing offer.
+    public static var discover: URL { root.appendingPathComponent("discover", isDirectory: true) }
 
     public static var settingsFile: URL { config.appendingPathComponent("settings.json") }
     /// Optional `{ "refs": { "<catalog id>": "<ollama reference>" } }` document:
@@ -3094,6 +3137,11 @@ public enum AppPaths {
     public static var privacyApprovalKeyFile: URL { vault.appendingPathComponent("privacy-approval.key") }
     public static var installLogFile: URL { logs.appendingPathComponent("install.log") }
     public static var auditLogFile: URL { logs.appendingPathComponent("node.log") }
+    public static var updateStateFile: URL { updates.appendingPathComponent("state.json") }
+    public static var updateApprovalKeyFile: URL { vault.appendingPathComponent("update-approval.key") }
+    public static var discoverFeedFile: URL { discover.appendingPathComponent("feed.json") }
+    public static var discoverStateFile: URL { discover.appendingPathComponent("state.json") }
+    public static var discoverSigningKeyFile: URL { vault.appendingPathComponent("discover-signing.key") }
 
     /// Subpaths used by the LTX-2.5 MLX workspace.
     public static var ltxRepo: URL { ltxWorkspace.appendingPathComponent("ltx-2-mlx", isDirectory: true) }
@@ -3105,7 +3153,8 @@ public enum AppPaths {
     public static func ensureLayout() throws -> [URL] {
         let directories = [
             root, engines, ltxWorkspace, weights, logs, config, vault, sealed,
-            pairing, popopx, outbox, sandboxes, ledger, output, quarantine
+            pairing, popopx, outbox, sandboxes, ledger, output, quarantine,
+            updates, updateStaging, discover
         ]
         for url in directories {
             try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
@@ -3746,6 +3795,19 @@ public protocol NodeConsoleFacade: Sendable {
     /// reference. The secret is an argument and never a return value, so no poll payload and no
     /// settings document can carry one by accident.
     func storeHubCredential(bridge: String, serverID: String, secret: String) async -> PrivacyToolResponse
+    /// The update card's current state. Never dials anything; the manifest host is
+    /// only contacted by `updateCheck()`.
+    func updateStatus() async -> UpdateSnapshot
+    /// One manifest fetch and signature check. Detection only — no package is
+    /// downloaded here, and nothing is installed.
+    func updateCheck() async -> UpdateCheckReport
+    /// Applies an owner's 「立即更新 / 稍后提醒」. The console path mints its own
+    /// receipt inside the node; the phone path carries one in its command payload.
+    func updateDecision(verb: String) async -> UpdateDecisionReport
+    /// The Discover card's current state, served from the last local run.
+    func discoverStatus() async -> DiscoverSnapshot
+    /// Runs the aggregator now. A no-op refusal when the feature is off.
+    func discoverRefresh() async -> DiscoverRefreshReport
 }
 
 public extension NodeConsoleFacade {
@@ -3779,6 +3841,23 @@ public extension NodeConsoleFacade {
     /// because "nothing accepted it" is the only honest answer a fake can give.
     func storeHubCredential(bridge: String, serverID: String, secret: String) async -> PrivacyToolResponse {
         PrivacyToolResponse.failure(503, "本节点没有钥匙串存储 / this facade has no credential store")
+    }
+
+    /// Fakes report the feature as off instead of pretending a check succeeded.
+    func updateStatus() async -> UpdateSnapshot { .disabled }
+
+    func updateCheck() async -> UpdateCheckReport {
+        UpdateCheckReport(outcome: "disabled", detail: "本节点没有更新检查器 / this facade has no update checker", update: .disabled)
+    }
+
+    func updateDecision(verb: String) async -> UpdateDecisionReport {
+        UpdateDecisionReport(outcome: "refused", ok: false, detail: "本节点没有更新检查器 / this facade has no update checker", update: .disabled)
+    }
+
+    func discoverStatus() async -> DiscoverSnapshot { .disabled }
+
+    func discoverRefresh() async -> DiscoverRefreshReport {
+        DiscoverRefreshReport(outcome: "disabled", detail: "本节点没有发现聚合器 / this facade has no aggregator", discover: .disabled)
     }
 }
 
@@ -3830,6 +3909,19 @@ public enum ConsoleRoute {
     /// paired phone or loopback script — may ask for one. The reply never repeats the value.
     public static let hubCredential = "/api/hub/credential"
 
+    // MARK: Signed updates and the Discover feed
+    //
+    // Both are console-only POSTs. Detection ("check") is still a POST because it
+    // reaches the operator-pinned manifest host; approval ("decision") is the one
+    // path that may download and hand a package to macOS, and the receipt it needs
+    // is minted inside the node — the page never receives a capability, only the
+    // answer to a click. `/api/discover/refresh` runs the aggregator now; the
+    // schedule itself lives in the app tick.
+
+    public static let updateCheck = "/api/update/check"
+    public static let updateDecision = "/api/update/decision"
+    public static let discoverRefresh = "/api/discover/refresh"
+
     /// `/v1/tools/{domain}/proposals/{id}/{verb}` — the approval gate, addressed by
     /// proposal id.
     public static func proposalDecision(_ domain: String, id: String, verb: String) -> String {
@@ -3853,7 +3945,8 @@ public enum ConsoleRoute {
         index, snapshot, events, installStart, installCancel,
         pairingRotate, pairingQR, pairingRevoke, settings,
         engineToggle, engineInvoke, commandInject, health, privacyAuthorize, privacyDecision,
-        hubCredential, discoveryCapabilities, discoveryScan
+        hubCredential, discoveryCapabilities, discoveryScan,
+        updateCheck, updateDecision, discoverRefresh
     ]
 
     /// The tool endpoints, kept out of `all` because `all` is the SPA surface the
