@@ -175,6 +175,13 @@ public actor NodeConsole: NodeConsoleFacade {
     /// executable this is the same process-volatile answer the hub bridges get.
     private let godsEyeSecrets: any HubSecretStoring = HubSecrets.makeStore()
 
+    /// Built the first time the owner switches the assistant on, then kept across
+    /// switches so the SQLite audit trail and the approval queue survive a reboot of
+    /// the card. Default off costs no database and no key file.
+    private var assistant: PersonalAssistantManager?
+    private let assistantSecrets: any HubSecretStoring = HubSecrets.makeStore()
+    private let assistantProvider = AssistantLiveSentinelProvider()
+
     private var consoleURLString = ""
     /// Short node fingerprint, used only inside minted call links and UIDs.
     private var nodeReference = ""
@@ -223,6 +230,7 @@ public actor NodeConsole: NodeConsoleFacade {
         await configureUpdates(from: current)
         await configureDiscover(from: current)
         await configureGodsEye(from: current)
+        await configureAssistant(from: current)
         guard routerTask == nil else { return }
         routerTask = Task { [weak self] in
             guard let self else { return }
@@ -248,6 +256,7 @@ public actor NodeConsole: NodeConsoleFacade {
         routerTask = nil
         clockTask?.cancel()
         clockTask = nil
+        await assistant?.stop()
         await godsEye?.shutdown()
         await signaling.stop()
         await hub.publish(.system, "节点已停止 / node stopped", level: .warning)
@@ -290,6 +299,22 @@ public actor NodeConsole: NodeConsoleFacade {
         }
         if command.serviceId == "discover" {
             await routeDiscover(command)
+            return
+        }
+        // The assistant's approval replies arrive as ordinary commands on the paired
+        // session; the receipt in the payload is the same one the phone card minted.
+        if command.serviceId == "assistant" {
+            let result = await handleAssistantCommand(
+                command, source: command.authenticated ? "phone" : "phone-unauthenticated"
+            )
+            record(result)
+            let delivered = await signaling.deliver(result, to: command.serviceId)
+            await hub.publish(
+                .system,
+                delivered ? "私人助手回执已回传 / decision delivered" : "私人助手回执待回传 / queued in outbox",
+                level: result.ok ? .notice : .warning,
+                payload: ["commandId": .string(command.id), "delivered": .bool(delivered)]
+            )
             return
         }
         // The privacy namespaces are tools, not subscription businesses, so they are
@@ -538,6 +563,181 @@ public actor NodeConsole: NodeConsoleFacade {
             registry: hubRegistry,
             mcp: privacy?.mcp,
             secrets: godsEyeSecrets
+        )
+    }
+
+    // MARK: Personal assistant
+
+    /// Builds the assistant the first time it is switched on, then re-applies every
+    /// save. The default-off path constructs nothing: no SQLite file, no HMAC key,
+    /// no IMAP endpoint. Once built it is kept across switches so the audit trail
+    /// and the approval queue survive the card being turned off and on again.
+    private func configureAssistant(from settings: NodeSettings, now: Date = Date()) async {
+        assistantProvider.set(privacy?.smartHome)
+        let config = settings.assistantConfig.normalised
+        var hubs = settings.hubs.normalised
+        if settings.godsEyeConfig.enabled, !hubs.allowMcpBridge {
+            hubs.allowMcpBridge = true
+        }
+        if let assistant {
+            await assistant.apply(
+                config: config,
+                privacy: settings.bridges.normalised,
+                hub: hubs,
+                godsEyeEnabled: settings.godsEyeConfig.enabled,
+                now: now
+            )
+            return
+        }
+        guard config.enabled else { return }
+        let store = AssistantAuditStore(url: AppPaths.assistantDatabaseFile)
+        let gate = AssistantApprovalGate(
+            signer: AssistantApprovalSigner.loadOrCreate(at: AppPaths.assistantApprovalKeyFile),
+            audit: store
+        )
+        let scheduler = LocalTaskScheduler(config: config, store: store)
+        let mail = MailAssistantBridge(
+            config: config.mail,
+            secrets: assistantSecrets,
+            transport: MailNetTransport(),
+            gate: gate,
+            store: store
+        )
+        let sentinel = HomeSentinelLoop(
+            config: config,
+            provider: assistantProvider,
+            gate: gate,
+            store: store
+        )
+        let manager = PersonalAssistantManager(
+            config: config,
+            privacy: settings.bridges.normalised,
+            hub: hubs,
+            godsEyeEnabled: settings.godsEyeConfig.enabled,
+            secrets: assistantSecrets,
+            gate: gate,
+            store: store,
+            scheduler: scheduler,
+            mail: mail,
+            sentinel: sentinel
+        ) { [weak self] result in
+            guard let self else { return false }
+            return await self.deliverAssistantCard(result)
+        }
+        self.assistant = manager
+        await manager.apply(config: config, now: now)
+        await manager.start()
+        await hub.publish(
+            .system,
+            "私人助手已装配 / the personal assistant is assembled",
+            level: .notice,
+            payload: ["enabled": .bool(config.enabled)]
+        )
+    }
+
+    /// One assistant card over the paired E2E session, mirrored into the console
+    /// drawer. The return value is the delivery answer, so the caller can audit a
+    /// card that was queued instead of claiming the phone received it.
+    private func deliverAssistantCard(_ result: CommandResult) async -> Bool {
+        record(result)
+        let delivered = await signaling.deliver(result, to: "assistant")
+        await hub.publish(
+            .system,
+            delivered ? "私人助手卡片已回传 / assistant card delivered" : "私人助手卡片待回传 / queued in outbox",
+            level: delivered ? .notice : .warning,
+            payload: ["card": .string(String(result.headline.prefix(80))), "delivered": .bool(delivered)]
+        )
+        return delivered
+    }
+
+    /// The card's data. Before the owner switches it on, this is the saved document
+    /// rendered honestly: every loop off, no credentials read, no socket.
+    private func assistantSnapshotValue() async -> AssistantSnapshot {
+        if let assistant { return await assistant.snapshot() }
+        let config = (await settings.current()).assistantConfig.normalised
+        var snapshot = AssistantSnapshot.empty
+        snapshot.enabled = config.enabled
+        snapshot.scheduler = AssistantSchedulerCard(
+            enabled: config.enabled,
+            briefingEnabled: config.briefing.enabled,
+            briefingHour: config.briefing.hour,
+            briefingMinute: config.briefing.minute,
+            patrolEnabled: config.patrol.enabled,
+            patrolIntervalMinutes: config.patrol.intervalMinutes,
+            offlineMinutes: config.patrol.offlineMinutes
+        )
+        snapshot.mail = AssistantMailCard(
+            enabled: config.mail.enabled,
+            configured: config.mail.hasAccount,
+            usable: config.mail.usable,
+            imapHost: config.mail.imapHost,
+            imapPort: config.mail.imapPort,
+            smtpHost: config.mail.smtpHost,
+            smtpPort: config.mail.smtpPort,
+            username: config.mail.username,
+            fromAddress: config.mail.fromAddress,
+            imapPasswordRef: config.mail.imapPasswordRef,
+            smtpPasswordRef: config.mail.smtpPasswordRef,
+            imapStored: assistantSecrets.secret(for: config.mail.imapPasswordRef) != nil,
+            smtpStored: assistantSecrets.secret(for: config.mail.smtpPasswordRef) != nil,
+            credentialBacking: assistantSecrets.backingName,
+            lookbackDays: config.mail.lookbackDays,
+            maxMessages: config.mail.maxMessages,
+            boundary: "IMAPS/SMTPS 993/465 · 只读 EXAMINE · 发送须审批 / read-only fetch, approved send"
+        )
+        snapshot.boundary = Self.assistantBoundary
+        snapshot.updatedAt = Date()
+        return snapshot
+    }
+
+    private static let assistantBoundary =
+        "执行层 HMAC 审批回执 · 127.0.0.1 控制台 · 邮件为唯一命名外部出口 / executor HMAC receipts · loopback console · mail is the one named egress exception"
+
+    /// Parses `assistant::{approve|reject}::{"id":"…","receipt":"…"}`. The receipt is
+    /// signed over kind/target/digest/expiry inside the gate, so a stale one cannot
+    /// authorize a different operation or a body that changed after the card.
+    private static func assistantPayload(_ text: String) -> (id: String, receipt: String)? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = object["id"] as? String, !id.isEmpty,
+              let receipt = object["receipt"] as? String, !receipt.isEmpty else {
+            return nil
+        }
+        return (id, receipt)
+    }
+
+    private func handleAssistantCommand(_ command: NodeCommand, source: String) async -> CommandResult {
+        let label = "POPOPX 私人助手 / Private Assistant"
+        guard command.action == "approve" || command.action == "reject" else {
+            return CommandResult(
+                commandID: command.id, engine: .shadowCos, ok: false,
+                headline: "未知私人助手操作 / unknown assistant action: \(command.action)",
+                cardLabel: label
+            )
+        }
+        guard let assistant else {
+            return CommandResult(
+                commandID: command.id, engine: .shadowCos, ok: false,
+                headline: "私人助手未装配 / the assistant is not assembled", cardLabel: label
+            )
+        }
+        guard let payload = Self.assistantPayload(command.payload) else {
+            return CommandResult(
+                commandID: command.id, engine: .shadowCos, ok: false,
+                headline: "审批载荷无效 / malformed approval payload", cardLabel: label
+            )
+        }
+        let report = await assistant.decide(
+            proposalID: payload.id, verb: command.action, receipt: payload.receipt
+        )
+        return CommandResult(
+            commandID: command.id,
+            engine: .shadowCos,
+            ok: report.ok,
+            headline: "私人助手 · \(report.outcome) / \(report.ok ? "applied" : "not applied")",
+            body: report.detail,
+            metrics: ["outcome": .string(report.outcome), "source": .string(source)],
+            cardLabel: label
         )
     }
 
@@ -970,7 +1170,8 @@ public actor NodeConsole: NodeConsoleFacade {
             privacy: await privacySnapshot(saved: current),
             update: await updateSnapshotValue(),
             discover: await discoverSnapshotValue(),
-            godsEye: await godsEyeSnapshotValue()
+            godsEye: await godsEyeSnapshotValue(),
+            assistant: await assistantSnapshotValue()
         )
     }
 
@@ -1070,6 +1271,7 @@ public actor NodeConsole: NodeConsoleFacade {
         // After the privacy stack: a save may have rebuilt it, and the Gods Eye
         // bridge must hold the MCP bridge that is actually serving requests.
         await configureGodsEye(from: stored)
+        await configureAssistant(from: stored)
         await hub.publish(
             .settings,
             "配置已保存（修订 \(stored.revision)）/ settings saved",
@@ -1104,6 +1306,12 @@ public actor NodeConsole: NodeConsoleFacade {
         }
         if command.serviceId == "discover" {
             return await routeDiscover(command)
+        }
+        if command.serviceId == "assistant" {
+            let result = await handleAssistantCommand(command, source: "console-drawer")
+            record(result)
+            await hub.publish(.result, result.cardText, level: result.ok ? .success : .error)
+            return result
         }
         if let call = PrivacyToolRoute.parseCommand(
             serviceId: command.serviceId,
@@ -1314,6 +1522,61 @@ public actor NodeConsole: NodeConsoleFacade {
         ])
     }
 
+    // MARK: NodeConsoleFacade — personal assistant
+
+    public func assistantControl(verb: String) async -> AssistantControlReport {
+        guard let assistant else {
+            return .refused("私人助手未开启 / the assistant is off", snapshot: await assistantSnapshotValue())
+        }
+        let report = await assistant.control(verb: verb)
+        await hub.publish(
+            .system,
+            "私人助手 · \(report.outcome)",
+            level: report.ok ? .notice : .warning,
+            payload: ["verb": .string(verb), "outcome": .string(report.outcome)]
+        )
+        return report
+    }
+
+    public func assistantDecision(id: String, verb: String) async -> AssistantDecisionReport {
+        guard let assistant else {
+            return AssistantDecisionReport(
+                ok: false, outcome: "refused",
+                detail: "私人助手未开启 / the assistant is off",
+                assistant: await assistantSnapshotValue()
+            )
+        }
+        let report = await assistant.consoleDecide(proposalID: id, verb: verb)
+        await hub.publish(
+            .system,
+            "私人助手审批 · \(report.outcome)",
+            level: report.ok ? .success : .warning,
+            payload: ["outcome": .string(report.outcome)]
+        )
+        return report
+    }
+
+    /// Console-only, like `storeHubCredential`: the value goes to the assistant's
+    /// Keychain store and the reply is the reference. Nothing here echoes it.
+    public func storeMailCredential(kind: String, secret: String) async -> AssistantCredentialReport {
+        guard let assistant else {
+            return AssistantCredentialReport(
+                ok: false,
+                detail: "私人助手未开启 / the assistant is off",
+                reference: "",
+                assistant: await assistantSnapshotValue()
+            )
+        }
+        let report = await assistant.storeMailCredential(kind: kind, secret: secret)
+        await hub.publish(
+            .system,
+            report.ok ? "邮箱凭据已存入钥匙串 / mail credential stored" : "邮箱凭据未存入 / mail credential refused",
+            level: report.ok ? .success : .warning,
+            payload: ["kind": .string(kind), "reference": .string(report.reference)]
+        )
+        return report
+    }
+
     // MARK: NodeConsoleFacade — signed updates and Discover
 
     public func updateStatus() async -> UpdateSnapshot {
@@ -1446,6 +1709,46 @@ public actor NodeConsole: NodeConsoleFacade {
     /// the test target all share one copy of the grammar.
     public static func parse(wire: String) -> NodeCommand? {
         NodeWire.parseCommand(wire)
+    }
+}
+
+// MARK: - Live sentinel provider
+
+/// Bridges the sentinel's protocol to whichever `SmartHomeBridge` the privacy stack
+/// owns. The stack is built at `start()` and may not exist yet when the assistant is
+/// assembled; the lock makes the later hand-off visible without rebuilding the loop.
+final class AssistantLiveSentinelProvider: HomeSentinelEntityProviding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var bridge: SmartHomeBridge?
+
+    func set(_ bridge: SmartHomeBridge?) {
+        lock.lock()
+        self.bridge = bridge
+        lock.unlock()
+    }
+
+    private func current() -> SmartHomeBridge? {
+        lock.lock()
+        defer { lock.unlock() }
+        return bridge
+    }
+
+    func sentinelEntities() async -> [SmartHomeEntityCard] {
+        guard let bridge = current() else { return [] }
+        return await bridge.entityCards()
+    }
+
+    func sentinelReadOnly() async -> Bool {
+        guard let bridge = current() else { return true }
+        return await bridge.assistantReadOnlyMode()
+    }
+
+    func performSentinelRepair(_ payload: HubCallPayload) async -> HomeRepairOutcome {
+        guard let bridge = current() else {
+            return .refused("家居桥接未装配 / the smart-home bridge is not assembled")
+        }
+        let execution = await bridge.performAssistantRepair(payload)
+        return HomeRepairOutcome(ok: execution.ok, detail: execution.message)
     }
 }
 

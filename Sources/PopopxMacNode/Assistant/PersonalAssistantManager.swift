@@ -1,0 +1,619 @@
+//
+//  PersonalAssistantManager.swift
+//  PopopxMacNode — the assistant's front door and its composition.
+//
+//  The manager is where the four pieces meet:
+//
+//    LocalTaskScheduler ── when
+//    MailAssistantBridge ── read / draft / send
+//    HomeSentinelLoop ───── watch / propose / repair
+//    AssistantApprovalGate ─ one receipt-bound approval for every write
+//
+//  It owns no policy of its own beyond ordering: the gate decides whether a write
+//  is authorized, the mail bridge and sentinel decide whether their slice of the
+//  world is enabled, and the scheduler decides when a job is due. The manager's
+//  job is to turn their answers into one console snapshot and one phone card.
+//
+
+import Foundation
+
+public actor PersonalAssistantManager {
+    public typealias Delivery = @Sendable (CommandResult) async -> Bool
+
+    private var config: AssistantConfig
+    private var privacy: PrivacyBridgeConfig
+    private var hub: HubConfig
+    private var godsEyeEnabled: Bool
+    private let secrets: HubSecretStoring
+    private let gate: AssistantApprovalGate
+    private let store: AssistantAuditStore
+    private let scheduler: LocalTaskScheduler
+    private let mail: MailAssistantBridge
+    private let sentinel: HomeSentinelLoop
+    private let clock: AssistantClock
+    private let deliver: Delivery
+
+    private var handlersInstalled = false
+    private var pushed: Set<String> = []
+    private var lastReport = ""
+
+    public init(
+        config: AssistantConfig,
+        privacy: PrivacyBridgeConfig,
+        hub: HubConfig,
+        godsEyeEnabled: Bool,
+        secrets: HubSecretStoring,
+        gate: AssistantApprovalGate,
+        store: AssistantAuditStore,
+        scheduler: LocalTaskScheduler,
+        mail: MailAssistantBridge,
+        sentinel: HomeSentinelLoop,
+        clock: AssistantClock = SystemAssistantClock(),
+        deliver: @escaping Delivery
+    ) {
+        self.config = config.normalised
+        self.privacy = privacy
+        self.hub = hub
+        self.godsEyeEnabled = godsEyeEnabled
+        self.secrets = secrets
+        self.gate = gate
+        self.store = store
+        self.scheduler = scheduler
+        self.mail = mail
+        self.sentinel = sentinel
+        self.clock = clock
+        self.deliver = deliver
+    }
+
+    // MARK: - Lifecycle
+
+    public func start() async {
+        await ensureHandlers()
+        guard config.enabled, config.briefing.enabled || config.patrol.enabled else { return }
+        await scheduler.start()
+    }
+
+    public func stop() async {
+        await scheduler.stop()
+    }
+
+    public func apply(
+        config next: AssistantConfig,
+        privacy nextPrivacy: PrivacyBridgeConfig? = nil,
+        hub nextHub: HubConfig? = nil,
+        godsEyeEnabled nextGodsEye: Bool? = nil,
+        now: Date? = nil
+    ) async {
+        let moment = now ?? clock.now
+        let before = config
+        let normalised = next.normalised
+        config = normalised
+        if let nextPrivacy { privacy = nextPrivacy }
+        if let nextHub { hub = nextHub }
+        if let nextGodsEye { godsEyeEnabled = nextGodsEye }
+
+        let connectorChanged = before.mail != normalised.mail || before.repairs != normalised.repairs
+        if connectorChanged || !normalised.enabled {
+            let cancelled = await gate.cancelPending(reason: normalised.enabled ? "assistant configuration changed" : "assistant switched off", now: moment)
+            if cancelled > 0 {
+                await store.record(channel: "assistant", event: "pending_cancelled", detail: "\(cancelled) proposals", outcome: "rejected", at: moment)
+            }
+            pushed.removeAll()
+        }
+        if before.enabled != normalised.enabled {
+            await store.record(
+                channel: "assistant",
+                event: normalised.enabled ? "enabled" : "disabled",
+                detail: "owner switch",
+                at: moment
+            )
+        }
+        await scheduler.update(config: normalised, now: moment)
+        await mail.update(config: normalised.mail)
+        await sentinel.update(config: normalised)
+        if !normalised.mail.enabled { await mail.reset() }
+        if !normalised.enabled {
+            await scheduler.stop()
+            await mail.reset()
+            await sentinel.reset()
+        } else if normalised.briefing.enabled || normalised.patrol.enabled {
+            await ensureHandlers()
+            await scheduler.start()
+        }
+        await recordConnectorSummary(now: moment)
+    }
+
+    /// The test and console one-shot. Installs the handlers without starting the
+    /// background loop, then asks the scheduler which jobs are due at `now`.
+    public func tickNow(now: Date? = nil) async {
+        await ensureHandlers()
+        await scheduler.tick(now: now)
+    }
+
+    public func schedulerStatus(now: Date? = nil) async -> AssistantSchedulerCard {
+        await scheduler.status(now: now)
+    }
+
+    // MARK: - Briefing and patrol
+
+    /// The daily briefing handler. Mail triage first, then a home scan, then one
+    /// card plus one approval card per draft. The card is delivered over the paired
+    /// E2E session; a failed delivery is audited, not hidden.
+    public func runBriefing(now: Date? = nil) async -> String {
+        let moment = now ?? clock.now
+        guard config.enabled else { return "私人助手未开启 / the assistant is off" }
+        var lines: [String] = []
+        var draftCount = 0
+
+        if config.mail.enabled {
+            let triage = await mail.triage(now: moment)
+            let counts = Dictionary(grouping: triage.messages, by: { $0.category })
+                .mapValues(\.count)
+            lines.append("邮件：待回复 \(counts[.needsReply] ?? 0) · 账单 \(counts[.bill] ?? 0) · 邀请 \(counts[.invitation] ?? 0) · 通知 \(counts[.notification] ?? 0)")
+            for message in triage.messages.prefix(5) {
+                var row = "· [\(message.category.labelZh)] \(message.subject)"
+                if !message.amount.isEmpty { row += " · \(message.amount)" }
+                if !message.deadline.isEmpty { row += " · 截止 \(message.deadline)" }
+                lines.append(String(row.prefix(180)))
+            }
+            let proposals = await propose(drafts: Array(triage.drafts.prefix(3)), now: moment)
+            draftCount = proposals
+            if proposals > 0 { lines.append("回复草稿：\(proposals) 封，已推送到手机等待批准") }
+            if !triage.summaryLines.isEmpty { lines.append(contentsOf: triage.summaryLines.prefix(2)) }
+        } else {
+            lines.append("邮件：未启用")
+        }
+
+        if config.patrol.enabled {
+            let report = await sentinel.scan(now: moment)
+            lines.append("设备巡检：\(report.anomalies.count) 项异常 · \(report.proposed) 项待审批")
+            for anomaly in report.anomalies.prefix(4) {
+                lines.append("· \(anomaly.display.isEmpty ? anomaly.entityID : anomaly.display)：\(anomaly.state)")
+            }
+        } else {
+            lines.append("设备巡检：未启用")
+        }
+
+        await pushPending(now: moment, limit: 2)
+        let body = lines.joined(separator: "\n")
+        let delivered = await push(
+            headline: "私人助手简报 · \(stamp(moment))",
+            body: body,
+            metrics: [
+                "briefing": .bool(true),
+                "drafts": .int(draftCount),
+                "connectors": .int(connectors(now: moment).filter(\.enabled).count)
+            ],
+            now: moment
+        )
+        lastReport = body
+        await store.record(
+            channel: "assistant",
+            event: "briefing",
+            detail: "drafts \(draftCount) · delivered \(delivered ? "yes" : "no") · \(body.count) chars",
+            outcome: delivered ? "ok" : "delivery_failed",
+            at: moment
+        )
+        return "简报已生成 / briefing ready · drafts \(draftCount)"
+    }
+
+    /// The patrol handler. It only reports and proposes; no repair is attempted.
+    public func runPatrol(now: Date? = nil) async -> String {
+        let moment = now ?? clock.now
+        guard config.enabled else { return "私人助手未开启 / the assistant is off" }
+        guard config.patrol.enabled else { return "巡检未开启 / the patrol is off" }
+        let report = await sentinel.scan(now: moment)
+        var lines: [String] = [
+            "扫描 \(report.anomalies.count) 项异常 · 新建 \(report.proposed) 项修复提案"
+        ]
+        for anomaly in report.anomalies.prefix(6) {
+            lines.append("· \(anomaly.display.isEmpty ? anomaly.entityID : anomaly.display)：\(anomaly.state) · \(max(1, anomaly.offlineSeconds / 60)) 分钟")
+        }
+        if !report.skipped.isEmpty {
+            lines.append("跳过：" + report.skipped.prefix(3).joined(separator: " · "))
+        }
+        await pushPending(now: moment, limit: 3)
+        let body = lines.joined(separator: "\n")
+        let delivered = await push(
+            headline: "家庭设备巡检 · \(report.anomalies.count) 项异常",
+            body: body,
+            metrics: [
+                "patrol": .bool(true),
+                "anomalies": .int(report.anomalies.count),
+                "proposed": .int(report.proposed)
+            ],
+            now: moment
+        )
+        lastReport = body
+        await store.record(
+            channel: "assistant",
+            event: "patrol",
+            detail: "anomalies \(report.anomalies.count) · proposed \(report.proposed) · delivered \(delivered ? "yes" : "no")",
+            outcome: delivered ? "ok" : "delivery_failed",
+            at: moment
+        )
+        return "巡检完成 / patrol done · \(report.anomalies.count) anomalies · \(report.proposed) proposed"
+    }
+
+    // MARK: - Mail actions
+
+    /// Read-only triage on demand, with the same draft proposals the briefing makes.
+    public func refreshMail(now: Date? = nil) async -> String {
+        let moment = now ?? clock.now
+        guard config.enabled, config.mail.enabled else { return "邮件助手未启用 / mail is off" }
+        let triage = await mail.triage(now: moment)
+        let proposed = await propose(drafts: Array(triage.drafts.prefix(3)), now: moment)
+        await pushPending(now: moment, limit: 3)
+        return "邮件 \(triage.messages.count) 封 · 草稿提案 \(proposed) 封"
+    }
+
+    /// Wraps drafts in gate proposals and pushes each card. The draft body is held
+    /// by the mail bridge, never by the card.
+    @discardableResult
+    public func propose(drafts: [MailOutgoingDraft], now: Date? = nil) async -> Int {
+        let moment = now ?? clock.now
+        var count = 0
+        for draft in drafts {
+            guard let ticket = await mail.propose(draft: draft, now: moment) else { continue }
+            count += 1
+            pushed.insert(ticket.proposalID)
+            await pushApprovalCard(ticket, now: moment)
+        }
+        return count
+    }
+
+    // MARK: - Approval
+
+    /// The only road to execution. Both the console and the phone arrive here with
+    /// an id and a receipt; the gate validates the receipt against the binding, and
+    /// then the relevant executor revalidates before doing I/O.
+    public func decide(
+        proposalID: String,
+        verb: String,
+        receipt: String,
+        now: Date? = nil
+    ) async -> AssistantDecisionReport {
+        let moment = now ?? clock.now
+        let cleanVerb = verb.lowercased()
+        do {
+            _ = try await gate.decide(id: proposalID, verb: cleanVerb, receipt: receipt, now: moment)
+        } catch {
+            let detail = AssistantRedaction.scrub(String(describing: error))
+            await store.record(channel: "assistant", event: "decision_refused", detail: "\(proposalID.prefix(8)) · \(detail)", outcome: "refused", at: moment)
+            return AssistantDecisionReport(ok: false, outcome: "refused", detail: detail, assistant: await snapshot(now: moment))
+        }
+        if cleanVerb == "reject" {
+            await store.record(channel: "assistant", event: "rejected", detail: proposalID, outcome: "rejected", at: moment)
+            return AssistantDecisionReport(ok: true, outcome: "rejected", detail: "已驳回 / rejected", assistant: await snapshot(now: moment))
+        }
+        guard let binding = await gate.binding(id: proposalID) else {
+            return AssistantDecisionReport(ok: false, outcome: "unknown", detail: "提案不存在 / unknown proposal", assistant: await snapshot(now: moment))
+        }
+
+        let approval = AssistantApproval(proposalID: proposalID, receipt: receipt)
+        let detail: String
+        let ok: Bool
+        switch binding.kind {
+        case .mailSend:
+            guard let draft = await mail.draft(id: proposalID) else {
+                await gate.complete(id: proposalID, ok: false, detail: "draft missing", now: moment)
+                ok = false
+                detail = "草稿不存在 / the draft is gone"
+                break
+            }
+            let outcome = await mail.sendApproved(draft, approval: approval, now: moment)
+            ok = outcome.ok
+            detail = outcome.detail
+        case .homeService:
+            let outcome = await sentinel.perform(proposalID: proposalID, approval: approval, now: moment)
+            ok = outcome.ok
+            detail = outcome.detail
+        }
+        await store.record(
+            channel: "assistant",
+            event: ok ? "executed" : "execution_failed",
+            detail: "\(binding.kind.rawValue) · \(binding.target) · \(detail)",
+            outcome: ok ? "ok" : "failed",
+            at: moment
+        )
+        if ok { pushed.remove(proposalID) }
+        _ = await push(
+            headline: "私人助手 · \(ok ? "已执行" : "执行失败") · \(binding.kind.labelZh)",
+            body: "\(binding.kind.labelZh)\n目标：\(binding.target)\n结果：\(detail)",
+            metrics: ["approved": .bool(true), "executed": .bool(ok)],
+            now: moment
+        )
+        return AssistantDecisionReport(
+            ok: ok,
+            outcome: ok ? "executed" : "failed",
+            detail: detail,
+            assistant: await snapshot(now: moment)
+        )
+    }
+
+    /// The console's click. The page sends only an id and a verb; the receipt is
+    /// minted inside the node, so no poll payload carries a write capability.
+    public func consoleDecide(proposalID: String, verb: String, now: Date? = nil) async -> AssistantDecisionReport {
+        let moment = now ?? clock.now
+        guard let receipt = await gate.receipt(id: proposalID, now: moment) else {
+            return AssistantDecisionReport(
+                ok: false,
+                outcome: "refused",
+                detail: "提案不存在或已过期 / unknown or expired proposal",
+                assistant: await snapshot(now: moment)
+            )
+        }
+        return await decide(proposalID: proposalID, verb: verb, receipt: receipt, now: moment)
+    }
+
+    public func pending(now: Date? = nil) async -> [AssistantProposalCard] {
+        await gate.pending(now: now)
+    }
+
+    // MARK: - Credentials
+
+    /// Stores one mail password. The reply is the reference; the value is never
+    /// echoed and never written to the audit row.
+    public func storeMailCredential(kind: String, secret: String, now: Date? = nil) async -> AssistantCredentialReport {
+        let moment = now ?? clock.now
+        let clean = kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let reference: String
+        switch clean {
+        case "imap": reference = config.mail.imapPasswordRef
+        case "smtp": reference = config.mail.smtpPasswordRef
+        default:
+            return AssistantCredentialReport(
+                ok: false,
+                detail: "凭据类别需为 imap 或 smtp / kind must be imap or smtp",
+                reference: "",
+                assistant: await snapshot(now: moment)
+            )
+        }
+        guard !secret.isEmpty, secret.utf8.count <= HubSecrets.maximumSecretLength else {
+            await store.record(channel: "assistant", event: "credential_refused", detail: "\(clean): empty or too long", outcome: "refused", at: moment)
+            return AssistantCredentialReport(
+                ok: false,
+                detail: "凭据为空或过长 / empty or too long",
+                reference: "",
+                assistant: await snapshot(now: moment)
+            )
+        }
+        let stored = secrets.store(secret, for: reference)
+        await store.record(
+            channel: "assistant",
+            event: stored ? "credential_stored" : "credential_refused",
+            detail: "\(clean) → \(reference)",
+            outcome: stored ? "ok" : "refused",
+            at: moment
+        )
+        return AssistantCredentialReport(
+            ok: stored,
+            detail: stored ? "已存入钥匙串 / stored" : "钥匙串写入失败 / the credential store refused",
+            reference: stored ? reference : "",
+            assistant: await snapshot(now: moment)
+        )
+    }
+
+    // MARK: - Control
+
+    public func control(verb: String, now: Date? = nil) async -> AssistantControlReport {
+        let moment = now ?? clock.now
+        let clean = verb.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard config.enabled else {
+            return .refused("私人助手未开启 / the assistant is off", snapshot: await snapshot(now: moment))
+        }
+        switch clean {
+        case "briefingNow":
+            guard config.briefing.enabled else {
+                return .refused("简报未开启 / the briefing is off", snapshot: await snapshot(now: moment))
+            }
+            await ensureHandlers()
+            let detail = await scheduler.runBriefingNow(now: moment)
+            return AssistantControlReport(ok: true, outcome: "briefing", detail: detail, assistant: await snapshot(now: moment))
+        case "patrolNow":
+            guard config.patrol.enabled else {
+                return .refused("巡检未开启 / the patrol is off", snapshot: await snapshot(now: moment))
+            }
+            await ensureHandlers()
+            let detail = await scheduler.runPatrolNow(now: moment)
+            return AssistantControlReport(ok: true, outcome: "patrol", detail: detail, assistant: await snapshot(now: moment))
+        case "refreshMail", "proposeDrafts":
+            guard config.mail.enabled else {
+                return .refused("邮件助手未开启 / mail is off", snapshot: await snapshot(now: moment))
+            }
+            let detail = await refreshMail(now: moment)
+            return AssistantControlReport(ok: true, outcome: "mail", detail: detail, assistant: await snapshot(now: moment))
+        case "cancelPending":
+            let cancelled = await gate.cancelPending(reason: "owner cancelled from the console", now: moment)
+            pushed.removeAll()
+            await store.record(channel: "assistant", event: "cancelled", detail: "\(cancelled) proposals", at: moment)
+            return AssistantControlReport(
+                ok: true,
+                outcome: "cancelled",
+                detail: "已撤销 \(cancelled) 项待审批 / cancelled \(cancelled) proposals",
+                assistant: await snapshot(now: moment)
+            )
+        default:
+            return .refused("未知控制指令 / unknown control verb: \(clean)", snapshot: await snapshot(now: moment))
+        }
+    }
+
+    // MARK: - Snapshot
+
+    public func snapshot(now: Date? = nil) async -> AssistantSnapshot {
+        let moment = now ?? clock.now
+        return AssistantSnapshot(
+            enabled: config.enabled,
+            scheduler: await scheduler.status(now: moment),
+            mail: await mail.status(),
+            connectors: connectors(now: moment),
+            pending: await gate.pending(now: moment),
+            drafts: await mail.draftCards(),
+            audit: await store.recent(limit: AssistantAuditStore.snapshotEntries),
+            boundary: "执行层 HMAC 审批回执 · 127.0.0.1 控制台 · 邮件为唯一命名外部出口 / executor HMAC receipts · loopback console · mail is the one named egress exception",
+            lastReport: lastReport,
+            updatedAt: moment
+        )
+    }
+
+    public func auditRows(limit: Int = 20) async -> [AssistantAuditRow] {
+        await store.recent(limit: limit)
+    }
+
+    // MARK: - Internals
+
+    private func ensureHandlers() async {
+        guard !handlersInstalled else { return }
+        await scheduler.setHandlers(
+            briefing: { [weak self] now in
+                guard let self else { return "assistant unavailable" }
+                return await self.runBriefing(now: now)
+            },
+            patrol: { [weak self] now in
+                guard let self else { return "assistant unavailable" }
+                return await self.runPatrol(now: now)
+            }
+        )
+        handlersInstalled = true
+    }
+
+    private func connectors(now: Date) -> [ConnectorCapability] {
+        var rows: [ConnectorCapability] = []
+        rows.append(ConnectorCapability(
+            kind: .calendar,
+            permission: privacy.allowCalendarAccess ? .propose : .read,
+            enabled: privacy.allowCalendarAccess,
+            ready: privacy.allowCalendarAccess,
+            detail: privacy.allowCalendarAccess
+                ? "EventKit 只读 + 提案；写日程仍走隐私账本 / read + proposals; writes stay behind the privacy ledger"
+                : "未授权 / not authorized"
+        ))
+        rows.append(ConnectorCapability(
+            kind: .calDav,
+            permission: hub.allowCalDavBridge ? .propose : .read,
+            enabled: hub.allowCalDavBridge,
+            ready: hub.allowCalDavBridge,
+            detail: hub.allowCalDavBridge
+                ? "内网 CalDAV 只读 + 提案 / LAN CalDAV read + proposals"
+                : "桥接未启用 / bridge off"
+        ))
+        let smartHome = hub.smartHome.normalised
+        rows.append(ConnectorCapability(
+            kind: .smartHome,
+            permission: hub.allowSmartHomeBridge ? (smartHome.readOnlyMode ? .read : .write) : .read,
+            enabled: hub.allowSmartHomeBridge,
+            ready: hub.allowSmartHomeBridge && smartHome.usable,
+            detail: hub.allowSmartHomeBridge
+                ? (smartHome.readOnlyMode ? "只读模式，巡检可看不可修 / read-only" : "巡检只读；修复须审批 / probing is read-only; repair needs approval")
+                : "桥接未启用 / bridge off"
+        ))
+        rows.append(ConnectorCapability(
+            kind: .mcp,
+            permission: hub.allowMcpBridge ? .propose : .read,
+            enabled: hub.allowMcpBridge,
+            ready: hub.allowMcpBridge,
+            detail: hub.allowMcpBridge
+                ? "工具调用；画布写入仍为待审批 / tool calls; canvas writes stay pending"
+                : "桥接未启用 / bridge off"
+        ))
+        rows.append(ConnectorCapability(
+            kind: .godsEye,
+            permission: .read,
+            enabled: godsEyeEnabled,
+            ready: godsEyeEnabled,
+            detail: godsEyeEnabled ? "只读工具 / read-only tools" : "未启用 / off"
+        ))
+        let mailConfig = config.mail
+        rows.append(ConnectorCapability(
+            kind: .mail,
+            permission: mailConfig.usable ? .write : .read,
+            enabled: mailConfig.enabled,
+            ready: mailConfig.usable && secrets.secret(for: mailConfig.imapPasswordRef) != nil
+                && secrets.secret(for: mailConfig.smtpPasswordRef) != nil,
+            detail: mailConfig.enabled
+                ? "IMAP 只读 + SMTP 经批准发送 / IMAP read-only + SMTP after approval"
+                : "未启用 / off"
+        ))
+        return rows
+    }
+
+    private func recordConnectorSummary(now: Date) async {
+        let enabled = connectors(now: now).filter(\.enabled).map(\.kind.rawValue).sorted()
+        await store.record(
+            channel: "assistant",
+            event: "connectors",
+            detail: enabled.isEmpty ? "none" : enabled.joined(separator: ","),
+            at: now
+        )
+    }
+
+    private func pushApprovalCard(_ ticket: AssistantApprovalTicket, now: Date) async {
+        let approve = wire(action: "approve", id: ticket.proposalID, receipt: ticket.receipt)
+        let reject = wire(action: "reject", id: ticket.proposalID, receipt: ticket.receipt)
+        let body = """
+        \(ticket.card.kind.labelZh) · 目标：\(ticket.card.target)
+        \(ticket.card.detail)
+        摘要：\(ticket.card.digest.prefix(16)) · 有效期 \(ticket.card.secondsLeft)s
+
+        批准：\(approve)
+        驳回：\(reject)
+        """
+        let delivered = await push(
+            headline: "待批准 · \(ticket.card.title)",
+            body: body,
+            metrics: [
+                "pending": .bool(true),
+                "kind": .string(ticket.card.kind.rawValue),
+                "digest": .string(String(ticket.card.digest.prefix(16)))
+            ],
+            now: now
+        )
+        await store.record(
+            channel: "assistant",
+            event: delivered ? "card_delivered" : "card_delivery_failed",
+            detail: "\(ticket.card.kind.rawValue) · \(ticket.card.target)",
+            outcome: delivered ? "ok" : "delivery_failed",
+            at: now
+        )
+    }
+
+    private func pushPending(now: Date, limit: Int) async {
+        guard limit > 0 else { return }
+        var sent = 0
+        for card in await gate.pending(now: now) {
+            if sent >= limit { break }
+            if pushed.contains(card.id) { continue }
+            guard let ticket = await gate.ticket(id: card.id, now: now) else { continue }
+            pushed.insert(card.id)
+            sent += 1
+            await pushApprovalCard(ticket, now: now)
+        }
+        if pushed.count > 128 { pushed = Set(pushed.suffix(64)) }
+    }
+
+    private func push(headline: String, body: String, metrics: [String: JSONValue], now: Date) async -> Bool {
+        let result = CommandResult(
+            engine: .shadowCos,
+            ok: true,
+            deterministic: true,
+            headline: headline,
+            body: String(body.prefix(1_800)),
+            at: now,
+            metrics: metrics,
+            cardLabel: "POPOPX 私人助手 / Private Assistant"
+        )
+        return await deliver(result)
+    }
+
+    private func wire(action: String, id: String, receipt: String) -> String {
+        let payload = "{\"id\":\"\(id)\",\"receipt\":\"\(receipt)\"}"
+        return "\(NodeWire.commandPrefix)assistant::\(action)::\(payload)"
+    }
+
+    private func stamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter.string(from: date)
+    }
+}

@@ -1264,6 +1264,63 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
     </div>
   </div>
 
+  <div class="panel" style="margin-top:12px">
+    <div class="panel__head">
+      <h3 data-i18n="asTitle"></h3>
+      <span class="tag" id="as-badge">—</span>
+    </div>
+    <p class="panel__sub" data-i18n="asDesc"></p>
+    <div class="grid grid--stats" id="as-stats"></div>
+    <div class="grid grid--split" style="margin-top:12px">
+      <div class="stack">
+        <span class="field__label" data-i18n="asSwitchesTitle"></span>
+        <div id="as-switches"></div>
+        <p class="field__note" data-i18n="asSwitchNote"></p>
+        <hr class="hair">
+        <div class="fields" id="as-fields"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--mini" onclick="PPX.asRun('briefingNow')" data-i18n="asBriefingNow"></button>
+          <button class="btn btn--mini" onclick="PPX.asRun('patrolNow')" data-i18n="asPatrolNow"></button>
+          <button class="btn btn--mini" onclick="PPX.asRun('refreshMail')" data-i18n="asMailNow"></button>
+        </div>
+        <p class="field__note" id="as-last-report"></p>
+        <hr class="hair">
+        <span class="field__label" data-i18n="asRepairsTitle"></span>
+        <div id="as-repairs"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--tiny" id="as-addrepair" onclick="PPX.asAddRepair()" data-i18n="asRepairAdd"></button>
+        </div>
+        <p class="field__note" data-i18n="asRepairsNote"></p>
+      </div>
+      <div class="stack">
+        <span class="field__label" data-i18n="asConnectorsTitle"></span>
+        <div class="list" id="as-connectors"></div>
+        <p class="field__note" data-i18n="asConnectorsNote"></p>
+        <hr class="hair">
+        <span class="field__label" data-i18n="asMailCredsTitle"></span>
+        <div id="as-creds"></div>
+        <p class="field__note" data-i18n="asCredNote"></p>
+      </div>
+    </div>
+    <hr class="hair">
+    <div class="panel__head">
+      <h3 data-i18n="asPendingTitle"></h3>
+      <span class="tag" id="as-pending-tag">0</span>
+    </div>
+    <div class="pv" id="as-pending"></div>
+    <div class="btn-row" style="margin-top:8px">
+      <button class="btn btn--tiny" onclick="PPX.asRun('cancelPending')" data-i18n="asCancelAll"></button>
+    </div>
+    <p class="field__note" data-i18n="asPendingNote"></p>
+    <hr class="hair">
+    <div class="panel__head">
+      <h3 data-i18n="asAuditTitle"></h3>
+      <span class="tag" id="as-audit-tag">0</span>
+    </div>
+    <div class="list" id="as-audit"></div>
+    <p class="field__note" id="as-boundary"></p>
+  </div>
+
   <div class="savebar">
     <div class="savebar__state">
       <span class="savebar__text" id="hv-save-text" data-i18n="saved"></span>
@@ -1384,7 +1441,13 @@ var ROUTE = {
   // The local globe's two console-only paths: one control verb per click, and the
   // one-way credential save whose reply is a Keychain reference, never the value.
   godsEyeControl: "/api/godseye/control",
-  godsEyeCredential: "/api/godseye/credential"
+  godsEyeCredential: "/api/godseye/credential",
+  // The private assistant's three console-only paths: one control verb per click,
+  // an approval whose receipt is minted inside the node, and the one-way mail
+  // credential save whose reply is a Keychain reference rather than the value.
+  assistantControl: "/api/assistant/control",
+  assistantDecision: "/api/assistant/decision",
+  assistantMailCredential: "/api/assistant/mail/credential"
 };
 
 var LEVEL_GLYPH = { debug: "·", info: "›", notice: "•", success: "✓", warning: "!", error: "✕" };
@@ -2045,7 +2108,96 @@ var I18N = {
   dcServer: { zh: "服务器标识", en: "server id" },
   dcTool: { zh: "工具名", en: "tool" },
   dcArgs: { zh: "参数 JSON", en: "arguments JSON" },
-  hvRemove: { zh: "移除", en: "remove" }
+  hvRemove: { zh: "移除", en: "remove" },
+  /* ---- personal assistant ---- */
+  asTitle: { zh: "私人助手", en: "Private assistant" },
+  asDesc: { zh: "统一的连接器权限与本地定时任务；任何写操作都必须由机主在手机卡片或本地控制台批准，执行层校验签名回执。", en: "Unified connector permissions and local schedules. Every write needs the owner's approval on a phone card or in this console, and the executor verifies the signed receipt." },
+  asBadgeOn: { zh: "已开启", en: "on" },
+  asBadgeOff: { zh: "已关闭", en: "off" },
+  asBadgePending: { zh: "待审批", en: "pending" },
+  asStatPending: { zh: "待审批", en: "Pending" },
+  asStatPendingNote: { zh: "批准前不会执行", en: "nothing runs before approval" },
+  asStatDrafts: { zh: "邮件草稿", en: "Drafts" },
+  asStatDraftsNote: { zh: "正文只留在本机", en: "the body stays on this Mac" },
+  asStatConnectors: { zh: "已接入", en: "Connectors on" },
+  asStatConnectorsNote: { zh: "默认只读或提案", en: "read or propose only" },
+  asStatMail: { zh: "邮箱", en: "Mail" },
+  asMailReady: { zh: "凭据齐备", en: "credentials stored" },
+  asMailMissing: { zh: "凭据未齐", en: "credentials missing" },
+  asSwitchesTitle: { zh: "定时任务", en: "Local schedules" },
+  asSwitchNote: { zh: "默认关闭；保存后由机主开启，重启仍保留。", en: "Off by default; save, then enable. The choice survives a restart." },
+  asMaster: { zh: "私人助手总开关", en: "Assistant master switch" },
+  asBriefingSwitch: { zh: "每日私人简报", en: "Daily private briefing" },
+  asPatrolSwitch: { zh: "家庭设备巡检", en: "Home device patrol" },
+  asMailSwitch: { zh: "邮件只读整理", en: "Read-only mail triage" },
+  asBriefHour: { zh: "简报小时", en: "Briefing hour" },
+  asBriefHourNote: { zh: "本机时间 0–23", en: "local time, 0–23" },
+  asBriefMinute: { zh: "简报分钟", en: "Briefing minute" },
+  asBriefMinuteNote: { zh: "0–59", en: "0–59" },
+  asPatrolInterval: { zh: "巡检间隔（分钟）", en: "Patrol interval (minutes)" },
+  asPatrolIntervalNote: { zh: "5–1440 分钟", en: "5–1440 minutes" },
+  asPatrolOffline: { zh: "离线阈值（分钟）", en: "Offline threshold (minutes)" },
+  asPatrolOfflineNote: { zh: "超过该时长才生成提案", en: "a proposal is made only after this long" },
+  asImapHost: { zh: "IMAP 主机", en: "IMAP host" },
+  asImapHostNote: { zh: "仅隐式 TLS，端口 993；不做服务发现", en: "implicit TLS only, port 993; no discovery" },
+  asImapPort: { zh: "IMAP 端口", en: "IMAP port" },
+  asSmtpHost: { zh: "SMTP 主机", en: "SMTP host" },
+  asSmtpHostNote: { zh: "仅隐式 TLS，端口 465；不自动探测", en: "implicit TLS only, port 465; no probing" },
+  asSmtpPort: { zh: "SMTP 端口", en: "SMTP port" },
+  asPortNote: { zh: "只有 993 与 465 可用", en: "only 993 and 465 are usable" },
+  asMailUser: { zh: "邮箱账号", en: "Mail account" },
+  asMailUserNote: { zh: "只用于登录，不写日志", en: "used to sign in only, never logged" },
+  asMailFrom: { zh: "发件地址", en: "From address" },
+  asMailFromNote: { zh: "回复草稿的 From", en: "the From of reply drafts" },
+  asLookback: { zh: "回看天数", en: "Lookback days" },
+  asLookbackNote: { zh: "1–14 天", en: "1–14 days" },
+  asMaxMessages: { zh: "每次封数", en: "Messages per run" },
+  asMaxMessagesNote: { zh: "1–30 封", en: "1–30 messages" },
+  asBriefingNow: { zh: "立即生成简报", en: "Briefing now" },
+  asPatrolNow: { zh: "立即巡检", en: "Patrol now" },
+  asMailNow: { zh: "立即整理邮件", en: "Triage mail now" },
+  asSaveFirst: { zh: "请先保存并开启私人助手", en: "Save and enable the assistant first" },
+  asRunDone: { zh: "已完成", en: "Done" },
+  asRunFailed: { zh: "执行失败", en: "The run failed" },
+  asConnectorsTitle: { zh: "连接器权限", en: "Connector permissions" },
+  asConnectorsIdle: { zh: "尚未装配", en: "Not assembled yet" },
+  asConnectorsNote: { zh: "read 只读、propose 出草稿；write 必须先有签名回执。", en: "read collects, propose drafts; a write needs a signed receipt first." },
+  asPermRead: { zh: "只读", en: "read" },
+  asPermPropose: { zh: "提案", en: "propose" },
+  asPermWrite: { zh: "写入", en: "write" },
+  asPermAdmin: { zh: "管理", en: "admin" },
+  asKindCalendar: { zh: "日历", en: "calendar" },
+  asKindCalDav: { zh: "CalDAV 日程", en: "CalDAV" },
+  asKindSmartHome: { zh: "智能家居", en: "smart home" },
+  asKindMcp: { zh: "MCP 工具", en: "MCP" },
+  asKindGodsEye: { zh: "全球情报地图", en: "God's Eye View" },
+  asKindMail: { zh: "邮件", en: "mail" },
+  asKindOther: { zh: "其他连接器", en: "other" },
+  asMailCredsTitle: { zh: "邮箱凭据（钥匙串引用）", en: "Mail credentials (Keychain references)" },
+  asCredImap: { zh: "IMAP 密码", en: "IMAP password" },
+  asCredSmtp: { zh: "SMTP 密码", en: "SMTP password" },
+  asCredPlaceholder: { zh: "应用专用密码", en: "app-specific password" },
+  asCredStore: { zh: "存入钥匙串", en: "Store in Keychain" },
+  asCredStored: { zh: "已存入", en: "stored" },
+  asCredMissing: { zh: "未存入", en: "missing" },
+  asCredEmpty: { zh: "请输入密码", en: "Enter the password" },
+  asCredFailed: { zh: "凭据存入失败", en: "The credential was not stored" },
+  asCredNote: { zh: "值只进 macOS 钥匙串，快照与审计只有引用；先保存并开启私人助手再存。", en: "The value goes only to the macOS Keychain; snapshots and the audit log carry the reference. Save and enable the assistant first." },
+  asPendingTitle: { zh: "待审批提案", en: "Pending approvals" },
+  asPendingIdle: { zh: "没有待审批的提案", en: "Nothing waiting" },
+  asTtl: { zh: "剩余", en: "left" },
+  asCancelAll: { zh: "撤销全部待审批", en: "Cancel all pending" },
+  asPendingNote: { zh: "卡片只带目标与摘要，回执在手机卡片或控制台内生成。", en: "Cards carry the target and digest; the receipt is minted on the phone card or inside this node." },
+  asAuditTitle: { zh: "本地审计（SQLite）", en: "Local audit (SQLite)" },
+  asAuditIdle: { zh: "还没有记录", en: "No entries yet" },
+  asDecisionDone: { zh: "已执行", en: "Applied" },
+  asDecisionFailed: { zh: "未执行", en: "Not applied" },
+  asRepairsTitle: { zh: "关键设备与修复动作", en: "Critical devices and repair actions" },
+  asRepairOn: { zh: "启用", en: "on" },
+  asRepairsEmpty: { zh: "尚未登记关键设备", en: "No critical device registered" },
+  asRepairsFull: { zh: "已达上限", en: "The limit is reached" },
+  asRepairAdd: { zh: "添加规则", en: "Add rule" },
+  asRepairsNote: { zh: "巡检只读；修复动作仅在批准后执行一次。", en: "The patrol is read-only; a repair runs once, only after approval." }
 };
 
 /* ------------------------------------------------------- locale registry */
@@ -4270,6 +4422,304 @@ function geInvoke(verb) {
 function geStart() { geInvoke("start"); }
 function geStop() { geInvoke("stop"); }
 function geHealth() { geInvoke("health"); }
+/* ------------------------------------------ private assistant (personal) */
+var AS_REPAIR_LIMIT = 32;
+function asSnap() { return (S.snap && S.snap.assistant) || {}; }
+function asSaved() { return (S.snap && S.snap.settings && S.snap.settings.assistant) || {}; }
+function asConfig() {
+  if (!S.form) { return null; }
+  if (!S.form.assistant) {
+    var saved = asSaved();
+    S.form.assistant = {
+      enabled: Boolean(saved.enabled),
+      briefing: clone(saved.briefing || { enabled: false, hour: 8, minute: 0 }),
+      patrol: clone(saved.patrol || { enabled: false, intervalMinutes: 30, offlineMinutes: 15 }),
+      mail: clone(saved.mail || {}),
+      repairs: clone(saved.repairs || [])
+    };
+  }
+  var cfg = S.form.assistant;
+  cfg.briefing = cfg.briefing || { enabled: false, hour: 8, minute: 0 };
+  cfg.patrol = cfg.patrol || { enabled: false, intervalMinutes: 30, offlineMinutes: 15 };
+  cfg.mail = cfg.mail || {};
+  if (!cfg.mail.imapPort) { cfg.mail.imapPort = 993; }
+  if (!cfg.mail.smtpPort) { cfg.mail.smtpPort = 465; }
+  if (!cfg.mail.imapPasswordRef) { cfg.mail.imapPasswordRef = "assistant/mail/imap-password"; }
+  if (!cfg.mail.smtpPasswordRef) { cfg.mail.smtpPasswordRef = "assistant/mail/smtp-password"; }
+  if (!cfg.mail.lookbackDays) { cfg.mail.lookbackDays = 3; }
+  if (!cfg.mail.maxMessages) { cfg.mail.maxMessages = 12; }
+  cfg.repairs = cfg.repairs || [];
+  return cfg;
+}
+/* One `t()` per fixed value: a lookup table would hide a missing label behind an
+   empty string the catalog gate cannot see. */
+function asConnectorLabel(kind) {
+  if (kind === "calendar") { return t("asKindCalendar"); }
+  if (kind === "calDav") { return t("asKindCalDav"); }
+  if (kind === "smartHome") { return t("asKindSmartHome"); }
+  if (kind === "mcp") { return t("asKindMcp"); }
+  if (kind === "godsEye") { return t("asKindGodsEye"); }
+  if (kind === "mail") { return t("asKindMail"); }
+  return t("asKindOther");
+}
+function asPermLabel(permission) {
+  if (permission === "write") { return t("asPermWrite"); }
+  if (permission === "admin") { return t("asPermAdmin"); }
+  if (permission === "propose") { return t("asPermPropose"); }
+  return t("asPermRead");
+}
+function asPermKind(permission) {
+  return permission === "write" || permission === "admin" ? "warn"
+    : permission === "propose" ? "accent" : "ok";
+}
+function renderAssistant() {
+  var snap = asSnap(), badge = el("as-badge");
+  var pending = snap.pending || [];
+  if (badge) {
+    badge.textContent = snap.enabled
+      ? (pending.length ? t("asBadgePending") + " " + String(pending.length) : t("asBadgeOn"))
+      : t("asBadgeOff");
+    badge.className = "tag" + (snap.enabled ? (pending.length ? " tag--warn" : " tag--ok") : " tag--off");
+  }
+  var stats = el("as-stats");
+  if (stats) {
+    clear(stats);
+    var mail = snap.mail || {};
+    var enabledConnectors = (snap.connectors || []).filter(function (row) { return row.enabled; });
+    stats.appendChild(statCard("asStatPending", String(pending.length), t("asStatPendingNote"), false));
+    stats.appendChild(statCard("asStatDrafts", String((snap.drafts || []).length), t("asStatDraftsNote"), false));
+    stats.appendChild(statCard("asStatConnectors", String(enabledConnectors.length), t("asStatConnectorsNote"), false));
+    stats.appendChild(statCard("asStatMail",
+      mail.imapStored && mail.smtpStored ? t("asMailReady") : t("asMailMissing"),
+      String(mail.lastError || "").slice(0, 80), false));
+  }
+  setText("as-last-report", String(snap.lastReport || ""));
+  setText("as-boundary", String(snap.boundary || ""));
+  var pendingTag = el("as-pending-tag");
+  if (pendingTag) {
+    pendingTag.textContent = String(pending.length);
+    pendingTag.className = "tag" + (pending.length ? " tag--warn" : "");
+  }
+  var auditTag = el("as-audit-tag");
+  if (auditTag) { auditTag.textContent = String((snap.audit || []).length); }
+}
+function buildAssistantControls() {
+  var host = el("as-switches"), fields = el("as-fields"), cfg = asConfig();
+  if (!cfg) { return; }
+  if (host) {
+    clear(host);
+    var box = h("div", { cls: "list" });
+    box.appendChild(checkField("asMaster", function () { return cfg.enabled; },
+      function (value) { cfg.enabled = value; renderAssistant(); }));
+    box.appendChild(checkField("asBriefingSwitch", function () { return cfg.briefing.enabled; },
+      function (value) { cfg.briefing.enabled = value; }));
+    box.appendChild(checkField("asPatrolSwitch", function () { return cfg.patrol.enabled; },
+      function (value) { cfg.patrol.enabled = value; }));
+    box.appendChild(checkField("asMailSwitch", function () { return cfg.mail.enabled; },
+      function (value) { cfg.mail.enabled = value; }));
+    host.appendChild(box);
+  }
+  if (!fields) { return; }
+  clear(fields);
+  fields.appendChild(numField("asBriefHour", function () { return Number(cfg.briefing.hour) || 0; },
+    function (value) { cfg.briefing.hour = value; }, 0, 23, t("asBriefHourNote")));
+  fields.appendChild(numField("asBriefMinute", function () { return Number(cfg.briefing.minute) || 0; },
+    function (value) { cfg.briefing.minute = value; }, 0, 59, t("asBriefMinuteNote")));
+  fields.appendChild(numField("asPatrolInterval", function () { return Number(cfg.patrol.intervalMinutes) || 30; },
+    function (value) { cfg.patrol.intervalMinutes = value; }, 5, 1440, t("asPatrolIntervalNote")));
+  fields.appendChild(numField("asPatrolOffline", function () { return Number(cfg.patrol.offlineMinutes) || 15; },
+    function (value) { cfg.patrol.offlineMinutes = value; }, 1, 240, t("asPatrolOfflineNote")));
+  fields.appendChild(textField("asImapHost", function () { return cfg.mail.imapHost; },
+    function (value) { cfg.mail.imapHost = value; }, null, "asImapHostNote"));
+  fields.appendChild(numField("asImapPort", function () { return Number(cfg.mail.imapPort) || 993; },
+    function (value) { cfg.mail.imapPort = value; }, 1, 65535, t("asPortNote")));
+  fields.appendChild(textField("asSmtpHost", function () { return cfg.mail.smtpHost; },
+    function (value) { cfg.mail.smtpHost = value; }, null, "asSmtpHostNote"));
+  fields.appendChild(numField("asSmtpPort", function () { return Number(cfg.mail.smtpPort) || 465; },
+    function (value) { cfg.mail.smtpPort = value; }, 1, 65535, t("asPortNote")));
+  fields.appendChild(textField("asMailUser", function () { return cfg.mail.username; },
+    function (value) { cfg.mail.username = value; }, null, "asMailUserNote"));
+  fields.appendChild(textField("asMailFrom", function () { return cfg.mail.fromAddress; },
+    function (value) { cfg.mail.fromAddress = value; }, null, "asMailFromNote"));
+  fields.appendChild(numField("asLookback", function () { return Number(cfg.mail.lookbackDays) || 3; },
+    function (value) { cfg.mail.lookbackDays = value; }, 1, 14, t("asLookbackNote")));
+  fields.appendChild(numField("asMaxMessages", function () { return Number(cfg.mail.maxMessages) || 12; },
+    function (value) { cfg.mail.maxMessages = value; }, 1, 30, t("asMaxMessagesNote")));
+}
+function renderAssistantConnectors() {
+  var host = el("as-connectors"), rows = asSnap().connectors || [];
+  if (!host) { return; }
+  clear(host);
+  if (!rows.length) { host.appendChild(h("div", { cls: "empty", text: t("asConnectorsIdle") })); return; }
+  rows.forEach(function (row) {
+    host.appendChild(h("div", { cls: "list__row" }, [
+      h("span", { cls: "dot dot--" + (row.enabled ? (row.ready ? "ok" : "warn") : "off") }),
+      h("span", { cls: "pv-line", text: asConnectorLabel(row.kind) }),
+      pvTag(asPermLabel(row.permission), asPermKind(row.permission)),
+      h("span", { cls: "pv-meta", text: String(row.detail || "") })
+    ]));
+  });
+}
+function renderAssistantRepairs() {
+  var host = el("as-repairs"), cfg = asConfig();
+  if (!host || !cfg) { return; }
+  clear(host);
+  cfg.repairs.forEach(function (rule, index) {
+    var watch = h("input", { type: "text", spellcheck: "false", value: String(rule.watchEntity || ""), placeholder: "binary_sensor.gateway" });
+    watch.addEventListener("input", function () { rule.watchEntity = watch.value; markDirty(); });
+    var service = h("input", { type: "text", spellcheck: "false", value: String(rule.repairDomain || "") + "." + String(rule.repairService || ""), placeholder: "homeassistant.turn_on" });
+    service.addEventListener("input", function () {
+      var raw = service.value.trim();
+      var dot = raw.indexOf(".");
+      rule.repairDomain = dot > 0 ? raw.slice(0, dot) : "homeassistant";
+      rule.repairService = dot > 0 ? raw.slice(dot + 1) : raw;
+      markDirty();
+    });
+    var entity = h("input", { type: "text", spellcheck: "false", value: String(rule.repairEntity || ""), placeholder: "switch.gateway_power" });
+    entity.addEventListener("input", function () { rule.repairEntity = entity.value; markDirty(); });
+    var minutes = h("input", { type: "number", min: "1", max: "240", step: "1", value: String(Number(rule.offlineMinutes) || 15) });
+    minutes.addEventListener("input", function () {
+      var value = Math.max(1, Math.min(240, Math.round(Number(minutes.value) || 15)));
+      rule.offlineMinutes = value;
+      markDirty();
+    });
+    var on = h("input", { type: "checkbox" });
+    on.checked = rule.enabled !== false;
+    on.addEventListener("change", function () { rule.enabled = on.checked; markDirty(); });
+    host.appendChild(h("div", { cls: "list__row" }, [
+      watch, service, entity, minutes,
+      h("label", { cls: "check" }, [on, h("span", { text: t("asRepairOn") })]),
+      h("button", { cls: "btn btn--tiny", text: t("hvRemove"), type: "button", onclick: "PPX.asRemoveRepair(" + index + ")" })
+    ]));
+  });
+  if (!cfg.repairs.length) { host.appendChild(note(t("asRepairsEmpty"))); }
+  var add = el("as-addrepair");
+  if (add) { add.classList.toggle("is-disabled", cfg.repairs.length >= AS_REPAIR_LIMIT); }
+}
+function renderAssistantCredentials() {
+  var host = el("as-creds"), snap = asSnap(), mail = snap.mail || {};
+  if (!host) { return; }
+  clear(host);
+  var rows = [
+    ["imap", t("asCredImap"), Boolean(mail.imapStored), String(mail.imapPasswordRef || "")],
+    ["smtp", t("asCredSmtp"), Boolean(mail.smtpStored), String(mail.smtpPasswordRef || "")]
+  ];
+  rows.forEach(function (row) {
+    var input = h("input", { type: "password", spellcheck: "false", autocomplete: "off", placeholder: t("asCredPlaceholder") });
+    var button = h("button", { cls: "btn btn--tiny", text: t("asCredStore"), type: "button" });
+    button.addEventListener("click", function () { asStoreCredential(row[0], input, button); });
+    host.appendChild(h("div", { cls: "list__row" }, [
+      h("span", { cls: "pv-line", text: row[1] }),
+      pvTag(row[2] ? t("asCredStored") : t("asCredMissing"), row[2] ? "ok" : "off"),
+      h("span", { cls: "pv-meta mono", text: row[3] }),
+      input,
+      button
+    ]));
+  });
+}
+function asStoreCredential(kind, input, button) {
+  var secret = String(input.value || "");
+  if (!secret) { toast("warn", t("asCredEmpty")); return; }
+  if (button) { button.classList.add("is-disabled"); }
+  api(ROUTE.assistantMailCredential, { method: "POST", json: { kind: kind, secret: secret } }).then(function (reply) {
+    input.value = "";
+    if (button) { button.classList.remove("is-disabled"); }
+    if (reply && reply.assistant) { S.snap.assistant = reply.assistant; }
+    renderAssistant();
+    renderAssistantCredentials();
+    var ok = Boolean(reply && reply.ok);
+    toast(ok ? "ok" : "err",
+      String((reply && reply.detail) || t(ok ? "asCredStored" : "asCredFailed")) + " · " + String((reply && reply.reference) || ""));
+    return refreshSnapshot(true);
+  }).catch(function (error) {
+    input.value = "";
+    if (button) { button.classList.remove("is-disabled"); }
+    fail("asCredFailed", error);
+  });
+}
+function renderAssistantPending() {
+  var host = el("as-pending"), cards = asSnap().pending || [];
+  if (!host) { return; }
+  clear(host);
+  if (!cards.length) { host.appendChild(h("div", { cls: "empty", text: t("asPendingIdle") })); return; }
+  cards.forEach(function (card) {
+    var approve = h("button", { cls: "btn btn--mini", text: t("pvApprove"), type: "button" });
+    approve.addEventListener("click", function () { asDecide(card.id, "approve"); });
+    var reject = h("button", { cls: "btn btn--tiny", text: t("pvReject"), type: "button" });
+    reject.addEventListener("click", function () { asDecide(card.id, "reject"); });
+    if (!card.canApprove) { approve.classList.add("is-disabled"); }
+    host.appendChild(h("div", { cls: "list__row" }, [
+      h("span", { cls: "dot dot--warn" }),
+      h("span", { cls: "pv-line", text: String(card.title || "") }),
+      pvTag(String(card.kind || ""), "warn"),
+      h("span", { cls: "pv-meta", text: String(card.target || "") }),
+      h("span", { cls: "pv-meta mono", text: String(card.digest || "").slice(0, 24) }),
+      h("span", { cls: "pv-meta", text: t("asTtl") + " " + String(card.secondsLeft || 0) + "s" }),
+      approve, reject
+    ]));
+    if (card.detail) { host.appendChild(h("div", { cls: "pv-meta", text: String(card.detail).slice(0, 240) })); }
+  });
+}
+function renderAssistantAudit() {
+  var host = el("as-audit"), rows = asSnap().audit || [];
+  if (!host) { return; }
+  clear(host);
+  if (!rows.length) { host.appendChild(h("div", { cls: "empty", text: t("asAuditIdle") })); return; }
+  rows.forEach(function (row) {
+    var outcome = String(row.outcome || "");
+    host.appendChild(h("div", { cls: "list__row" }, [
+      h("span", { cls: "pv-meta mono", text: pvWhen(row.at) }),
+      h("span", { cls: "pv-line mono", text: String(row.event || "") }),
+      pvTag(outcome, outcome === "ok" ? "ok" : outcome === "failed" ? "bad" : "warn"),
+      h("span", { cls: "pv-meta", text: String(row.detail || "").slice(0, 160) })
+    ]));
+  });
+}
+function asRun(verb) {
+  if (S.dirty) { toast("warn", t("asSaveFirst")); return; }
+  if (!asSnap().enabled) { toast("warn", t("asSaveFirst")); return; }
+  api(ROUTE.assistantControl, { method: "POST", json: { verb: verb } }).then(function (report) {
+    if (report && report.assistant) { S.snap.assistant = report.assistant; }
+    renderAssistant();
+    renderAssistantConnectors();
+    renderAssistantPending();
+    renderAssistantAudit();
+    var ok = Boolean(report && report.ok);
+    toast(ok ? "ok" : "warn", String((report && report.detail) || t(ok ? "asRunDone" : "asRunFailed")));
+    return refreshSnapshot(true);
+  }).catch(function (error) { fail("asRunFailed", error); });
+}
+function asDecide(id, verb) {
+  api(ROUTE.assistantDecision, { method: "POST", json: { id: id, verb: verb } }).then(function (report) {
+    if (report && report.assistant) { S.snap.assistant = report.assistant; }
+    renderAssistant();
+    renderAssistantConnectors();
+    renderAssistantPending();
+    renderAssistantAudit();
+    var ok = Boolean(report && report.ok);
+    toast(ok ? "ok" : "err", String((report && report.detail) || t(ok ? "asDecisionDone" : "asDecisionFailed")));
+    return refreshSnapshot(true);
+  }).catch(function (error) { fail("asDecisionFailed", error); });
+}
+function asAddRepair() {
+  var cfg = asConfig();
+  if (!cfg) { return; }
+  if (cfg.repairs.length >= AS_REPAIR_LIMIT) { toast("warn", t("asRepairsFull")); return; }
+  cfg.repairs.push({
+    watchEntity: "", repairEntity: "", repairDomain: "homeassistant",
+    repairService: "turn_on", offlineMinutes: 15, enabled: true
+  });
+  markDirty();
+  renderAssistantRepairs();
+}
+function asRemoveRepair(index) {
+  var cfg = asConfig();
+  if (!cfg) { return; }
+  cfg.repairs.splice(index, 1);
+  markDirty();
+  renderAssistantRepairs();
+}
+
 function renderStep5() {
   ensureForm(S.snap);
   renderHubStats();
@@ -4287,6 +4737,13 @@ function renderStep5() {
   renderGodsEye();
   buildGodsEyeControls();
   renderGodsEyeCredentials();
+  renderAssistant();
+  buildAssistantControls();
+  renderAssistantConnectors();
+  renderAssistantRepairs();
+  renderAssistantCredentials();
+  renderAssistantPending();
+  renderAssistantAudit();
   renderSaveBar();
 }
 function renderHubStats() {
@@ -5579,6 +6036,10 @@ var PPX = {
   geStop: geStop,
   geHealth: geHealth,
   geControl: geInvoke,
+  asRun: asRun,
+  asDecide: asDecide,
+  asAddRepair: asAddRepair,
+  asRemoveRepair: asRemoveRepair,
   windowAdd: windowAdd,
   windowRemove: windowRemove,
   mountAdd: mountAdd,
@@ -6271,6 +6732,38 @@ public actor LocalWebConsoleServer {
                 status: outcome.status
             ))
 
+        case ConsoleRoute.assistantControl:
+            // Console-only: a one-shot briefing/patrol/mail run or a queue cancel.
+            // The verb list is fixed here so the page cannot invent an action.
+            let body: WEBAssistantControlRequest = try decode(WEBAssistantControlRequest.self, from: request)
+            let verb = body.verb.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard ["briefingNow", "patrolNow", "refreshMail", "proposeDrafts", "cancelPending"].contains(verb) else {
+                throw WEBConsoleError.badEngine("未知私人助手指令 / unknown assistant verb: \(verb)")
+            }
+            return try json(await facade.assistantControl(verb: verb))
+
+        case ConsoleRoute.assistantDecision:
+            // The console's approval click. Only an id and a verb travel: the receipt
+            // is minted inside the node, so a leaked poll response is not a capability.
+            let body: WEBAssistantDecisionRequest = try decode(WEBAssistantDecisionRequest.self, from: request)
+            let id = body.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            let verb = body.verb.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard PrivacyToolRoute.isSafeId(id), verb == "approve" || verb == "reject" else {
+                throw WEBConsoleError.badEngine("id 与 verb 需合法 / id and verb must both be valid")
+            }
+            return try json(await facade.assistantDecision(id: id, verb: verb))
+
+        case ConsoleRoute.assistantMailCredential:
+            // Console-only, like the hub credential route: the value goes straight to
+            // the assistant's Keychain store and the reply carries only the reference.
+            let body: WEBAssistantMailCredentialRequest = try decode(WEBAssistantMailCredentialRequest.self, from: request)
+            let kind = body.kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard kind == "imap" || kind == "smtp", !body.secret.isEmpty,
+                  body.secret.utf8.count <= HubSecrets.maximumSecretLength else {
+                throw WEBConsoleError.badEngine("凭据类别需为 imap 或 smtp / kind must be imap or smtp")
+            }
+            return try json(await facade.storeMailCredential(kind: kind, secret: body.secret))
+
         default:
             throw WEBConsoleError.notFound(path)
         }
@@ -6576,6 +7069,11 @@ public actor LocalWebConsoleServer {
     /// `POST /api/godseye/control` — one card action. The verb is checked against
     /// the bridge's own list here and again inside `control`, so an unknown action
     /// dies at the route boundary.
+    struct WEBAssistantControlRequest: Codable { let verb: String }
+    struct WEBAssistantDecisionRequest: Codable { let id: String; let verb: String }
+    /// The secret is decoded only to be handed to the store; no response carries it.
+    struct WEBAssistantMailCredentialRequest: Codable { let kind: String; let secret: String }
+
     struct WEBGodsEyeControlRequest: Codable { let verb: String }
 
     /// `POST /api/godseye/credential` — the value goes in, a reference comes out.

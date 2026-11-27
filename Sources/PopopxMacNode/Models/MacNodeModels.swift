@@ -120,6 +120,7 @@ public enum NodeWire {
             || PrivacyToolNamespace(rawValue: serviceId) != nil
             || serviceId == "updates"
             || serviceId == "discover"
+            || serviceId == "assistant"
     }
 
     /// The one and only parser for `::popopx_sys::NODE_CMD::{serviceId}::{action}::{payload}`.
@@ -2131,6 +2132,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     public var updates: UpdateConfig?
     public var discover: DiscoverConfig?
     public var godsEye: GodsEyeViewConfig?
+    public var assistant: AssistantConfig?
     public var revision: Int
     public var updatedAt: Date
 
@@ -2155,6 +2157,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         updates: UpdateConfig? = nil,
         discover: DiscoverConfig? = nil,
         godsEye: GodsEyeViewConfig? = nil,
+        assistant: AssistantConfig? = nil,
         revision: Int = 0,
         updatedAt: Date = Date()
     ) {
@@ -2178,6 +2181,7 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         self.updates = updates
         self.discover = discover
         self.godsEye = godsEye
+        self.assistant = assistant
         self.revision = revision
         self.updatedAt = updatedAt
     }
@@ -2247,6 +2251,16 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     public func withGodsEye(_ config: GodsEyeViewConfig) -> NodeSettings {
         var copy = self
         copy.godsEye = config
+        return copy
+    }
+
+    /// The private assistant as it behaves when nothing has been stored yet:
+    /// switched off, both loops off, mail off.
+    public var assistantConfig: AssistantConfig { assistant ?? .disabled }
+
+    public func withAssistant(_ config: AssistantConfig) -> NodeSettings {
+        var copy = self
+        copy.assistant = config
         return copy
     }
 }
@@ -2864,6 +2878,7 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
     public var update: UpdateSnapshot
     public var discover: DiscoverSnapshot
     public var godsEye: GodsEyeViewSnapshot
+    public var assistant: AssistantSnapshot
 
     public init(
         node: NodeIdentity,
@@ -2887,7 +2902,8 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         privacy: PrivacyBridgeSnapshot = PrivacyBridgeSnapshot.empty,
         update: UpdateSnapshot = .disabled,
         discover: DiscoverSnapshot = .disabled,
-        godsEye: GodsEyeViewSnapshot = .disabled
+        godsEye: GodsEyeViewSnapshot = .disabled,
+        assistant: AssistantSnapshot = .empty
     ) {
         self.node = node
         self.version = NodeVersion.current.semanticString
@@ -2913,6 +2929,7 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         self.update = update
         self.discover = discover
         self.godsEye = godsEye
+        self.assistant = assistant
     }
 }
 
@@ -3162,6 +3179,11 @@ public enum AppPaths {
     /// rotated without touching `node.log`.
     public static var godsEyeAuditFile: URL { logs.appendingPathComponent("godseyeview-audit.jsonl") }
     public static var godsEyeLogFile: URL { logs.appendingPathComponent("godseyeview.log") }
+    /// The private assistant's SQLite ledger and the HMAC key its approval receipts
+    /// are signed with. The database holds facts, never credentials or mail bodies;
+    /// the key lives with the other signing keys in `vault`.
+    public static var assistantDatabaseFile: URL { ledger.appendingPathComponent("assistant.sqlite3") }
+    public static var assistantApprovalKeyFile: URL { vault.appendingPathComponent("assistant-approval.key") }
 
     /// Subpaths used by the LTX-2.5 MLX workspace.
     public static var ltxRepo: URL { ltxWorkspace.appendingPathComponent("ltx-2-mlx", isDirectory: true) }
@@ -3834,6 +3856,16 @@ public protocol NodeConsoleFacade: Sendable {
     /// Console-only: stores one optional third-party data-source key in the Keychain
     /// and answers with its reference. The value is never echoed.
     func storeGodsEyeCredential(sourceID: String, secret: String) async -> PrivacyToolResponse
+
+    /// One owner click on the personal-assistant card: `briefingNow`, `patrolNow`,
+    /// `refreshMail`, `proposeDrafts` or `cancelPending`.
+    func assistantControl(verb: String) async -> AssistantControlReport
+    /// Applies an approve/reject click. The console path mints the receipt inside
+    /// the node; the phone path carries its own in the command payload.
+    func assistantDecision(id: String, verb: String) async -> AssistantDecisionReport
+    /// Console-only: stores one mail password in the Keychain and answers with its
+    /// reference, never the value.
+    func storeMailCredential(kind: String, secret: String) async -> AssistantCredentialReport
 }
 
 public extension NodeConsoleFacade {
@@ -3897,6 +3929,28 @@ public extension NodeConsoleFacade {
 
     func storeGodsEyeCredential(sourceID: String, secret: String) async -> PrivacyToolResponse {
         PrivacyToolResponse.failure(503, "本节点没有钥匙串存储 / this facade has no credential store")
+    }
+
+    func assistantControl(verb: String) async -> AssistantControlReport {
+        .refused("本节点没有私人助手 / this facade has no personal assistant", snapshot: .empty)
+    }
+
+    func assistantDecision(id: String, verb: String) async -> AssistantDecisionReport {
+        AssistantDecisionReport(
+            ok: false,
+            outcome: "refused",
+            detail: "本节点没有私人助手 / this facade has no personal assistant",
+            assistant: .empty
+        )
+    }
+
+    func storeMailCredential(kind: String, secret: String) async -> AssistantCredentialReport {
+        AssistantCredentialReport(
+            ok: false,
+            detail: "本节点没有钥匙串存储 / this facade has no credential store",
+            reference: "",
+            assistant: .empty
+        )
     }
 }
 
@@ -3972,6 +4026,17 @@ public enum ConsoleRoute {
     public static let godsEyeControl = "/api/godseye/control"
     public static let godsEyeCredential = "/api/godseye/credential"
 
+    // MARK: Private assistant
+    //
+    // All three are console-only POSTs. The decision route takes an id and a verb
+    // and mints its receipt inside the node, so the page never receives a write
+    // capability; the credential route stores a mail password and answers with the
+    // Keychain reference only.
+
+    public static let assistantControl = "/api/assistant/control"
+    public static let assistantDecision = "/api/assistant/decision"
+    public static let assistantMailCredential = "/api/assistant/mail/credential"
+
     /// `/v1/tools/{domain}/proposals/{id}/{verb}` — the approval gate, addressed by
     /// proposal id.
     public static func proposalDecision(_ domain: String, id: String, verb: String) -> String {
@@ -3997,7 +4062,8 @@ public enum ConsoleRoute {
         engineToggle, engineInvoke, commandInject, health, privacyAuthorize, privacyDecision,
         hubCredential, discoveryCapabilities, discoveryScan,
         updateCheck, updateDecision, discoverRefresh,
-        godsEyeControl, godsEyeCredential
+        godsEyeControl, godsEyeCredential,
+        assistantControl, assistantDecision, assistantMailCredential
     ]
 
     /// The tool endpoints, kept out of `all` because `all` is the SPA surface the

@@ -415,6 +415,32 @@ public actor SmartHomeBridge {
         }
     }
 
+    /// Used by the assistant sentinel before it mints a repair card: a read-only
+    /// bridge or a switched-off bridge can be watched, never repaired.
+    public func assistantReadOnlyMode() -> Bool {
+        !config.allowSmartHomeBridge || config.smartHome.readOnlyMode
+    }
+
+    /// The sentinel's execution seam. The assistant gate validated the signed
+    /// receipt before calling this; the bridge still re-checks its own rules
+    /// (switch, read-only, whitelist) because the configuration is the owner's
+    /// later opinion and must be able to stop the write.
+    ///
+    /// This deliberately does not create a second privacy proposal: the approval
+    /// already happened on the assistant card, and minting another queued write
+    /// would hide it from the owner.
+    public func performAssistantRepair(_ payload: HubCallPayload) async -> PrivacyExecution {
+        let proposal = PrivacyProposal(
+            domain: .smartHome,
+            action: .invoke,
+            source: "assistant",
+            title: "私人助手修复 · \(payload.label)",
+            detail: payload.preview,
+            hubCall: payload
+        )
+        return await executeApproved(proposal)
+    }
+
     public func disconnect() async {
         if let session { await session.disconnect() }
         session = nil
