@@ -179,6 +179,16 @@ public actor NodeConsole: NodeConsoleFacade {
     /// switches so the SQLite audit trail and the approval queue survive a reboot of
     /// the card. Default off costs no database and no key file.
     private var assistant: PersonalAssistantManager?
+    /// The adapter the manager is holding, kept here so the doctor and the watchdog
+    /// can probe the same runtime without reaching through the manager's internals.
+    private var assistantInkling: Inkling2MiniAdapter?
+    /// Sealed episodic index and the voice pipeline that feeds it. Built with the
+    /// assistant and kept across switches, so an approval queue survives a reboot.
+    private var rag: LocalEpisodicRAG?
+    private var voice: LocalVoiceMemoPipeline?
+    /// Built once at `start()`. The LaunchAgent switch and its last check rows live
+    /// here even when the assistant is off, because these are node-level seams.
+    private var watchdog: SystemWatchdog?
     private let assistantSecrets: any HubSecretStoring = HubSecrets.makeStore()
     private let assistantProvider = AssistantLiveSentinelProvider()
 
@@ -231,6 +241,12 @@ public actor NodeConsole: NodeConsoleFacade {
         await configureDiscover(from: current)
         await configureGodsEye(from: current)
         await configureAssistant(from: current)
+        await configureWatchdog()
+        if let bridge = signaling as? MacNodePopopxBridge {
+            await bridge.setInboundFileHandler { [weak self] url in
+                await self?.handleInboundAudio(url)
+            }
+        }
         guard routerTask == nil else { return }
         routerTask = Task { [weak self] in
             guard let self else { return }
@@ -277,6 +293,9 @@ public actor NodeConsole: NodeConsoleFacade {
            !newIDs.isEmpty {
             await publishDiscover(feed: feed, path: path)
         }
+        // The watchdog enforces its own 60 s floor and its own alert cooldown;
+        // `tick()` is the heartbeat that gives it a chance to observe the Mac.
+        _ = await watchdog?.check()
     }
 
     /// SMP-originated commands run regardless of the console being open; the
@@ -620,6 +639,19 @@ public actor NodeConsole: NodeConsoleFacade {
             transport: InklingURLSessionTransport(),
             store: store
         )
+        // The sealed index opens before a phone exists, and the voice pipeline only
+        // accepts files that land under the bridge's own quarantine roots. Both are
+        // reused across settings saves so approvals and the FTS index survive.
+        let rag = self.rag ?? LocalEpisodicRAG(
+            databaseURL: AppPaths.assistantRAGDatabaseFile,
+            keyURL: AppPaths.assistantRAGKeyFile
+        )
+        let voice = self.voice ?? LocalVoiceMemoPipeline(
+            transcribers: [AppleOnDeviceSpeechTranscriber(), LoopbackWhisperTranscriber()],
+            rag: rag,
+            store: store,
+            inboxRoots: [AppPaths.quarantine, FileManager.default.temporaryDirectory]
+        )
         let manager = PersonalAssistantManager(
             config: config,
             privacy: settings.bridges.normalised,
@@ -631,11 +663,16 @@ public actor NodeConsole: NodeConsoleFacade {
             scheduler: scheduler,
             mail: mail,
             sentinel: sentinel,
-            inkling: inkling
+            inkling: inkling,
+            rag: rag,
+            voice: voice
         ) { [weak self] result in
             guard let self else { return false }
             return await self.deliverAssistantCard(result)
         }
+        self.rag = rag
+        self.voice = voice
+        self.assistantInkling = inkling
         self.assistant = manager
         await manager.apply(config: config, now: now)
         await manager.start()
@@ -644,6 +681,61 @@ public actor NodeConsole: NodeConsoleFacade {
             "私人助手已装配 / the personal assistant is assembled",
             level: .notice,
             payload: ["enabled": .bool(config.enabled)]
+        )
+    }
+
+    /// Built once, after the assistant so the local-model probe reads the adapter that
+    /// was just assembled. The probes are the node-level seams; the restart closure
+    /// only ever restarts the daemon, because the Ollama/MLX runtime is the owner's.
+    private func configureWatchdog() async {
+        guard watchdog == nil else { return }
+        let signaling = self.signaling
+        let executable = Bundle.main.executableURL?.path
+            ?? CommandLine.arguments.first
+            ?? ""
+        let localModel: @Sendable () async -> Inkling2MiniAdapter? = { [weak self] in
+            await self?.assistantInkling
+        }
+        let probes: [WatchdogProbe] = [
+            SystemWatchdog.diskProbe(),
+            SystemWatchdog.memoryProbe(),
+            SystemWatchdog.daemonProbe(signaling),
+            SystemWatchdog.localModelProbe(provider: localModel)
+        ]
+        watchdog = SystemWatchdog(
+            executablePath: executable,
+            probes: probes,
+            restart: { target in
+                guard target == WatchdogTarget.daemon.rawValue else { return false }
+                await signaling.stop()
+                await signaling.start()
+                let status = await signaling.status()
+                return status.daemon.isLive
+            },
+            deliver: { [weak self] result in
+                guard let self else { return false }
+                return await self.deliverAssistantCard(result)
+            }
+        )
+    }
+
+    /// Inbound files are already quarantined by the bridge. Only an audio suffix
+    /// reaches the pipeline; anything else stays a plain inbound file.
+    private func handleInboundAudio(_ url: URL) async {
+        let audio = ["m4a", "mp3", "wav", "aiff", "aif", "caf", "aac", "flac", "ogg", "opus"]
+        guard audio.contains(url.pathExtension.lowercased()) else { return }
+        guard let assistant else {
+            await hub.publish(.system, "收到音频但私人助手未开启 / audio arrived while the assistant is off", level: .warning)
+            return
+        }
+        let report = await assistant.handleVoiceMemo(audioURL: url)
+        await hub.publish(
+            .system,
+            report.ok
+                ? "语音备忘录已转录 · \(report.actions.count) 个行动项待审批 / voice memo transcribed"
+                : "语音备忘录未处理 / voice memo not processed",
+            level: report.ok ? .notice : .warning,
+            payload: ["engine": .string(report.engine), "actions": .int(report.actions.count)]
         )
     }
 
@@ -1184,7 +1276,8 @@ public actor NodeConsole: NodeConsoleFacade {
             update: await updateSnapshotValue(),
             discover: await discoverSnapshotValue(),
             godsEye: await godsEyeSnapshotValue(),
-            assistant: await assistantSnapshotValue()
+            assistant: await assistantSnapshotValue(),
+            watchdog: await watchdog?.card() ?? .disabled
         )
     }
 
@@ -1588,6 +1681,110 @@ public actor NodeConsole: NodeConsoleFacade {
             payload: ["kind": .string(kind), "reference": .string(report.reference)]
         )
         return report
+    }
+
+    // MARK: NodeConsoleFacade — doctor, recall, watchdog
+
+    public func assistantDoctor() async -> LiveIntegrationReport {
+        let config = (await settings.current()).assistantConfig.normalised
+        var probes: [DoctorProbe] = [
+            LiveIntegrationDoctor.keychainProbe(assistantSecrets),
+            LiveIntegrationDoctor.signalingProbe(signaling)
+        ]
+        if let assistantInkling {
+            probes.append(LiveIntegrationDoctor.localModelProbe(assistantInkling))
+        } else {
+            probes.append(DoctorProbe(id: "local_model", title: "本机模型 Ollama / MLX / Local model") {
+                .skipped("未装配本地模型适配器 / no local model adapter")
+            })
+        }
+        if assistant != nil {
+            probes.append(LiveIntegrationDoctor.mailProbe(config.mail, secrets: assistantSecrets))
+        } else {
+            probes.append(DoctorProbe(id: "mail", title: "邮箱认证握手 / Mail authentication handshake") {
+                .skipped("私人助手未开启 / the assistant is off")
+            })
+        }
+        probes.append(LiveIntegrationDoctor.calendarProbe(privacy?.calDav))
+        probes.append(LiveIntegrationDoctor.smartHomeProbe(privacy?.smartHome))
+        let report = await LiveIntegrationDoctor(probes: probes).run()
+        await hub.publish(
+            .system,
+            "全链路体检 · \(report.headline)",
+            level: report.ok ? .success : .warning,
+            payload: ["checks": .int(report.checks.count)]
+        )
+        return report
+    }
+
+    public func assistantHistory(query: String) async -> EpisodicAnswer {
+        guard let assistant else {
+            return EpisodicAnswer(
+                ok: false,
+                question: query,
+                answer: "私人助手未开启 / the assistant is off"
+            )
+        }
+        return await assistant.askHistory(query)
+    }
+
+    public func watchdogStatus() async -> SystemWatchdogCard {
+        await watchdog?.card() ?? .disabled
+    }
+
+    public func watchdogControl(verb: String) async -> WatchdogControlReport {
+        guard let watchdog else {
+            return WatchdogControlReport(
+                ok: false,
+                outcome: "refused",
+                detail: "系统看门狗未装配 / the watchdog is not assembled",
+                watchdog: .disabled
+            )
+        }
+        switch verb.lowercased() {
+        case "install":
+            let report = await watchdog.install()
+            await hub.publish(
+                .system,
+                report.ok ? "开机自启已写入 / launch at login installed" : "开机自启未写入 / launch at login refused",
+                level: report.ok ? .success : .warning
+            )
+            return report
+        case "uninstall":
+            let report = await watchdog.uninstall()
+            await hub.publish(
+                .system,
+                report.ok ? "开机自启已移除 / launch at login removed" : "开机自启未移除 / removal failed",
+                level: report.ok ? .notice : .warning
+            )
+            return report
+        case "check":
+            let outcome = await watchdog.check(force: true)
+            let report = WatchdogControlReport(
+                ok: outcome.checked,
+                outcome: outcome.checked ? "checked" : "throttled",
+                detail: outcome.checked
+                    ? "\(outcome.watchdog.checks.count) 项检查 · \(outcome.alerts.count) 条告警"
+                    : "未到检查间隔 / the 60 s floor has not elapsed",
+                watchdog: outcome.watchdog
+            )
+            return report
+        case "status":
+            let card = await watchdog.card()
+            return WatchdogControlReport(
+                ok: true,
+                outcome: card.installed ? "installed" : "absent",
+                detail: card.lastDetail,
+                watchdog: card
+            )
+        default:
+            return WatchdogControlReport(
+                ok: false,
+                outcome: "refused",
+                detail: "未知看门狗指令 / unknown watchdog verb: \(verb)",
+                watchdog: await watchdog.card()
+            )
+        }
     }
 
     // MARK: NodeConsoleFacade — signed updates and Discover

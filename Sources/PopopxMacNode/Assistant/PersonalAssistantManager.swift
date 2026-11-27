@@ -31,6 +31,8 @@ public actor PersonalAssistantManager {
     private let mail: MailAssistantBridge
     private let sentinel: HomeSentinelLoop
     private let inkling: Inkling2MiniAdapter?
+    private let rag: LocalEpisodicRAG?
+    private let voice: LocalVoiceMemoPipeline?
     private let clock: AssistantClock
     private let deliver: Delivery
 
@@ -50,6 +52,8 @@ public actor PersonalAssistantManager {
         mail: MailAssistantBridge,
         sentinel: HomeSentinelLoop,
         inkling: Inkling2MiniAdapter? = nil,
+        rag: LocalEpisodicRAG? = nil,
+        voice: LocalVoiceMemoPipeline? = nil,
         clock: AssistantClock = SystemAssistantClock(),
         deliver: @escaping Delivery
     ) {
@@ -64,6 +68,8 @@ public actor PersonalAssistantManager {
         self.mail = mail
         self.sentinel = sentinel
         self.inkling = inkling
+        self.rag = rag
+        self.voice = voice
         self.clock = clock
         self.deliver = deliver
     }
@@ -153,6 +159,7 @@ public actor PersonalAssistantManager {
 
         if config.mail.enabled {
             let triage = await mail.triage(now: moment)
+            await index(triage: triage.messages, now: moment)
             let counts = Dictionary(grouping: triage.messages, by: { $0.category })
                 .mapValues(\.count)
             lines.append("邮件：待回复 \(counts[.needsReply] ?? 0) · 账单 \(counts[.bill] ?? 0) · 邀请 \(counts[.invitation] ?? 0) · 通知 \(counts[.notification] ?? 0)")
@@ -192,6 +199,7 @@ public actor PersonalAssistantManager {
             inklingUsed = true
             inklingRuntime = synthesized.runtime
         }
+        await rag?.recordBriefing(body, now: moment)
         let delivered = await push(
             headline: "私人助手简报 · \(stamp(moment))",
             body: body,
@@ -232,6 +240,7 @@ public actor PersonalAssistantManager {
         }
         await pushPending(now: moment, limit: 3)
         let body = lines.joined(separator: "\n")
+        await rag?.recordPatrol(body, anomalies: report.anomalies.count, now: moment)
         let delivered = await push(
             headline: "家庭设备巡检 · \(report.anomalies.count) 项异常",
             body: body,
@@ -261,6 +270,7 @@ public actor PersonalAssistantManager {
         guard config.enabled, config.mail.enabled else { return "邮件助手未启用 / mail is off" }
         await syncInkling()
         let triage = await mail.triage(now: moment)
+        await index(triage: triage.messages, now: moment)
         let proposed = await propose(drafts: Array(triage.drafts.prefix(3)), now: moment)
         await pushPending(now: moment, limit: 3)
         return "邮件 \(triage.messages.count) 封 · 草稿提案 \(proposed) 封"
@@ -327,6 +337,32 @@ public actor PersonalAssistantManager {
             let outcome = await sentinel.perform(proposalID: proposalID, approval: approval, now: moment)
             ok = outcome.ok
             detail = outcome.detail
+        case .voiceTask:
+            guard let voice else {
+                await gate.complete(id: proposalID, ok: false, detail: "voice pipeline missing", now: moment)
+                ok = false
+                detail = "语音管线不存在 / the voice pipeline is missing"
+                break
+            }
+            do {
+                _ = try await gate.validateExecution(
+                    id: proposalID,
+                    receipt: receipt,
+                    kind: .voiceTask,
+                    target: binding.target,
+                    digest: binding.digest,
+                    now: moment
+                )
+                let outcome = await voice.perform(target: binding.target, binding: binding, now: moment)
+                ok = outcome.ok
+                detail = outcome.detail
+                await gate.complete(id: proposalID, ok: ok, detail: detail, now: moment)
+            } catch {
+                let reason = AssistantRedaction.scrub(String(describing: error))
+                await gate.complete(id: proposalID, ok: false, detail: reason, now: moment)
+                ok = false
+                detail = reason
+            }
         }
         await store.record(
             channel: "assistant",
@@ -454,6 +490,23 @@ public actor PersonalAssistantManager {
                 detail: card.lastDetail,
                 assistant: await snapshot(now: moment)
             )
+        case "indexHistory", "indexRAG":
+            guard let rag else {
+                return .refused("本地索引未装配 / no local index", snapshot: await snapshot(now: moment))
+            }
+            let roots = privacy.allowWorkspaceRead ? privacy.workspaceDirectories : []
+            guard !roots.isEmpty else {
+                return .refused("没有授权目录 / no authorized scope roots", snapshot: await snapshot(now: moment))
+            }
+            let report = await rag.indexScopeRoots(roots)
+            await store.record(
+                channel: "assistant",
+                event: "rag_index",
+                detail: "indexed \(report.indexed) · skipped \(report.skipped)",
+                outcome: report.ok ? "ok" : "failed",
+                at: moment
+            )
+            return AssistantControlReport(ok: report.ok, outcome: "rag", detail: report.detail, assistant: await snapshot(now: moment))
         case "cancelPending":
             let cancelled = await gate.cancelPending(reason: "owner cancelled from the console", now: moment)
             pushed.removeAll()
@@ -467,6 +520,130 @@ public actor PersonalAssistantManager {
         default:
             return .refused("未知控制指令 / unknown control verb: \(clean)", snapshot: await snapshot(now: moment))
         }
+    }
+
+    // MARK: - Memory and voice
+
+    /// Natural-language recall over the sealed local index. The answer is assembled
+    /// from retrieved snippets; the local model is not allowed to invent a citation.
+    public func askHistory(_ question: String, now: Date? = nil) async -> EpisodicAnswer {
+        guard let rag else {
+            return EpisodicAnswer(
+                ok: false,
+                question: question,
+                answer: "本地索引未装配 / the local index is not assembled"
+            )
+        }
+        let answer = await rag.ask(question)
+        await store.record(
+            channel: "assistant",
+            event: "rag_query",
+            detail: "chars \(question.count) · citations \(answer.citations.count)",
+            outcome: answer.ok ? "ok" : "failed",
+            at: now ?? clock.now
+        )
+        return answer
+    }
+
+    public func indexHistory(now: Date? = nil) async -> EpisodicIndexReport {
+        let moment = now ?? clock.now
+        guard let rag else {
+            return EpisodicIndexReport(
+                ok: false,
+                indexed: 0,
+                skipped: 0,
+                detail: "本地索引未装配 / the local index is not assembled",
+                card: .empty
+            )
+        }
+        let roots = privacy.allowWorkspaceRead ? privacy.workspaceDirectories : []
+        let report = await rag.indexScopeRoots(roots)
+        await store.record(
+            channel: "assistant",
+            event: "rag_index",
+            detail: "indexed \(report.indexed) · skipped \(report.skipped)",
+            outcome: report.ok ? "ok" : "failed",
+            at: moment
+        )
+        return report
+    }
+
+    /// Phone audio enters only through the quarantine path the bridge chose. The
+    /// pipeline transcribes and extracts; this method turns each action into a
+    /// receipt-bound proposal and pushes the card, exactly like a mail draft.
+    public func handleVoiceMemo(audioURL: URL, now: Date? = nil) async -> VoiceIngestReport {
+        let moment = now ?? clock.now
+        guard config.enabled else {
+            return VoiceIngestReport(ok: false, detail: "私人助手未开启 / the assistant is off")
+        }
+        guard let voice else {
+            return VoiceIngestReport(ok: false, detail: "语音管线未装配 / the voice pipeline is absent")
+        }
+        let report = await voice.ingest(audioURL: audioURL, now: moment)
+        guard report.ok else {
+            await store.record(
+                channel: "voice",
+                event: "ingest_failed",
+                detail: report.detail,
+                outcome: "failed",
+                at: moment
+            )
+            return report
+        }
+        var proposed = 0
+        for action in report.actions {
+            if await gate.hasPending(kind: .voiceTask, target: action.target, now: moment) { continue }
+            do {
+                let ticket = try await gate.propose(
+                    kind: .voiceTask,
+                    target: action.target,
+                    digest: action.digest,
+                    title: "语音待办 · \(action.title)",
+                    detail: action.detail,
+                    now: moment
+                )
+                proposed += 1
+                pushed.insert(ticket.proposalID)
+                await pushApprovalCard(ticket, now: moment)
+            } catch {
+                await store.record(
+                    channel: "voice",
+                    event: "proposal_refused",
+                    detail: "\(action.target) · \(AssistantRedaction.scrub(String(describing: error)))",
+                    outcome: "refused",
+                    at: moment
+                )
+            }
+        }
+        guard !report.actions.isEmpty else {
+            await store.record(
+                channel: "voice",
+                event: "no_actions",
+                detail: "chars \(report.transcriptCharacters)",
+                outcome: "ok",
+                at: moment
+            )
+            return report
+        }
+        await store.record(
+            channel: "voice",
+            event: "actions_proposed",
+            detail: "\(proposed) proposals · \(report.actions.count) actions",
+            outcome: proposed > 0 ? "ok" : "refused",
+            at: moment
+        )
+        return VoiceIngestReport(
+            ok: report.ok,
+            detail: proposed > 0
+                ? "\(report.detail) · \(proposed) 项已推送待批准 / \(proposed) approval cards sent"
+                : report.detail,
+            engine: report.engine,
+            onDevice: report.onDevice,
+            transcriptCharacters: report.transcriptCharacters,
+            actions: report.actions,
+            audioHash: report.audioHash,
+            boundary: report.boundary
+        )
     }
 
     // MARK: - Snapshot
@@ -484,7 +661,9 @@ public actor PersonalAssistantManager {
             boundary: "执行层 HMAC 审批回执 · 127.0.0.1 控制台 · 邮件为唯一命名外部出口 / executor HMAC receipts · loopback console · mail is the one named egress exception",
             lastReport: lastReport,
             updatedAt: moment,
-            inkling: await inkling?.card(now: moment) ?? AssistantInklingCard.saved(config.inkling)
+            inkling: await inkling?.card(now: moment) ?? AssistantInklingCard.saved(config.inkling),
+            rag: await rag?.status() ?? .empty,
+            voice: await voice?.card() ?? .empty
         )
     }
 
@@ -498,6 +677,38 @@ public actor PersonalAssistantManager {
     /// binds the model to mail triage. Called on every entry point rather than only
     /// in `apply`, so a manager built directly by a test or the console's one-shot
     /// path still gets the owner's current settings.
+    /// Summaries only: category, subject, amount, deadline and the bridge's own
+/// snippet. The full body is never handed to the index.
+    private func index(triage: [AssistantMailMessageCard], now: Date) async {
+        guard let rag else { return }
+        for message in triage {
+            if message.category == .bill {
+                await rag.recordBill(
+                    merchant: message.from,
+                    amount: message.amount,
+                    due: message.deadline,
+                    summary: message.subject,
+                    source: "mail/\(message.id)",
+                    now: now
+                )
+            } else {
+                let body = [
+                    "类别：\(message.category.rawValue)",
+                    message.amount.isEmpty ? "" : "金额：\(message.amount)",
+                    message.deadline.isEmpty ? "" : "截止：\(message.deadline)",
+                    message.snippet
+                ].filter { !$0.isEmpty }.joined(separator: "\n")
+                _ = await rag.record(
+                    kind: .mailSummary,
+                    title: message.subject,
+                    body: body,
+                    source: "mail/\(message.id)",
+                    occurredAt: message.receivedAt
+                )
+            }
+        }
+    }
+
     private func syncInkling() async {
         guard let inkling else { return }
         await inkling.update(
@@ -524,6 +735,14 @@ public actor PersonalAssistantManager {
                 continue
             }
             recognized += 1
+            await rag?.recordBill(
+                merchant: extraction.merchant,
+                amount: extraction.amount,
+                due: extraction.dueDate,
+                summary: extraction.summary,
+                source: "ticket/\(analysis.file)",
+                now: now
+            )
             var row = "· 票据：\(extraction.merchant.isEmpty ? analysis.file : String(extraction.merchant.prefix(40)))"
             if !extraction.amount.isEmpty { row += " · \(String(extraction.amount.prefix(24)))" }
             if !extraction.dueDate.isEmpty { row += " · 到期 \(String(extraction.dueDate.prefix(20)))" }

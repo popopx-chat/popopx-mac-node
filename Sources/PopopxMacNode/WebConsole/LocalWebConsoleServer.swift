@@ -1335,6 +1335,57 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
     <p class="field__note" id="as-boundary"></p>
   </div>
 
+  <div class="panel" style="margin-top:12px">
+    <div class="panel__head">
+      <h3 data-i18n="opTitle"></h3>
+      <span class="tag" id="op-doctor-tag">—</span>
+    </div>
+    <p class="panel__sub" data-i18n="opDesc"></p>
+    <div class="btn-row">
+      <button class="btn btn--tiny" onclick="PPX.opDoctor()" data-i18n="opDoctorRun"></button>
+    </div>
+    <div class="list" id="op-doctor"></div>
+    <p class="field__note" id="op-doctor-detail"></p>
+    <hr class="hair">
+    <div class="panel__head">
+      <h3 data-i18n="opHistoryTitle"></h3>
+      <span class="tag" id="op-rag-tag">—</span>
+    </div>
+    <div class="list" id="op-rag"></div>
+    <div class="fields">
+      <label class="field">
+        <span class="field__label" data-i18n="opHistoryAsk"></span>
+        <input id="op-history-query" type="text" spellcheck="false" autocomplete="off">
+      </label>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn--tiny" onclick="PPX.opHistory()" data-i18n="opHistoryRun"></button>
+      <button class="btn btn--tiny" onclick="PPX.opIndex()" data-i18n="opHistoryIndex"></button>
+    </div>
+    <div class="list" id="op-history"></div>
+    <p class="field__note" data-i18n="opHistoryNote"></p>
+    <hr class="hair">
+    <div class="panel__head">
+      <h3 data-i18n="opVoiceTitle"></h3>
+      <span class="tag" id="op-voice-tag">—</span>
+    </div>
+    <div class="list" id="op-voice"></div>
+    <p class="field__note" data-i18n="opVoiceNote"></p>
+    <hr class="hair">
+    <div class="panel__head">
+      <h3 data-i18n="opWatchTitle"></h3>
+      <span class="tag" id="op-watch-tag">—</span>
+    </div>
+    <div id="op-watch-switch"></div>
+    <div class="btn-row">
+      <button class="btn btn--tiny" onclick="PPX.opWatch('check')" data-i18n="opWatchCheck"></button>
+      <button class="btn btn--tiny" onclick="PPX.opWatch('status')" data-i18n="opWatchRefresh"></button>
+    </div>
+    <div class="list" id="op-watch"></div>
+    <p class="field__note" id="op-watch-detail"></p>
+    <p class="field__note" data-i18n="opWatchNote"></p>
+  </div>
+
   <div class="savebar">
     <div class="savebar__state">
       <span class="savebar__text" id="hv-save-text" data-i18n="saved"></span>
@@ -1461,7 +1512,13 @@ var ROUTE = {
   // credential save whose reply is a Keychain reference rather than the value.
   assistantControl: "/api/assistant/control",
   assistantDecision: "/api/assistant/decision",
-  assistantMailCredential: "/api/assistant/mail/credential"
+  assistantMailCredential: "/api/assistant/mail/credential",
+  // The doctor, recall and watchdog are console-only too: the doctor reads
+  // credential-backed seams, recall reads the sealed index, and the watchdog
+  // switch writes a LaunchAgent.
+  assistantDoctor: "/api/assistant/doctor",
+  assistantHistory: "/api/assistant/history",
+  watchdogControl: "/api/watchdog/control"
 };
 
 var LEVEL_GLYPH = { debug: "·", info: "›", notice: "•", success: "✓", warning: "!", error: "✕" };
@@ -2237,7 +2294,38 @@ var I18N = {
   asInklingLastUsed: { zh: "最近使用", en: "last used" },
   asInklingNever: { zh: "尚未", en: "never" },
   asInklingPull: { zh: "本地拉取：", en: "Pull locally: " },
-  asInklingNote: { zh: "模型只负责只读分析与提案；发信、写日程或控制家居仍须人工审批回执。", en: "The model only reads and proposes; sending, calendar writes or home control still need a human-approved receipt." }
+  asInklingNote: { zh: "模型只负责只读分析与提案；发信、写日程或控制家居仍须人工审批回执。", en: "The model only reads and proposes; sending, calendar writes or home control still need a human-approved receipt." },
+  /* ---- Operations: doctor, sealed recall, voice memos, watchdog ---- */
+  opTitle: { zh: "运维与本地记忆", en: "Operations and local memory" },
+  opDesc: { zh: "体检、情景检索、语音备忘录与系统看门狗。全部只走 127.0.0.1 与已配置账号；写操作仍须人工审批回执。", en: "Doctor, episodic recall, voice memos and the system watchdog. Everything stays on 127.0.0.1 and already-configured accounts; writes still need a human-approved receipt." },
+  opDoctorRun: { zh: "运行全链路体检", en: "Run full-stack doctor" },
+  opDoctorNever: { zh: "尚未体检", en: "not run yet" },
+  opDoctorIdle: { zh: "点击上方按钮开始；输出已脱敏，不读取邮件正文。", en: "Use the button above; output is redacted and no message body is read." },
+  opDoctorOk: { zh: "正常", en: "ok" },
+  opDoctorWarning: { zh: "注意", en: "warning" },
+  opDoctorFailed: { zh: "失败", en: "failed" },
+  opDoctorSkipped: { zh: "未启用", en: "skipped" },
+  opHistoryTitle: { zh: "本地情景记忆（加密 FTS5）", en: "Local episodic memory (sealed FTS5)" },
+  opHistoryAsk: { zh: "问一句过去的事，例如：上次账单多少？", en: "Ask about the past, e.g. what was the last bill?" },
+  opHistoryRun: { zh: "检索并回答", en: "Ask history" },
+  opHistoryIndex: { zh: "索引工作区文档", en: "Index workspace" },
+  opHistoryNote: { zh: "标题、正文与来源以 AES-GCM 密封；全文索引只看到 HMAC 词元。零字节离开本机。", en: "Titles, bodies and sources are AES-GCM sealed; the full-text index only sees HMAC token digests. Zero bytes leave this Mac." },
+  opHistoryEmpty: { zh: "还没有索引条目；可先索引工作区文档或运行一次简报。", en: "No indexed entries yet; index a workspace or run a briefing first." },
+  opHistoryNoAnswer: { zh: "没有找到相关记录", en: "Nothing relevant was found" },
+  opQueryEmpty: { zh: "请输入问题", en: "Enter a question" },
+  opIndexDone: { zh: "索引完成", en: "Index finished" },
+  opVoiceTitle: { zh: "语音备忘录（本机转录）", en: "Voice memos (on-device)" },
+  opVoiceIdle: { zh: "尚无语音备忘录。手机发来音频后，行动项会先进入待审批。", en: "No voice memos yet. Audio from the phone becomes pending approvals first." },
+  opVoiceNote: { zh: "Apple 本机识别或 127.0.0.1 whisper.cpp；转录只留在内存，批准后才写入索引。", en: "Apple on-device speech or 127.0.0.1 whisper.cpp; the transcript stays in memory until an approval writes it." },
+  opWatchTitle: { zh: "系统看门狗与开机自启", en: "System watchdog and launch at login" },
+  opWatchInstall: { zh: "开机自启", en: "Launch at login" },
+  opWatchUninstall: { zh: "关闭开机自启", en: "Remove launch at login" },
+  opWatchCheck: { zh: "立即检查", en: "Check now" },
+  opWatchRefresh: { zh: "刷新状态", en: "Refresh status" },
+  opWatchIdle: { zh: "还没有检查记录", en: "No checks recorded yet" },
+  opWatchNote: { zh: "LaunchAgent 使用固定回环参数；异常退出按指数退避重启，告警 30 分钟内去重并推送到手机。", en: "The LaunchAgent uses fixed loopback argv; unexpected exits restart with exponential backoff, and alerts are deduped for 30 minutes and pushed to the phone." },
+  opWatchInstalled: { zh: "已安装", en: "installed" },
+  opWatchAbsent: { zh: "未安装", en: "not installed" }
 };
 
 /* ------------------------------------------------------- locale registry */
@@ -2352,6 +2440,8 @@ var S = {
   hadTunnel: false,
   expiredRendered: false,
   pvCheck: null,
+  doctor: null,
+  historyAnswer: null,
   discovery: null,
   hub: null,
   hubPending: false,
@@ -4838,6 +4928,182 @@ function asRemoveRepair(index) {
   markDirty();
   renderAssistantRepairs();
 }
+/* ---- Operations: doctor, sealed recall, voice memos, watchdog ---- */
+function opDoctorStateLabel(state) {
+  if (state === "ok") { return t("opDoctorOk"); }
+  if (state === "warning") { return t("opDoctorWarning"); }
+  if (state === "failed") { return t("opDoctorFailed"); }
+  return t("opDoctorSkipped");
+}
+function opDoctorStateKind(state) {
+  if (state === "ok") { return "ok"; }
+  if (state === "warning") { return "warn"; }
+  if (state === "failed") { return "bad"; }
+  return "off";
+}
+function renderDoctor() {
+  var host = el("op-doctor"), badge = el("op-doctor-tag"), report = S.doctor;
+  if (!host) { return; }
+  if (badge) {
+    badge.textContent = report ? String(report.headline || t("opDoctorOk")) : t("opDoctorNever");
+    badge.className = "tag" + (report ? (report.ok ? " tag--ok" : " tag--bad") : " tag--off");
+  }
+  clear(host);
+  if (!report) { host.appendChild(h("div", { cls: "empty", text: t("opDoctorIdle") })); }
+  else {
+    (report.checks || []).forEach(function (row) {
+      var state = String(row.state || "skipped");
+      host.appendChild(h("div", { cls: "list__row" }, [
+        h("span", { cls: "dot dot--" + opDoctorStateKind(state) }),
+        h("span", { cls: "pv-line", text: String(row.title || row.id || "") }),
+        pvTag(opDoctorStateLabel(state), opDoctorStateKind(state)),
+        h("span", { cls: "pv-meta mono", text: String(row.durationMS || 0) + " ms" }),
+        h("span", { cls: "pv-meta", text: String(row.detail || "").slice(0, 240) })
+      ]));
+    });
+  }
+  setText("op-doctor-detail", report ? String(report.boundary || "") : "");
+}
+function renderRAG() {
+  var host = el("op-rag"), badge = el("op-rag-tag");
+  if (!host) { return; }
+  var card = asSnap().rag || {};
+  if (badge) {
+    badge.textContent = card.healthy ? (String(card.entries || 0) + " · FTS5") : (card.failureReason ? t("opHistoryNoAnswer") : "—");
+    badge.className = "tag" + (card.healthy ? " tag--ok" : " tag--off");
+  }
+  clear(host);
+  host.appendChild(h("div", { cls: "list__row" }, [
+    h("span", { cls: "pv-line", text: String(card.entries || 0) + " 条 / entries" }),
+    pvTag("docs " + String(card.documents || 0), "accent"),
+    pvTag("brief " + String(card.briefings || 0), "accent"),
+    pvTag("bills " + String(card.bills || 0), "accent"),
+    pvTag("alerts " + String(card.alerts || 0), "accent"),
+    pvTag("voice " + String(card.voices || 0), "accent"),
+    pvTag(card.encrypted ? "AES-GCM" : "plain", card.encrypted ? "ok" : "bad"),
+    pvTag(card.fts5 ? "FTS5" : "no fts5", card.fts5 ? "ok" : "bad"),
+    h("span", { cls: "pv-meta", text: card.lastIndexedAt ? pvWhen(card.lastIndexedAt) : "" })
+  ]));
+  if (card.failureReason) { host.appendChild(h("div", { cls: "pv-meta", text: String(card.failureReason) })); }
+}
+function renderHistoryAnswer() {
+  var host = el("op-history"), answer = S.historyAnswer;
+  if (!host) { return; }
+  clear(host);
+  if (!answer) { host.appendChild(h("div", { cls: "empty", text: t("opHistoryEmpty") })); return; }
+  host.appendChild(h("div", { cls: "list__row" }, [
+    h("span", { cls: "dot dot--" + (answer.ok ? "ok" : "warn") }),
+    h("span", { cls: "pv-line", text: String(answer.question || "") }),
+    h("span", { cls: "pv-meta", text: String(answer.answer || t("opHistoryNoAnswer")).slice(0, 480) })
+  ]));
+  (answer.citations || []).forEach(function (row) {
+    host.appendChild(h("div", { cls: "list__row" }, [
+      pvTag(String(row.kind || ""), "accent"),
+      h("span", { cls: "pv-line", text: String(row.title || "") }),
+      h("span", { cls: "pv-meta", text: String(row.snippet || "").slice(0, 220) }),
+      h("span", { cls: "pv-meta mono", text: Number(row.score || 0).toFixed(3) }),
+      h("span", { cls: "pv-meta", text: pvWhen(row.occurredAt) })
+    ]));
+  });
+  setText("op-history-note", String(answer.boundary || ""));
+}
+function renderVoice() {
+  var host = el("op-voice"), badge = el("op-voice-tag");
+  if (!host) { return; }
+  var card = asSnap().voice || {};
+  if (badge) {
+    badge.textContent = card.enabled ? String(card.engine || "on-device") : "off";
+    badge.className = "tag" + (card.enabled ? " tag--ok" : " tag--off");
+  }
+  clear(host);
+  if (!card.ingested) {
+    host.appendChild(h("div", { cls: "empty", text: t("opVoiceIdle") }));
+  }
+  host.appendChild(h("div", { cls: "list__row" }, [
+    h("span", { cls: "pv-line", text: String(card.engine || "—") }),
+    pvTag(card.onDevice ? "on-device" : "loopback", card.onDevice ? "ok" : "accent"),
+    pvTag(t("asStatPending") + " " + String(card.pendingActions || 0), card.pendingActions ? "warn" : "off"),
+    h("span", { cls: "pv-meta", text: String(card.ingested || 0) + " ingested" }),
+    h("span", { cls: "pv-meta", text: card.lastIngestedAt ? pvWhen(card.lastIngestedAt) : "" }),
+    h("span", { cls: "pv-meta", text: String(card.lastDetail || "").slice(0, 200) })
+  ]));
+}
+function renderWatchdog() {
+  var host = el("op-watch"), badge = el("op-watch-tag"), slot = el("op-watch-switch");
+  if (!host) { return; }
+  var card = (S.snap && S.snap.watchdog) || {};
+  if (badge) {
+    badge.textContent = card.installed ? t("opWatchInstalled") : t("opWatchAbsent");
+    badge.className = "tag" + (card.installed ? " tag--ok" : " tag--off");
+  }
+  if (slot) {
+    clear(slot);
+    var input = h("input", { type: "checkbox" });
+    input.checked = Boolean(card.installed);
+    input.addEventListener("change", function () { opWatch(input.checked ? "install" : "uninstall"); });
+    slot.appendChild(h("label", { cls: "check" }, [input, h("span", { text: t("opWatchInstall") })]));
+  }
+  clear(host);
+  var rows = card.checks || [];
+  if (!rows.length) { host.appendChild(h("div", { cls: "empty", text: t("opWatchIdle") })); }
+  rows.forEach(function (row) {
+    var state = String(row.state || "skipped");
+    host.appendChild(h("div", { cls: "list__row" }, [
+      h("span", { cls: "dot dot--" + opDoctorStateKind(state) }),
+      h("span", { cls: "pv-line", text: String(row.title || row.id || "") }),
+      pvTag(opDoctorStateLabel(state), opDoctorStateKind(state)),
+      h("span", { cls: "pv-meta", text: String(row.detail || "").slice(0, 200) })
+    ]));
+  });
+  var detail = String(card.lastDetail || "");
+  if (card.lastCheckAt) { detail += " · " + pvWhen(card.lastCheckAt); }
+  if (card.restartCount) { detail += " · restarts " + String(card.restartCount); }
+  if (card.pendingRestartAt) { detail += " · next " + pvWhen(card.pendingRestartAt); }
+  setText("op-watch-detail", detail);
+}
+function renderOperations() {
+  renderDoctor();
+  renderRAG();
+  renderHistoryAnswer();
+  renderVoice();
+  renderWatchdog();
+}
+function opDoctor() {
+  api(ROUTE.assistantDoctor, { method: "POST" }).then(function (report) {
+    S.doctor = report || null;
+    renderDoctor();
+    var ok = Boolean(report && report.ok);
+    toast(ok ? "ok" : "warn", String((report && report.headline) || t(ok ? "opDoctorOk" : "opDoctorFailed")));
+  }).catch(function (error) { fail("opDoctorFailed", error); });
+}
+function opHistory() {
+  var input = el("op-history-query");
+  var query = String((input && input.value) || "").trim();
+  if (!query) { toast("warn", t("opQueryEmpty")); return; }
+  api(ROUTE.assistantHistory, { method: "POST", json: { query: query } }).then(function (answer) {
+    S.historyAnswer = answer || null;
+    renderHistoryAnswer();
+    toast(answer && answer.ok ? "ok" : "warn", String((answer && answer.answer) || t("opHistoryNoAnswer")).slice(0, 120));
+  }).catch(function (error) { fail("opHistoryNoAnswer", error); });
+}
+function opIndex() {
+  if (S.dirty) { toast("warn", t("asSaveFirst")); return; }
+  api(ROUTE.assistantControl, { method: "POST", json: { verb: "indexHistory" } }).then(function (report) {
+    if (report && report.assistant) { S.snap.assistant = report.assistant; }
+    renderAssistant();
+    renderRAG();
+    toast(report && report.ok ? "ok" : "warn", String((report && report.detail) || t("opIndexDone")));
+    return refreshSnapshot(true);
+  }).catch(function (error) { fail("opIndexDone", error); });
+}
+function opWatch(verb) {
+  api(ROUTE.watchdogControl, { method: "POST", json: { verb: verb } }).then(function (report) {
+    if (report && report.watchdog && S.snap) { S.snap.watchdog = report.watchdog; }
+    renderWatchdog();
+    toast(report && report.ok ? "ok" : "warn", String((report && report.detail) || verb));
+    return refreshSnapshot(true);
+  }).catch(function (error) { fail("opWatchTitle", error); });
+}
 
 function renderStep5() {
   ensureForm(S.snap);
@@ -4864,6 +5130,7 @@ function renderStep5() {
   renderAssistantCredentials();
   renderAssistantPending();
   renderAssistantAudit();
+  renderOperations();
   renderSaveBar();
 }
 function renderHubStats() {
@@ -6160,6 +6427,10 @@ var PPX = {
   asDecide: asDecide,
   asAddRepair: asAddRepair,
   asRemoveRepair: asRemoveRepair,
+  opDoctor: opDoctor,
+  opHistory: opHistory,
+  opIndex: opIndex,
+  opWatch: opWatch,
   windowAdd: windowAdd,
   windowRemove: windowRemove,
   mountAdd: mountAdd,
@@ -6857,7 +7128,7 @@ public actor LocalWebConsoleServer {
             // The verb list is fixed here so the page cannot invent an action.
             let body: WEBAssistantControlRequest = try decode(WEBAssistantControlRequest.self, from: request)
             let verb = body.verb.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard ["briefingNow", "patrolNow", "refreshMail", "proposeDrafts", "cancelPending", "inklingProbe"].contains(verb) else {
+            guard ["briefingNow", "patrolNow", "refreshMail", "proposeDrafts", "cancelPending", "inklingProbe", "indexHistory"].contains(verb) else {
                 throw WEBConsoleError.badEngine("未知私人助手指令 / unknown assistant verb: \(verb)")
             }
             return try json(await facade.assistantControl(verb: verb))
@@ -6883,6 +7154,27 @@ public actor LocalWebConsoleServer {
                 throw WEBConsoleError.badEngine("凭据类别需为 imap 或 smtp / kind must be imap or smtp")
             }
             return try json(await facade.storeMailCredential(kind: kind, secret: body.secret))
+
+        case ConsoleRoute.assistantDoctor:
+            // Console-only, no body: the engine builds the probe list from the
+            // subsystems actually assembled and scrubs every detail before serving.
+            return try json(await facade.assistantDoctor())
+
+        case ConsoleRoute.assistantHistory:
+            let body: WEBAssistantHistoryRequest = try decode(WEBAssistantHistoryRequest.self, from: request)
+            let query = body.query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !query.isEmpty, query.count <= 240 else {
+                throw WEBConsoleError.badEngine("问题为空或过长 / the question is empty or too long")
+            }
+            return try json(await facade.assistantHistory(query: query))
+
+        case ConsoleRoute.watchdogControl:
+            let body: WEBWatchdogControlRequest = try decode(WEBWatchdogControlRequest.self, from: request)
+            let verb = body.verb.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard ["install", "uninstall", "check", "status"].contains(verb) else {
+                throw WEBConsoleError.badEngine("未知看门狗指令 / unknown watchdog verb: \(verb)")
+            }
+            return try json(await facade.watchdogControl(verb: verb))
 
         default:
             throw WEBConsoleError.notFound(path)
@@ -7193,6 +7485,8 @@ public actor LocalWebConsoleServer {
     struct WEBAssistantDecisionRequest: Codable { let id: String; let verb: String }
     /// The secret is decoded only to be handed to the store; no response carries it.
     struct WEBAssistantMailCredentialRequest: Codable { let kind: String; let secret: String }
+    struct WEBAssistantHistoryRequest: Codable { let query: String }
+    struct WEBWatchdogControlRequest: Codable { let verb: String }
 
     struct WEBGodsEyeControlRequest: Codable { let verb: String }
 

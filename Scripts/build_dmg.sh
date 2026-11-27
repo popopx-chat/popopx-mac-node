@@ -549,6 +549,8 @@ ${icon_plist_key}
 	<true/>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>语音备忘录只在本机识别，音频不会上传到任何服务器。 / Voice memos are transcribed on this Mac; audio is never uploaded to any server.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 POPOPX Chat. 源码以 GNU AGPL-3.0-only 开源发布，与 popopxmq、popopx-chat 共用同一份许可原文；官方托管中继网络、官方发行通道与 POPOPX 品牌条款见 LICENSE-COMMERCIAL.md。 / Source released under GNU AGPL-3.0-only on the same licence text as popopxmq and popopx-chat; the hosted relay network, the official release channel and the POPOPX brand are covered by LICENSE-COMMERCIAL.md.</string>
 </dict>

@@ -499,11 +499,13 @@ public struct AssistantConfig: Codable, Sendable, Equatable {
 public enum AssistantActionKind: String, Codable, Sendable, CaseIterable {
     case mailSend = "mail.send"
     case homeService = "home.service"
+    case voiceTask = "voice.task"
 
     public var labelZh: String {
         switch self {
         case .mailSend: return "发送邮件"
         case .homeService: return "家庭设备修复"
+        case .voiceTask: return "语音待办入库"
         }
     }
 
@@ -511,6 +513,7 @@ public enum AssistantActionKind: String, Codable, Sendable, CaseIterable {
         switch self {
         case .mailSend: return "send mail"
         case .homeService: return "home repair"
+        case .voiceTask: return "save voice task"
         }
     }
 }
@@ -923,6 +926,8 @@ public struct AssistantSnapshot: Codable, Sendable, Equatable {
     public var lastReport: String
     public var updatedAt: Date
     public var inkling: AssistantInklingCard
+    public var rag: EpisodicRAGCard
+    public var voice: VoiceMemoCard
 
     public init(
         enabled: Bool = false,
@@ -935,7 +940,9 @@ public struct AssistantSnapshot: Codable, Sendable, Equatable {
         boundary: String = "",
         lastReport: String = "",
         updatedAt: Date = Date(),
-        inkling: AssistantInklingCard = AssistantInklingCard()
+        inkling: AssistantInklingCard = AssistantInklingCard(),
+        rag: EpisodicRAGCard = .empty,
+        voice: VoiceMemoCard = .empty
     ) {
         self.enabled = enabled
         self.scheduler = scheduler
@@ -948,6 +955,30 @@ public struct AssistantSnapshot: Codable, Sendable, Equatable {
         self.lastReport = lastReport
         self.updatedAt = updatedAt
         self.inkling = inkling
+        self.rag = rag
+        self.voice = voice
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, scheduler, mail, connectors, pending, drafts, audit, boundary
+        case lastReport, updatedAt, inkling, rag, voice
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        scheduler = try c.decodeIfPresent(AssistantSchedulerCard.self, forKey: .scheduler) ?? AssistantSchedulerCard()
+        mail = try c.decodeIfPresent(AssistantMailCard.self, forKey: .mail) ?? AssistantMailCard()
+        connectors = try c.decodeIfPresent([ConnectorCapability].self, forKey: .connectors) ?? []
+        pending = try c.decodeIfPresent([AssistantProposalCard].self, forKey: .pending) ?? []
+        drafts = try c.decodeIfPresent([AssistantDraftCard].self, forKey: .drafts) ?? []
+        audit = try c.decodeIfPresent([AssistantAuditRow].self, forKey: .audit) ?? []
+        boundary = try c.decodeIfPresent(String.self, forKey: .boundary) ?? ""
+        lastReport = try c.decodeIfPresent(String.self, forKey: .lastReport) ?? ""
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        inkling = try c.decodeIfPresent(AssistantInklingCard.self, forKey: .inkling) ?? AssistantInklingCard()
+        rag = try c.decodeIfPresent(EpisodicRAGCard.self, forKey: .rag) ?? .empty
+        voice = try c.decodeIfPresent(VoiceMemoCard.self, forKey: .voice) ?? .empty
     }
 
     public static let empty = AssistantSnapshot()

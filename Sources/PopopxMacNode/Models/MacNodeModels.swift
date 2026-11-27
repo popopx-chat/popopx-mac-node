@@ -2879,6 +2879,7 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
     public var discover: DiscoverSnapshot
     public var godsEye: GodsEyeViewSnapshot
     public var assistant: AssistantSnapshot
+    public var watchdog: SystemWatchdogCard
 
     public init(
         node: NodeIdentity,
@@ -2903,7 +2904,8 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         update: UpdateSnapshot = .disabled,
         discover: DiscoverSnapshot = .disabled,
         godsEye: GodsEyeViewSnapshot = .disabled,
-        assistant: AssistantSnapshot = .empty
+        assistant: AssistantSnapshot = .empty,
+        watchdog: SystemWatchdogCard = .disabled
     ) {
         self.node = node
         self.version = NodeVersion.current.semanticString
@@ -2930,6 +2932,7 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         self.discover = discover
         self.godsEye = godsEye
         self.assistant = assistant
+        self.watchdog = watchdog
     }
 }
 
@@ -3184,6 +3187,24 @@ public enum AppPaths {
     /// the key lives with the other signing keys in `vault`.
     public static var assistantDatabaseFile: URL { ledger.appendingPathComponent("assistant.sqlite3") }
     public static var assistantApprovalKeyFile: URL { vault.appendingPathComponent("assistant-approval.key") }
+    /// The episodic index seals every title and body with this key before SQLite
+    /// sees them. It is a file, not a Keychain item, for the same reason the
+    /// approval key is: the index has to open before a paired phone exists.
+    public static var assistantRAGKeyFile: URL { vault.appendingPathComponent("assistant-rag.key") }
+    /// Sealed FTS5 index. Nothing readable is stored in it — titles, bodies and
+    /// sources are AES-GCM blobs and FTS only sees HMAC token digests.
+    public static var assistantRAGDatabaseFile: URL { ledger.appendingPathComponent("assistant-rag.sqlite3") }
+    /// The watchdog's own JSONL trace, next to the node log so a restart can be
+    /// audited without opening the assistant ledger.
+    public static var watchdogAuditFile: URL { logs.appendingPathComponent("watchdog.jsonl") }
+    /// Generated only when the owner flips 「开机自启」. Fixed name so removing the
+    /// switch is the same path every time.
+    public static var launchAgentFile: URL {
+        fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("LaunchAgents", isDirectory: true)
+            .appendingPathComponent("chat.popopx.mac-node.plist")
+    }
 
     /// Subpaths used by the LTX-2.5 MLX workspace.
     public static var ltxRepo: URL { ltxWorkspace.appendingPathComponent("ltx-2-mlx", isDirectory: true) }
@@ -3866,6 +3887,15 @@ public protocol NodeConsoleFacade: Sendable {
     /// Console-only: stores one mail password in the Keychain and answers with its
     /// reference, never the value.
     func storeMailCredential(kind: String, secret: String) async -> AssistantCredentialReport
+    /// One owner click on 「全链路连通性体检」. Every probe is loopback or an
+    /// already-configured account, and the report is redacted before it is served.
+    func assistantDoctor() async -> LiveIntegrationReport
+    /// Natural-language recall over the sealed local index, with citations.
+    func assistantHistory(query: String) async -> EpisodicAnswer
+    /// The LaunchAgent switch and its last check rows.
+    func watchdogStatus() async -> SystemWatchdogCard
+    /// `install`, `uninstall`, `check` or `status` — console-only.
+    func watchdogControl(verb: String) async -> WatchdogControlReport
 }
 
 public extension NodeConsoleFacade {
@@ -3952,6 +3982,30 @@ public extension NodeConsoleFacade {
             assistant: .empty
         )
     }
+
+    func assistantDoctor() async -> LiveIntegrationReport {
+        LiveIntegrationReport(
+            ok: false,
+            headline: "本节点没有体检引擎 / this facade has no doctor",
+            checks: [],
+            boundary: "无检查 / no checks ran"
+        )
+    }
+
+    func assistantHistory(query: String) async -> EpisodicAnswer {
+        .empty
+    }
+
+    func watchdogStatus() async -> SystemWatchdogCard { .disabled }
+
+    func watchdogControl(verb: String) async -> WatchdogControlReport {
+        WatchdogControlReport(
+            ok: false,
+            outcome: "refused",
+            detail: "本节点没有系统看门狗 / this facade has no watchdog",
+            watchdog: .disabled
+        )
+    }
 }
 
 // MARK: - Console API paths
@@ -4036,6 +4090,13 @@ public enum ConsoleRoute {
     public static let assistantControl = "/api/assistant/control"
     public static let assistantDecision = "/api/assistant/decision"
     public static let assistantMailCredential = "/api/assistant/mail/credential"
+    /// Console-only: the owner's 全链路体检, the sealed-index recall, and the
+    /// LaunchAgent switch. None of them is under `/v1/tools/` because each one
+    /// either reads a credential-backed seam or writes a launch configuration on
+    /// this Mac — the exact actions a paired caller must not trigger on its own.
+    public static let assistantDoctor = "/api/assistant/doctor"
+    public static let assistantHistory = "/api/assistant/history"
+    public static let watchdogControl = "/api/watchdog/control"
 
     /// `/v1/tools/{domain}/proposals/{id}/{verb}` — the approval gate, addressed by
     /// proposal id.
@@ -4063,7 +4124,8 @@ public enum ConsoleRoute {
         hubCredential, discoveryCapabilities, discoveryScan,
         updateCheck, updateDecision, discoverRefresh,
         godsEyeControl, godsEyeCredential,
-        assistantControl, assistantDecision, assistantMailCredential
+        assistantControl, assistantDecision, assistantMailCredential,
+        assistantDoctor, assistantHistory, watchdogControl
     ]
 
     /// The tool endpoints, kept out of `all` because `all` is the SPA surface the

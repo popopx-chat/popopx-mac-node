@@ -958,6 +958,10 @@ public actor MacNodePopopxBridge: NodeSignaling {
     private var contactIndex: [String: String] = [:]
     private var cachedOffer: PairingOffer?
     private var invitationContactId: String?
+    /// Called after `/freceive` has written one inbound file into quarantine. The
+    /// console owns what a file is for (an audio memo, in this build), so the
+    /// bridge reports the path and does not interpret it.
+    private var inboundFileHandler: (@Sendable (URL) async -> Void)?
     private var nodeProfileName: String?
 
     // MARK: Accounting
@@ -1025,6 +1029,12 @@ public actor MacNodePopopxBridge: NodeSignaling {
     }
 
     // MARK: - NodeSignaling
+
+    /// Installs the post-transfer hook. The file has already passed `/freceive`;
+    /// the handler receives a path inside quarantine and must re-check it.
+    public func setInboundFileHandler(_ handler: (@Sendable (URL) async -> Void)?) {
+        inboundFileHandler = handler
+    }
 
     public func start() async {
         await bootstrap()
@@ -2071,6 +2081,7 @@ public actor MacNodePopopxBridge: NodeSignaling {
                 level: .info,
                 payload: ["bytes": .int(size)]
             )
+            await inboundFileHandler?(destination)
         case .chatError(let detail):
             lastError = SBChatWire.sanitized("/freceive 失败 / receive failed: \(detail)")
             publish("\(lastError ?? "")", level: .warning)
