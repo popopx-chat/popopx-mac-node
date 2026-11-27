@@ -2460,14 +2460,16 @@ public enum TraditionalChinese {
     ]
 }
 
-/// The languages the node can present: the *same set* as the POPOPX iOS app —
-/// `apps/ios/POPOPX.xcodeproj` `knownRegions` minus `Base` (an Xcode artefact,
-/// not a locale), i.e. the 17 `.lproj` directories the phone ships — plus
-/// `zh-Hant`, which the phone does not have and the node derives from its own
-/// Simplified catalog. The raw values are those same BCP-47 tags, so a pairing
-/// between phone and node never has to translate a language code, and the
-/// `zh` spelling used by the earlier draft is gone: the iOS catalog is
-/// `zh-Hans`, and `Locale`/`Bundle` hand back `zh-Hans`, never `zh`.
+/// The languages the node can present. The base set is the *same set* as the
+/// POPOPX iOS app — `apps/ios/POPOPX.xcodeproj` `knownRegions` minus `Base` (an
+/// Xcode artefact, not a locale), i.e. the 17 `.lproj` directories the phone
+/// ships — plus `zh-Hant`, which the phone does not have and the node derives
+/// from its own Simplified catalog, plus the three console languages added on
+/// 2026-11-27 (Brazilian Portuguese, Korean and Arabic) that the phone does not
+/// ship yet. The raw values are those same BCP-47 tags, so a pairing between
+/// phone and node never has to translate a language code, and the `zh`
+/// spelling used by the earlier draft is gone: the iOS catalog is `zh-Hans`,
+/// and `Locale`/`Bundle` hand back `zh-Hans`, never `zh`.
 ///
 /// The iOS app itself has no in-app switcher — since 2026-11 the only entry
 /// point is the per-app system setting (`Me → General → Display language`),
@@ -2500,19 +2502,24 @@ public enum ConsoleLanguage: String, Codable, Sendable, CaseIterable, Equatable 
     case bulgarian = "bg"
     case turkish = "tr"
     case hungarian = "hu"
+    case portugueseBrazil = "pt-BR"
+    case korean = "ko"
+    case arabic = "ar"
 
-    /// Picker order: follow-the-system, then the three regions the node can
-    /// actually serve in Chinese or English (the two proof-read catalogs and
-    /// the derived Traditional one), then the remaining fourteen in exactly the
-    /// relative order the iOS target's `knownRegions` lists them
+    /// Picker order: follow-the-system, then the three regions the node serves
+    /// in Chinese or English from its own catalogs (the two proof-read ones
+    /// and the derived Traditional one), then the remaining iOS regions in
+    /// exactly the relative order the target's `knownRegions` lists them
     /// (en, ru, de, fr, it, nl, cs, zh-Hans, es, pl, ja, th, fi, uk, bg, tr, hu
-    /// with `Base` dropped, since `Base` is an Xcode folder and not a language).
-    /// Kept as an explicit array because `allCases` from `CaseIterable` would
-    /// silently change if a case were inserted in the middle of the enum.
+    /// with `Base` dropped, since `Base` is an Xcode folder and not a
+    /// language), and finally the three console translations added on
+    /// 2026-11-27. Kept as an explicit array because `allCases` from
+    /// `CaseIterable` would silently change if a case were inserted in the
+    /// middle of the enum.
     public static let displayOrder: [ConsoleLanguage] = [
         .system, .chineseSimplified, .chineseTraditional, .english, .russian, .german, .french, .italian,
         .dutch, .czech, .spanish, .polish, .japanese, .thai, .finnish, .ukrainian,
-        .bulgarian, .turkish, .hungarian
+        .bulgarian, .turkish, .hungarian, .portugueseBrazil, .korean, .arabic
     ]
 
     /// Locales whose endonym is used as the picker label, the same mechanism
@@ -2539,24 +2546,29 @@ public enum ConsoleLanguage: String, Codable, Sendable, CaseIterable, Equatable 
         case .bulgarian: return "Български"
         case .turkish: return "Türkçe"
         case .hungarian: return "Magyar"
+        case .portugueseBrazil: return "Português (Brasil)"
+        case .korean: return "한국어"
+        case .arabic: return "العربية"
         }
     }
 
     /// The language the *interface* is rendered in. Both Chinese scripts read
     /// Chinese copy — they differ only in which glyph set they are shown in —
-    /// and every other locale in this list selects English. `isChinese` is what
-    /// the report templates and the local-model prompts key off, so a Russian or
-    /// Japanese console is honest about which catalog it is showing rather
-    /// than half-translating.
+    /// and every other locale in this list selects English for copy that is
+    /// composed on the node side (menu bar, engines, pushes): only the web
+    /// console has hand-written catalogs for pt-BR, ko and ar. `isChinese` is
+    /// what the report templates and the local-model prompts key off, so a
+    /// Russian or Japanese console is honest about which catalog it is showing
+    /// rather than half-translating.
     public var isChinese: Bool {
         resolved == .chineseSimplified || resolved == .chineseTraditional
     }
 
     /// The single place catalog-less regions are resolved: the node writes two
     /// proof-read strings and derives the third, so Simplified selects `zh`,
-    /// Traditional selects the converted `zh`, and the other fifteen regions
-    /// select English. Both the menu bar and the engines call this, which is how
-    /// the app and the console can never disagree about what a language means.
+    /// Traditional selects the converted `zh`, and the other regions select
+    /// English. Both the menu bar and the engines call this, which is how the
+    /// app and the console can never disagree about what a language means.
     public func text(zh: String, en: String) -> String {
         switch resolved {
         case .chineseSimplified: return zh
@@ -2567,8 +2579,8 @@ public enum ConsoleLanguage: String, Codable, Sendable, CaseIterable, Equatable 
 
     /// Locales whose console copy is hand-maintained next to the code. The
     /// picker still offers every iOS region, and the page says plainly that the
-    /// rest render from the English catalog — inventing 15 unreviewed catalogs
-    /// would look complete and read badly.
+    /// rest render from the English catalog — inventing the remaining
+    /// unreviewed catalogs would look complete and read badly.
     public static let curated: Set<ConsoleLanguage> = [.chineseSimplified, .english]
 
     /// Locales whose catalog the node derives instead of typing out:
@@ -2577,19 +2589,39 @@ public enum ConsoleLanguage: String, Codable, Sendable, CaseIterable, Equatable 
     /// catalog without pretending to be a human translation.
     public static let derived: Set<ConsoleLanguage> = [.chineseTraditional]
 
+    /// Locales whose console catalog was translated in full on 2026-11-27
+    /// (Brazilian Portuguese, Korean, Arabic). They are typed out next to the
+    /// Simplified/English rows and pinned to the same key set by
+    /// `MacNodeContractTests`; they are not part of `curated`, because that
+    /// set is the copy the node itself authors for its own surfaces, and the
+    /// three new catalogs cover the web console only.
+    public static let translated: Set<ConsoleLanguage> = [.portugueseBrazil, .korean, .arabic]
+
     public var isCurated: Bool { Self.curated.contains(self) }
 
     /// What the page and the notice check: does this language get its own
     /// strings, hand-written or derived?
-    public var hasCatalog: Bool { Self.curated.contains(self) || Self.derived.contains(self) }
+    public var hasCatalog: Bool {
+        Self.curated.contains(self) || Self.derived.contains(self) || Self.translated.contains(self)
+    }
 
     /// Which catalog actually paints the interface for this choice.
     public var catalogKey: String {
         switch resolved {
         case .chineseSimplified: return "zh"
         case .chineseTraditional: return "zhHant"
+        case .portugueseBrazil: return "ptBR"
+        case .korean: return "ko"
+        case .arabic: return "ar"
         default: return "en"
         }
+    }
+
+    /// Arabic is the one right-to-left language in the list. The page sets
+    /// `dir="rtl"` on its root when this is true; nothing else changes the
+    /// document's direction.
+    public var isRightToLeft: Bool {
+        resolved == .arabic
     }
 
     /// The label shown in the menu bar and the console chip.
@@ -2647,6 +2679,13 @@ public enum ConsoleLanguage: String, Codable, Sendable, CaseIterable, Equatable 
         // catalog is `zh-Hans`.
         if lowered.hasPrefix("zh-hant") || lowered.hasPrefix("zh-tw") { return .chineseTraditional }
         if lowered == "zh" || lowered.hasPrefix("zh-") { return .chineseSimplified }
+        // `trimCase` normalises a script subtag (`zh-Hans`), not a region one,
+        // so `pt-BR` reached here as `pt-Br` and fell through to the primary
+        // subtag, which has no case of its own. BCP-47 tags are
+        // case-insensitive, so fold the whole tag before giving up.
+        if let folded = ConsoleLanguage.allCases.first(where: { $0.rawValue.lowercased() == lowered }) {
+            return folded
+        }
         let primary = lowered.split(separator: "-").first.map(String.init) ?? lowered
         return ConsoleLanguage(rawValue: primary)
     }

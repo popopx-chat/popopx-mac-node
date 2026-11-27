@@ -295,17 +295,34 @@ enum WEBConsoleHTML {
         }
     }()
 
+    /// The three console translations added 2026-11-27 are typed out in
+    /// `ConsoleTranslations` — one hand-written catalog per language, pinned to
+    /// the Simplified/English key set by `ConsoleLocalizationTests`, with the
+    /// registry counts checked in `MacNodeContractTests` — and injected
+    /// here the same way `HANT` is. Keeping them as side tables rather than
+    /// extra fields on every `I18N` row is what lets the Traditional derivation
+    /// above keep reading exactly `{ zh, en }` rows.
+    static let portugueseCatalogJavaScript: String =
+        ConsoleTranslations.javascript(ConsoleTranslations.portugueseRows)
+    static let koreanCatalogJavaScript: String =
+        ConsoleTranslations.javascript(ConsoleTranslations.koreanRows)
+    static let arabicCatalogJavaScript: String =
+        ConsoleTranslations.javascript(ConsoleTranslations.arabicRows)
+
     static let document: String = {
         rawDocument
             .replacingOccurrences(of: "/*PPX_LANGS*/[]", with: localeRegistryJavaScript)
             .replacingOccurrences(of: "/*PPX_HANT*/{}", with: traditionalCatalogJavaScript)
+            .replacingOccurrences(of: "/*PPX_PTBR*/{}", with: portugueseCatalogJavaScript)
+            .replacingOccurrences(of: "/*PPX_KO*/{}", with: koreanCatalogJavaScript)
+            .replacingOccurrences(of: "/*PPX_AR*/{}", with: arabicCatalogJavaScript)
             .replacingOccurrences(of: "/*PPX_MODELS*/{models: [],admission: []}", with: modelRegistryJavaScript)
             .replacingOccurrences(of: "/*PPX_MAIL*/[]", with: mailPresetRegistryJavaScript)
             // Last, so the generated Traditional rows carry the real scheme too.
             .replacingOccurrences(of: "/*PPX_SCHEME*/", with: NodeWire.invitationScheme)
     }()
 
-    private static func jsLiteral(_ text: String) -> String {
+    static func jsLiteral(_ text: String) -> String {
         text.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
             .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
@@ -383,6 +400,16 @@ input,select,textarea{font:inherit;color:var(--ink)}
 input::placeholder{color:var(--mute)}
 a{color:var(--accent-lift)}
 .mono{font-family:var(--mono);font-size:.92em;letter-spacing:-.01em}
+/* ---- bidi isolation ---------------------------------------------------
+   Technical literals keep their internal order in every language. IPs, ports,
+   routes, hashes and commands are LTR runs; without isolation the Arabic
+   console's RTL base direction can pull their punctuation (a leading ":", a
+   trailing "#") to the wrong end of the line. `isolate` keeps neighbours from
+   changing the run, and `direction:ltr` pins the run itself. */
+code,kbd,samp,.mono,.code,pre.raw,.term__body,.engine__ref,#cmd,#cmdout,[dir="ltr"]{
+  direction:ltr;unicode-bidi:isolate;text-align:left;
+}
+.stat__v,.stat__n{unicode-bidi:isolate}
 .dim{color:var(--dim)}
 .mute{color:var(--mute)}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
@@ -445,19 +472,19 @@ a{color:var(--accent-lift)}
 .lang{position:relative;display:flex;align-items:center}
 .lang__select{
   appearance:none;-webkit-appearance:none;
-  padding:var(--s1) 26px var(--s1) 10px;
+  padding-block:var(--s1);padding-inline:10px 26px;
   font-family:var(--mono);font-size:var(--fs-xs);color:var(--dim);
   background:#0e0e12;border:1px solid var(--hair);border-radius:var(--r-s);
   cursor:pointer;max-width:176px
 }
 .lang__select:hover{color:var(--ink);border-color:var(--hair-strong)}
 .lang__select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-.lang__caret{position:absolute;right:9px;pointer-events:none;color:var(--mute);font-size:var(--fs-xs)}
+.lang__caret{position:absolute;inset-inline-end:9px;pointer-events:none;color:var(--mute);font-size:var(--fs-xs)}
 .lang__select option{background:#0e0e12;color:var(--ink)}
 /* ---- step rail -------------------------------------------------------- */
 .rail{display:flex;gap:var(--s2);margin:var(--s4) 0 var(--s3)}
 .rail__btn{
-  flex:1 1 0;min-width:0;text-align:left;
+  flex:1 1 0;min-width:0;text-align:start;
   display:flex;align-items:center;gap:var(--s2);
   padding:var(--s3);border:1px solid var(--hair);border-radius:var(--r-m);
   background:rgba(255,255,255,.02);color:var(--dim);
@@ -468,7 +495,7 @@ a{color:var(--accent-lift)}
 .rail__idx{font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute)}
 .rail__btn.is-on .rail__idx{color:var(--accent-lift)}
 .rail__name{font-size:var(--fs-sm);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.rail__badge{margin-left:auto;width:18px;height:18px;flex:0 0 auto}
+.rail__badge{margin-inline-start:auto;width:18px;height:18px;flex:0 0 auto}
 .rail__badge svg{display:block;width:18px;height:18px}
 .rail__btn[data-status="done"] .rail__badge{color:var(--ok)}
 .rail__btn[data-status="run"] .rail__badge{color:var(--accent-lift)}
@@ -544,12 +571,13 @@ textarea{min-height:66px;resize:vertical;font-family:var(--mono);font-size:var(-
   background:rgba(255,255,255,.08);transition:background .18s ease,border-color .18s ease;
 }
 .switch__knob{
-  position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;
+  position:absolute;top:2px;inset-inline-start:2px;width:20px;height:20px;border-radius:50%;
   background:#e9e9ef;transition:transform .18s ease;
 }
 @media (prefers-reduced-motion:reduce){.switch,.switch__knob{transition:none}}
 .switch[aria-checked="true"]{background:var(--accent);border-color:transparent}
 .switch[aria-checked="true"] .switch__knob{transform:translateX(20px);background:#fff}
+[dir="rtl"] .switch[aria-checked="true"] .switch__knob{transform:translateX(-20px)}
 .switch.is-pending{opacity:.55}
 /* checkbox */
 .check{display:flex;align-items:center;gap:var(--s2);font-size:var(--fs-sm);color:var(--dim);cursor:pointer}
@@ -564,7 +592,7 @@ textarea{min-height:66px;resize:vertical;font-family:var(--mono);font-size:var(-
 /* ---- tables ----------------------------------------------------------- */
 .table{width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
 .table th{
-  text-align:left;font-weight:600;color:var(--mute);font-size:var(--fs-xs);
+  text-align:start;font-weight:600;color:var(--mute);font-size:var(--fs-xs);
   text-transform:uppercase;letter-spacing:.07em;padding:0 var(--s2) var(--s2);
   border-bottom:1px solid var(--hair);white-space:nowrap;
 }
@@ -572,6 +600,7 @@ textarea{min-height:66px;resize:vertical;font-family:var(--mono);font-size:var(-
 .table tr:last-child td{border-bottom:0}
 .table tbody tr.is-active td{color:var(--ink);background:rgba(139,108,255,.1)}
 .table tbody tr.is-active td:first-child{box-shadow:inset 2px 0 0 var(--accent-lift)}
+[dir="rtl"] .table tbody tr.is-active td:first-child{box-shadow:inset -2px 0 0 var(--accent-lift)}
 .table--rows td{color:var(--ink)}
 .tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .cell-strong{color:var(--ink);font-weight:600}
@@ -618,7 +647,7 @@ textarea{min-height:66px;resize:vertical;font-family:var(--mono);font-size:var(-
   background:rgba(0,0,0,.55);overflow:hidden;
 }
 .term__head{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;padding:var(--s2) var(--s3);border-bottom:1px solid var(--hair)}
-.term__title{font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute);text-transform:uppercase;letter-spacing:.1em;margin-right:auto}
+.term__title{font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute);text-transform:uppercase;letter-spacing:.1em;margin-inline-end:auto}
 .term select{width:auto;padding:3px 6px;font-size:var(--fs-xs)}
 .term__body{flex:1 1 auto;overflow-y:auto;padding:var(--s2) var(--s3);font-family:var(--mono);font-size:var(--fs-xs);line-height:1.65;scrollbar-width:thin}
 .term__body::-webkit-scrollbar{width:8px;height:8px}
@@ -698,24 +727,24 @@ textarea{min-height:66px;resize:vertical;font-family:var(--mono);font-size:var(-
 .engine__meta{display:flex;flex-wrap:wrap;gap:var(--s2);align-items:center;font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute)}
 .engine__meta i{font-style:normal;color:var(--dim)}
 .engine__foot{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
-.engine__ref{font-family:var(--mono);font-size:var(--fs-xs);color:#4f4f5c;margin-left:auto}
+.engine__ref{font-family:var(--mono);font-size:var(--fs-xs);color:#4f4f5c;margin-inline-start:auto}
 /* ---- privacy bridges -------------------------------------------------- */
 /* One card per proposal: the left rule carries its state, because the thing an
    operator scans for on this page is "what is waiting for me right now". */
 .pv{display:flex;flex-direction:column;gap:var(--s3)}
 .pv-card{
   display:flex;flex-direction:column;gap:var(--s2);
-  padding:var(--s3);border:1px solid var(--hair);border-left:2px solid var(--accent);
+  padding:var(--s3);border:1px solid var(--hair);border-inline-start:2px solid var(--accent);
   border-radius:var(--r-m);background:rgba(255,255,255,.025);
 }
-.pv-card.is-spent{border-left-color:var(--hair-strong);opacity:.72}
-.pv-card.is-live{border-left-color:var(--ok)}
+.pv-card.is-spent{border-inline-start-color:var(--hair-strong);opacity:.72}
+.pv-card.is-live{border-inline-start-color:var(--ok)}
 .pv-top{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap}
 .pv-title{font-size:var(--fs-sm);font-weight:650;color:var(--ink)}
 .pv-meta{font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute)}
 .pv-line{font-size:var(--fs-xs);color:var(--dim);word-break:break-word}
 .pv-acts{display:flex;gap:var(--s2);flex-wrap:wrap;align-items:center}
-.pv-ttl{margin-left:auto;font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute)}
+.pv-ttl{margin-inline-start:auto;font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute)}
 .pv-ttl.is-soon{color:var(--warn)}
 .pv-log{display:flex;flex-direction:column;gap:var(--s1);max-height:280px;overflow:auto;font-family:var(--mono);font-size:var(--fs-xs)}
 .pv-log__row{display:flex;gap:var(--s2);align-items:baseline;border-bottom:1px solid var(--hair);padding-bottom:3px}
@@ -768,11 +797,13 @@ textarea{min-height:66px;resize:vertical;font-family:var(--mono);font-size:var(-
 .savebar__rev{font-family:var(--mono);font-size:var(--fs-xs);color:var(--mute)}
 /* ---- drawer ----------------------------------------------------------- */
 .drawer{margin-top:var(--s4);border:1px solid var(--hair);border-radius:var(--r-l);background:rgba(255,255,255,.02);overflow:hidden}
-.drawer__head{display:flex;align-items:center;gap:var(--s2);padding:var(--s3) var(--s4);cursor:pointer;width:100%;text-align:left}
-.drawer__head h3{font-size:var(--fs-sm);font-weight:600;color:var(--dim);margin-right:auto}
+.drawer__head{display:flex;align-items:center;gap:var(--s2);padding:var(--s3) var(--s4);cursor:pointer;width:100%;text-align:start}
+.drawer__head h3{font-size:var(--fs-sm);font-weight:600;color:var(--dim);margin-inline-end:auto}
 .drawer__head svg{width:16px;height:16px;color:var(--mute);transition:transform .18s ease}
 @media (prefers-reduced-motion:reduce){.drawer__head svg{transition:none}}
 .drawer.is-open .drawer__head svg{transform:rotate(90deg)}
+[dir="rtl"] .drawer__head svg{transform:scaleX(-1)}
+[dir="rtl"] .drawer.is-open .drawer__head svg{transform:scaleX(-1) rotate(90deg)}
 .drawer__body{padding:0 var(--s4) var(--s4);display:grid;gap:var(--s3);grid-template-columns:1fr}
 @media (min-width:900px){.drawer__body{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
 pre.raw{
@@ -781,7 +812,7 @@ pre.raw{
   max-height:320px;overflow:auto;color:#c8c8d2;white-space:pre-wrap;word-break:break-word;
 }
 /* ---- toasts ----------------------------------------------------------- */
-#toasts{position:fixed;right:var(--s4);bottom:var(--s4);z-index:50;display:flex;flex-direction:column;gap:var(--s2);max-width:min(380px,90vw)}
+#toasts{position:fixed;inset-inline-end:var(--s4);bottom:var(--s4);z-index:50;display:flex;flex-direction:column;gap:var(--s2);max-width:min(380px,90vw)}
 .toast{
   display:flex;align-items:flex-start;gap:var(--s2);
   padding:var(--s3);border:1px solid var(--hair-strong);border-radius:var(--r-m);
@@ -795,11 +826,11 @@ pre.raw{
 .toast[data-kind="ok"]{border-color:rgba(63,214,143,.45)}
 .toast[data-kind="err"]{border-color:rgba(255,107,120,.5)}
 .toast[data-kind="warn"]{border-color:rgba(255,204,92,.45)}
-.toast__x{margin-left:auto;color:var(--mute);font-size:var(--fs-xs);padding:0 var(--s1)}
+.toast__x{margin-inline-start:auto;color:var(--mute);font-size:var(--fs-xs);padding:0 var(--s1)}
 .brandnote{margin-top:var(--s5);padding:var(--s3) var(--s4);border:1px solid var(--hair);border-radius:var(--r-l);background:rgba(255,255,255,.02);display:flex;flex-direction:column;gap:var(--s2)}
 .brandnote__head{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--s1) var(--s3);font-size:var(--fs-xs);line-height:1.5;color:var(--dim);overflow-wrap:anywhere}
 .brandnote__pos{font-weight:600;color:var(--accent-lift);letter-spacing:.01em}
-.brandnote__slogan::before{content:"·";margin-right:var(--s2);color:var(--mute)}
+.brandnote__slogan::before{content:"·";margin-inline-end:var(--s2);color:var(--mute)}
 .brandnote__mission,.brandnote__role{font-size:var(--fs-xs);line-height:1.6;color:var(--mute);overflow-wrap:anywhere}
 footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid var(--hair);display:flex;flex-wrap:wrap;gap:var(--s2) var(--s4);align-items:center;font-size:var(--fs-xs);color:var(--mute)}
 </style>
@@ -1576,7 +1607,14 @@ var LEVEL_GLYPH = { debug: "·", info: "›", notice: "•", success: "✓", war
 /* Short weekday glyphs are the same characters in both Chinese scripts, so the
    Traditional catalog of this one table is the Simplified table. */
 var CJK_WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
-var WEEKDAYS = { zh: CJK_WEEKDAYS, zhHant: CJK_WEEKDAYS, en: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] };
+var WEEKDAYS = {
+  zh: CJK_WEEKDAYS,
+  zhHant: CJK_WEEKDAYS,
+  en: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+  ptBR: ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"],
+  ko: ["일", "월", "화", "수", "목", "금", "토"],
+  ar: ["الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"]
+};
 var WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
 var LOG_LIMIT = 900;
 /* The two ceilings the hub panel enforces while typing. They are the node's numbers, and
@@ -2418,10 +2456,25 @@ var I18N = {
    `zh-Hant` is the exception, and `HANT` below is how: it is this page's own
    Simplified column converted with Apple's CoreFoundation `Hans-Hant` transform
    (see `TraditionalChinese`), injected at build time. A derived catalog cannot
-   fall behind the hand-written one, because it *is* the hand-written one. */
+   fall behind the hand-written one, because it *is* the hand-written one.
+
+   The registry carries 21 language entries plus `system`. Since 2026-11-27
+   Brazilian Portuguese, Korean and Arabic read their own full catalogs
+   (`PTBR` / `KO` / `AR` below), injected from `ConsoleTranslations`; the other
+   fifteen still fall back to English and the page keeps saying so. Arabic is
+   the one right-to-left catalog and flips the document's `dir`. */
 var LOCALES = /*PPX_LANGS*/[];
 
 var HANT = /*PPX_HANT*/{};
+
+/* Hand-written catalogs for the three languages added on 2026-11-27, injected
+   at build time from `ConsoleTranslations`. They are side tables for the same
+   reason HANT is: the Simplified/English rows stay the only shape the
+   Traditional derivation has to parse, and a language can never fall behind
+   silently — the contract test pins each table to the I18N key set. */
+var PTBR = /*PPX_PTBR*/{};
+var KO = /*PPX_KO*/{};
+var AR = /*PPX_AR*/{};
 
 /* The local model list is generated from `ModelCatalog`, so the picker can never
    name a reference the node will not resolve. Nothing machine-dependent is in it:
@@ -2485,16 +2538,21 @@ function catalogValue(key, catalog) {
   var row = I18N[key];
   if (!row) { return null; }
   if (catalog === "zhHant") { return HANT[key] || row.en || null; }
+  if (catalog === "ptBR") { return PTBR[key] || row.en || null; }
+  if (catalog === "ko") { return KO[key] || row.en || null; }
+  if (catalog === "ar") { return AR[key] || row.en || null; }
   return row[catalog] || row.en || null;
 }
 
-function uiIsChinese() { return catalogFor(S.lang) !== "en"; }
+function uiIsChinese() { var catalog = catalogFor(S.lang); return catalog === "zh" || catalog === "zhHant"; }
 
 /* Dynamic copy that travels on the snapshot (engine names, checklist titles)
    arrives as `xZh` / `xHant` / `xEn`; the node generates all three because one
    snapshot is broadcast to every tab. */
 function snapshotField(object, base) {
-  var suffix = { zh: "Zh", zhHant: "Hant", en: "En" }[catalogFor(S.lang)];
+  /* Only the Chinese catalogs read the Chinese column; pt-BR, Korean, Arabic
+     and the remaining fallback languages read the English one. */
+  var suffix = { zh: "Zh", zhHant: "Hant" }[catalogFor(S.lang)] || "En";
   var value = object[base + suffix];
   if (value) { return String(value); }
   return String(object[base + "En"] || object[base + "Zh"] || "");
@@ -2754,9 +2812,17 @@ function buildLangMenu() {
 
 function applyLang() {
   var catalog = catalogFor(S.lang);
-  document.documentElement.setAttribute("data-lang", S.lang);
-  document.documentElement.setAttribute("lang",
-    catalog === "zh" ? "zh-Hans-CN" : (catalog === "zhHant" ? "zh-Hant-TW" : "en"));
+  var html = document.documentElement;
+  html.setAttribute("data-lang", S.lang);
+  html.setAttribute("lang", {
+    zh: "zh-Hans-CN", zhHant: "zh-Hant-TW", ptBR: "pt-BR", ko: "ko", ar: "ar"
+  }[catalog] || "en");
+  /* Arabic is the only right-to-left catalog. Setting `dir` on the root is the
+     whole layout mirror: the topbar, the step rail and every flex row start at
+     the inline edge, and the width-based pull bar is a block box, so it grows
+     from the right with no direction-specific rule. Technical literals are
+     isolated separately by the bidi block in the stylesheet. */
+  html.setAttribute("dir", catalog === "ar" ? "rtl" : "ltr");
   buildLangMenu();
   var missing = [];
   Array.prototype.forEach.call(document.querySelectorAll("[data-i18n]"), function (node) {
@@ -3070,10 +3136,10 @@ function renderRail() {
 }
 
 /* -------------------------------------------------------------- step one */
-function statCard(key, value, note, small) {
+function statCard(key, value, note, small, ltr) {
   return h("div", { cls: "stat" }, [
     h("span", { cls: "stat__k", text: t(key) }),
-    h("span", { cls: "stat__v" + (small ? " stat__v--sm" : ""), text: value }),
+    h("span", { cls: "stat__v" + (small ? " stat__v--sm" : ""), text: value, dir: ltr ? "ltr" : null }),
     note ? h("span", { cls: "stat__n", text: note }) : null
   ]);
 }
@@ -3266,8 +3332,9 @@ function renderModelPicker() {
    too rather than dropping to English for a dynamic row. */
 function modelText(object, base) {
   if (!object) { return ""; }
-  if (catalogFor(S.lang) === "en") { return String(object[base + "En"] || object[base + "Zh"] || ""); }
-  return String(object[base + "Zh"] || object[base + "En"] || "");
+  var catalog = catalogFor(S.lang);
+  if (catalog === "zh" || catalog === "zhHant") { return String(object[base + "Zh"] || object[base + "En"] || ""); }
+  return String(object[base + "En"] || object[base + "Zh"] || "");
 }
 function modelPullRunning(pull) {
   return Boolean(pull) && (pull.state === "pulling" || pull.state === "verifying");
@@ -3584,7 +3651,7 @@ function renderBridge() {
   slot.appendChild(statCard("wsOn", bridge.websocketConnected ? t("yes") : t("no"), t(bridge.websocketConnected ? "wsOn" : "wsOff"), true));
   slot.appendChild(statCard("accepted", String(bridge.acceptedCommands || 0), t("rejected") + " " + String(bridge.rejectedCommands || 0)));
   slot.appendChild(statCard("delivered", String(bridge.deliveredResults || 0), t("outbox") + " " + String(bridge.outboxDepth || 0)));
-  slot.appendChild(statCard("uptime", dur(bridge.uptimeSeconds), "port " + String(bridge.controlPort || ""), true));
+  slot.appendChild(statCard("uptime", dur(bridge.uptimeSeconds), "port " + String(bridge.controlPort || ""), true, true));
   setText("bridge-binary", bridge.binaryPath
     ? t("daemonPath") + " · " + anon(String(bridge.binaryPath)) + (bridge.lastError ? " · " + t("bridgeErr") + " · " + String(bridge.lastError) : "")
     : bridge.lastError ? t("bridgeErr") + " · " + String(bridge.lastError) : "");
@@ -3712,7 +3779,7 @@ function fieldWrap(labelKey, control, noteNode) {
 }
 function note(text) { return h("span", { cls: "field__note", text: text }); }
 function numField(labelKey, read, write, min, max, noteText, onAfter) {
-  var input = h("input", { type: "number", min: String(min), max: String(max), step: "1", value: String(read()) });
+  var input = h("input", { type: "number", dir: "ltr", min: String(min), max: String(max), step: "1", value: String(read()) });
   var holder = note(noteText === null || noteText === undefined ? "" : noteText);
   input.addEventListener("input", function () {
     var raw = Number(input.value);
@@ -3725,19 +3792,22 @@ function numField(labelKey, read, write, min, max, noteText, onAfter) {
   return fieldWrap(labelKey, input, noteText === null ? null : holder);
 }
 function textField(labelKey, read, write, placeholderKey, noteText) {
-  var input = h("input", { type: "text", spellcheck: "false", value: String(read() === undefined || read() === null ? "" : read()) });
+  /* Free text follows its own first strong character: an Arabic name reads
+     right-to-left while a path, host or id reads left-to-right. Technical
+     fields below pin `ltr` instead of guessing. */
+  var input = h("input", { type: "text", dir: "auto", spellcheck: "false", value: String(read() === undefined || read() === null ? "" : read()) });
   if (placeholderKey) { input.setAttribute("placeholder", t(placeholderKey)); }
   input.addEventListener("input", function () { write(input.value); markDirty(); });
   return fieldWrap(labelKey, input, noteText ? note(t(noteText)) : null);
 }
 function urlField(labelKey, read, write, placeholder, noteText) {
-  var input = h("input", { type: "text", spellcheck: "false", value: String(read() || ""), inputmode: "url" });
+  var input = h("input", { type: "text", dir: "ltr", spellcheck: "false", value: String(read() || ""), inputmode: "url" });
   if (placeholder) { input.setAttribute("placeholder", placeholder); }
   input.addEventListener("input", function () { write(input.value); markDirty(); });
   return fieldWrap(labelKey, input, noteText ? note(t(noteText)) : null);
 }
 function secretField(labelKey, read, write) {
-  var input = h("input", { type: "password", spellcheck: "false", value: String(read() || ""), autocomplete: "off" });
+  var input = h("input", { type: "password", dir: "ltr", spellcheck: "false", value: String(read() || ""), autocomplete: "off" });
   input.addEventListener("input", function () { write(input.value); markDirty(); });
   var button = h("button", { cls: "btn btn--tiny", text: t("secretShow"), type: "button" });
   button.addEventListener("click", function () {
@@ -4559,7 +4629,7 @@ function renderGodsEye() {
       snap.installVerified ? String(snap.installedVersion || snap.pinnedVersion || "") : t("geUnverified"),
       snap.installVerified ? "" : String(snap.installDetail || ""), true));
     stats.appendChild(statCard("geStatPort", String(snap.bindHost || "127.0.0.1") + ":" + String(snap.port || 0),
-      snap.running ? t("geRunning") : t("geStopped"), true));
+      snap.running ? t("geRunning") : t("geStopped"), true, true));
     stats.appendChild(statCard("geStatHealth",
       snap.healthStatus === null || snap.healthStatus === undefined ? "—" : String(snap.healthStatus),
       snap.lastHealthAt ? pvWhen(snap.lastHealthAt) : "", true));

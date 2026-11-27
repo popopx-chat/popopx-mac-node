@@ -261,10 +261,11 @@ final class MacNodeContractTests: XCTestCase {
     func testConsoleLocaleListMatchesTheiOSApp() {
         let iosRegions = ["en", "ru", "de", "fr", "it", "nl", "cs", "zh-Hans", "es", "pl",
                           "ja", "th", "fi", "uk", "bg", "tr", "hu"]
-        // The node adds exactly one language the phone does not have. Naming it
-        // here is the point: a second unannounced addition would fail this test
-        // rather than quietly widen the two apps' lists.
-        let nodeOnlyRegions: Set<String> = ["zh-Hant"]
+        // The node adds four languages the phone does not have: its own
+        // Traditional Chinese catalog and three console translations added on
+        // 2026-11-27. Naming them here is the point: a fifth unannounced
+        // addition would fail this test rather than quietly widen the lists.
+        let nodeOnlyRegions: Set<String> = ["zh-Hant", "pt-BR", "ko", "ar"]
         XCTAssertEqual(ConsoleLanguage.displayOrder.first, .system,
                        "the console must start on the phone's behaviour: follow the system locale")
         XCTAssertEqual(ConsoleLanguage.displayOrder.count, iosRegions.count + nodeOnlyRegions.count + 1)
@@ -284,16 +285,28 @@ final class MacNodeContractTests: XCTestCase {
                       "the Simplified picker entry must name the catalog it reads")
         XCTAssertTrue(page.contains("code:\"zh-Hant\",name:\"繁體中文\",catalog:\"zhHant\""),
                       "Traditional must arrive with its own catalog, not the English fallback")
-        // Every entry names one of three catalogs, and the counts must add up —
-        // `system` is resolved by Swift, so its own label follows the machine and
-        // is deliberately not pinned here.
+        XCTAssertTrue(page.contains("code:\"pt-BR\",name:\"Português (Brasil)\",catalog:\"ptBR\""),
+                      "Brazilian Portuguese must arrive with the catalog it reads")
+        XCTAssertTrue(page.contains("code:\"ko\",name:\"한국어\",catalog:\"ko\""),
+                      "Korean must arrive with the catalog it reads")
+        XCTAssertTrue(page.contains("code:\"ar\",name:\"العربية\",catalog:\"ar\""),
+                      "Arabic must arrive with the catalog it reads")
+        // Every entry names one of the catalogs the page actually serves, and the
+        // counts must add up — `system` is resolved by Swift, so its own label
+        // follows the machine and is deliberately not pinned here.
         let english = page.components(separatedBy: "catalog:\"en\"").count - 1
         let simplified = page.components(separatedBy: "catalog:\"zh\"").count - 1
         let traditional = page.components(separatedBy: "catalog:\"zhHant\"").count - 1
-        XCTAssertEqual(english + simplified + traditional, ConsoleLanguage.displayOrder.count,
+        let portuguese = page.components(separatedBy: "catalog:\"ptBR\"").count - 1
+        let korean = page.components(separatedBy: "catalog:\"ko\"").count - 1
+        let arabic = page.components(separatedBy: "catalog:\"ar\"").count - 1
+        XCTAssertEqual(english + simplified + traditional + portuguese + korean + arabic,
+                       ConsoleLanguage.displayOrder.count,
                        "a registry entry without a catalog would paint an empty label")
         XCTAssertEqual(traditional, ConsoleLanguage.derived.count,
                        "only a language the node actually derives may claim the derived catalog")
+        XCTAssertEqual(portuguese + korean + arabic, ConsoleLanguage.translated.count,
+                       "each console translation must claim exactly one entry")
         XCTAssertGreaterThanOrEqual(simplified, 1, "Simplified Chinese must always name its own catalog")
         XCTAssertFalse(page.contains("/*PPX_SCHEME*/"),
                        "the invitation label would print the substitution marker instead of the scheme")
@@ -401,6 +414,21 @@ final class MacNodeContractTests: XCTestCase {
         XCTAssertTrue(ConsoleLanguage.chineseTraditional.hasCatalog)
         XCTAssertFalse(ConsoleLanguage.chineseTraditional.isCurated,
                        "a machine-derived catalog must never claim to be proof-read")
+        XCTAssertEqual(ConsoleLanguage.portugueseBrazil.catalogKey, "ptBR")
+        XCTAssertEqual(ConsoleLanguage.korean.catalogKey, "ko")
+        XCTAssertEqual(ConsoleLanguage.arabic.catalogKey, "ar")
+        XCTAssertEqual(ConsoleLanguage.translated, [.portugueseBrazil, .korean, .arabic],
+                       "the console-only translations are exactly the three added on 2026-11-27")
+        for language in ConsoleLanguage.translated {
+            XCTAssertTrue(language.hasCatalog, "\(language.rawValue) must read its own catalog")
+            XCTAssertFalse(language.isCurated, "\(language.rawValue) is not node-authored copy")
+            XCTAssertFalse(language.isChinese, "\(language.rawValue) must not key off the Chinese templates")
+        }
+        XCTAssertTrue(ConsoleLanguage.arabic.isRightToLeft,
+                      "Arabic is the only catalog whose root flips to dir=rtl")
+        for language in ConsoleLanguage.displayOrder where language != .arabic {
+            XCTAssertFalse(language.isRightToLeft, "\(language.rawValue) must render left-to-right")
+        }
         let resolved = ConsoleLanguage.system.resolved
         XCTAssertNotEqual(resolved, .system, "`system` must resolve to a real language, never to itself")
         XCTAssertEqual(resolved, ConsoleLanguage.matchingCurrentSystemLocale())
@@ -436,8 +464,16 @@ final class MacNodeContractTests: XCTestCase {
         XCTAssertEqual(ConsoleLanguage.matching("de-AT"), .german)
         XCTAssertNil(ConsoleLanguage.matching("sr-RS"),
                      "a region neither app ships must never be invented")
-        XCTAssertNil(ConsoleLanguage.matching("pt-BR"))
-        XCTAssertNil(ConsoleLanguage.matching("ko-KR"))
+        XCTAssertEqual(ConsoleLanguage.matching("pt-BR"), .portugueseBrazil)
+        XCTAssertEqual(ConsoleLanguage.matching("PT-BR"), .portugueseBrazil,
+                       "BCP-47 tags are case-insensitive; the region subtag is not a script")
+        XCTAssertEqual(ConsoleLanguage.matching("pt_BR"), .portugueseBrazil,
+                       "the underscore form arrives from the phone's preference list")
+        XCTAssertEqual(ConsoleLanguage.matching("ko-KR"), .korean,
+                       "Korean arrives as ko-KR from iOS; the primary subtag is the shared code")
+        XCTAssertEqual(ConsoleLanguage.matching("ar-SA"), .arabic)
+        XCTAssertNil(ConsoleLanguage.matching("pt-PT"),
+                     "the node ships pt-BR only; a European Portuguese tag must not borrow it")
         XCTAssertNil(ConsoleLanguage.matching(""))
         XCTAssertNil(ConsoleLanguage.matching("Base"), "`Base` is an Xcode folder, not a language")
         for language in ConsoleLanguage.displayOrder {
