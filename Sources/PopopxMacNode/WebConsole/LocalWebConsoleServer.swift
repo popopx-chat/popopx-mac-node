@@ -241,6 +241,36 @@ enum WEBConsoleHTML {
         return "{models:[\(models.joined(separator: ","))],admission:[\(admission.joined(separator: ","))]}"
     }()
 
+    /// The mail provider presets are generated from `MailProviderPresets` for the
+    /// same reason the model list is: the page must not offer a template the node
+    /// would refuse. Ports stay numbers, and the app-password hint and the honest
+    /// port note travel in all three scripts.
+    static let mailPresetRegistryJavaScript: String = {
+        func entry(_ fields: [String]) -> String { "{" + fields.joined(separator: ",") + "}" }
+        let rows = MailProviderPresets.all.map { preset in
+            entry([
+                "id:\"\(jsLiteral(preset.id))\"",
+                "name:\"\(jsLiteral(preset.displayName))\"",
+                "imapHost:\"\(jsLiteral(preset.imapHost))\"",
+                "imapPort:\(preset.imapPort)",
+                "smtpHost:\"\(jsLiteral(preset.smtpHost))\"",
+                "smtpPort:\(preset.smtpPort)",
+                "loopback:\(preset.loopbackOnly)",
+                "officialSmtpPort:\(preset.officialSMTPPort.map(String.init) ?? "null")",
+                "userZh:\"\(jsLiteral(preset.usernameHintZh))\"",
+                "userHant:\"\(jsLiteral(TraditionalChinese.render(preset.usernameHintZh)))\"",
+                "userEn:\"\(jsLiteral(preset.usernameHintEn))\"",
+                "appZh:\"\(jsLiteral(preset.appPasswordZh))\"",
+                "appHant:\"\(jsLiteral(TraditionalChinese.render(preset.appPasswordZh)))\"",
+                "appEn:\"\(jsLiteral(preset.appPasswordEn))\"",
+                "noteZh:\"\(jsLiteral(preset.noteZh))\"",
+                "noteHant:\"\(jsLiteral(TraditionalChinese.render(preset.noteZh)))\"",
+                "noteEn:\"\(jsLiteral(preset.noteEn))\""
+            ])
+        }
+        return "[" + rows.joined(separator: ",") + "]"
+    }()
+
     /// The Traditional Chinese console is the page's own Simplified column, run
     /// through Apple's `Hans-Hant` transform. One hand-written table per script
     /// would drift the moment a key were added to only one of them; deriving it
@@ -270,6 +300,7 @@ enum WEBConsoleHTML {
             .replacingOccurrences(of: "/*PPX_LANGS*/[]", with: localeRegistryJavaScript)
             .replacingOccurrences(of: "/*PPX_HANT*/{}", with: traditionalCatalogJavaScript)
             .replacingOccurrences(of: "/*PPX_MODELS*/{models: [],admission: []}", with: modelRegistryJavaScript)
+            .replacingOccurrences(of: "/*PPX_MAIL*/[]", with: mailPresetRegistryJavaScript)
             // Last, so the generated Traditional rows carry the real scheme too.
             .replacingOccurrences(of: "/*PPX_SCHEME*/", with: NodeWire.invitationScheme)
     }()
@@ -576,7 +607,9 @@ textarea{min-height:66px;resize:vertical;font-family:var(--mono);font-size:var(-
 .checklist__detail{font-size:var(--fs-xs);color:var(--mute);word-break:break-word}
 .checklist__bar{height:2px;border-radius:2px;background:rgba(255,255,255,.09);overflow:hidden;margin-top:3px}
 .checklist__bar i{display:block;height:100%;background:var(--accent);transition:width .3s ease}
-@media (prefers-reduced-motion:reduce){.checklist__bar i{transition:none}}
+.pullbar{height:6px;border-radius:6px;background:rgba(255,255,255,.09);overflow:hidden;margin-top:8px}
+.pullbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .4s ease}
+@media (prefers-reduced-motion:reduce){.checklist__bar i{transition:none}.pullbar i{transition:none}}
 /* ---- terminal --------------------------------------------------------- */
 .term{
   display:flex;flex-direction:column;
@@ -880,6 +913,21 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
         <div class="engine__meta" id="model-live"></div>
         <p class="field__note" id="model-note"></p>
         <button class="btn btn--mini" id="model-copy" onclick="PPX.modelCopy()" hidden></button>
+        <hr class="hair">
+        <div class="panel__head">
+          <h4 data-i18n="modelCardTitle"></h4>
+          <span class="tag" id="model-mode-tag">—</span>
+        </div>
+        <p class="field__note" id="model-mode-head"></p>
+        <div class="pills" id="model-features"></div>
+        <div class="btn-row" style="margin-top:8px">
+          <button class="btn btn--primary" id="model-pull-btn" onclick="PPX.modelPull()"><span id="model-pull-label" data-i18n="modelPullBtn"></span></button>
+          <button class="btn" id="model-cancel-btn" onclick="PPX.modelCancel()" hidden><span data-i18n="modelCancelBtn"></span></button>
+          <button class="btn" id="model-lite-btn" onclick="PPX.modelLightweight()"><span id="model-lite-label"></span></button>
+        </div>
+        <div class="pullbar" id="model-barwrap" hidden><i id="model-bar"></i></div>
+        <p class="field__note" id="model-pull-note"></p>
+        <p class="field__note" data-i18n="modelBoundary"></p>
       </section>
 
       <section class="panel">
@@ -1518,7 +1566,10 @@ var ROUTE = {
   // switch writes a LaunchAgent.
   assistantDoctor: "/api/assistant/doctor",
   assistantHistory: "/api/assistant/history",
-  watchdogControl: "/api/watchdog/control"
+  watchdogControl: "/api/watchdog/control",
+  // The model card's one console-only path: pull / cancel / status against the
+  // loopback Ollama daemon, and the zero-model switch that persists to settings.
+  modelControl: "/api/model/control"
 };
 
 var LEVEL_GLYPH = { debug: "·", info: "›", notice: "•", success: "✓", warning: "!", error: "✕" };
@@ -1658,6 +1709,28 @@ var I18N = {
   modelUnpinned: { zh: "已回到内存档位默认", en: "Back to the hardware tier" },
   modelPinnedNote: { zh: "已固定，不再随内存档位变化", en: "Pinned — it no longer follows the memory tier" },
   modelUnknown: { zh: "该模型不在目录内，内存数字仍是本档位的估算值。", en: "This model is not in the catalog, so the memory figures are still the tier's own estimate." },
+  modelCardTitle: { zh: "本机模型与纯轻量模式", en: "Local model & lightweight mode" },
+  modelMode: { zh: "模式", en: "Mode" },
+  modelModeLite: { zh: "纯轻量 · 零模型", en: "Lightweight · zero models" },
+  modelModeEnhanced: { zh: "AI 增强 · 已就绪", en: "AI-enhanced · ready" },
+  modelModeNoModel: { zh: "AI 增强 · 待拉取", en: "AI-enhanced · pending pull" },
+  modelPullBtn: { zh: "一键拉取", en: "Pull now" },
+  modelPulling: { zh: "拉取中…", en: "Pulling…" },
+  modelCancelBtn: { zh: "取消拉取", en: "Cancel pull" },
+  modelLiteOn: { zh: "开启纯轻量模式", en: "Switch to lightweight" },
+  modelLiteOff: { zh: "关闭纯轻量模式", en: "Leave lightweight" },
+  modelProgress: { zh: "拉取进度", en: "Pull progress" },
+  modelReadyLabel: { zh: "本机模型已就绪", en: "Local model ready" },
+  modelFailed: { zh: "拉取未完成", en: "Pull did not finish" },
+  modelNone: { zh: "没有可拉取的模型", en: "There is no model to pull" },
+  modelPullStarted: { zh: "已开始拉取", en: "Pull started" },
+  modelPullFailed: { zh: "拉取请求失败", en: "The pull request failed" },
+  modelBoundary: { zh: "只经 127.0.0.1 上的本机 Ollama 拉取；权重不进安装包，也不离开本机。", en: "Pulls go only through the local Ollama on 127.0.0.1; no weight ever enters the installer or leaves this Mac." },
+  modelFeatureOff: { zh: "纯轻量模式下关闭", en: "off in lightweight mode" },
+  asMailPreset: { zh: "邮箱服务商预设", en: "Mail provider preset" },
+  asMailPresetNone: { zh: "手动填写", en: "Enter manually" },
+  asMailPresetHint: { zh: "选择服务商会自动填入 IMAPS/SMTPS 主机与端口；密码请用应用专用密码，并在右侧存入钥匙串。", en: "Picking a provider fills the IMAPS/SMTPS hosts and ports; use an app-specific password and store it in the Keychain on the right." },
+  asMailPresetApplied: { zh: "已填入模板", en: "Template applied" },
   qrTitle: { zh: "配对二维码", en: "Pairing QR" },
   qrSub: { zh: "iOS 端「发现 → Mac Node 配对」扫一扫；同一网络内即可建立端到端加密隧道。", en: "Scan it from iOS · Discover → Mac Node pairing. The encrypted tunnel comes up on the same network." },
   qr: { zh: "二维码", en: "QR code" },
@@ -2358,6 +2431,12 @@ var HANT = /*PPX_HANT*/{};
    the model actually running arrives on the snapshot as `plan.rationale`. */
 var MODELS = /*PPX_MODELS*/{models: [],admission: []};
 
+/* The mail provider templates, generated from `MailProviderPresets`. Every row
+   names a host and the two implicit-TLS ports the node actually dials; the note
+   says where a provider's own documentation differs (STARTTLS on 587), so the
+   page never promises a handshake the transport will not make. */
+var MAIL_PRESETS = /*PPX_MAIL*/[];
+
 function localeEntry(code) {
   for (var i = 0; i < LOCALES.length; i += 1) { if (LOCALES[i].code === code) { return LOCALES[i]; } }
   return null;
@@ -2454,6 +2533,8 @@ var S = {
   rawText: "",
   copyable: {},
   modelPull: "",
+  modelTimer: null,
+  modelWasRunning: false,
   qrNonce: 0,
   engineKeys: "",
   engineRows: {},
@@ -3103,6 +3184,7 @@ function renderLadder() {
   setText("plan-note", plan.rationale ? t("planNote") + " · " + String(plan.rationale) : t("noPlan"));
   if (plan.ollamaModelPull) { S.copyable.pull = String(plan.ollamaModelPull); }
   renderModelPicker();
+  renderModelCard();
 }
 function modelById(id) {
   var list = (MODELS && MODELS.models) || [];
@@ -3178,6 +3260,81 @@ function renderModelPicker() {
   var copy = el("model-copy");
   copy.hidden = false;
   copy.textContent = t("modelCopyPull");
+}
+/* The model card's copy travels as Zh/En pairs on the snapshot. `zh-Hant` is this
+   page's own Simplified column elsewhere, so a Chinese reader keeps Chinese here
+   too rather than dropping to English for a dynamic row. */
+function modelText(object, base) {
+  if (!object) { return ""; }
+  if (catalogFor(S.lang) === "en") { return String(object[base + "En"] || object[base + "Zh"] || ""); }
+  return String(object[base + "Zh"] || object[base + "En"] || "");
+}
+function modelPullRunning(pull) {
+  return Boolean(pull) && (pull.state === "pulling" || pull.state === "verifying");
+}
+function stopModelPoll() {
+  if (S.modelTimer) { window.clearInterval(S.modelTimer); S.modelTimer = null; }
+}
+/* While a pull is running the snapshot's own cadence is too slow and too wide:
+   only the pull card changes, so poll the one route and repaint the one card.
+   The moment the daemon settles, take a full snapshot so the mode headline and
+   the readiness switch flip together with the model that just landed. */
+function startModelPoll() {
+  if (S.modelTimer) { return; }
+  S.modelTimer = window.setInterval(function () {
+    api(ROUTE.modelControl, { method: "POST", json: { verb: "status" } }).then(function (report) {
+      var pull = (report && report.pull) || {};
+      if (S.snap && S.snap.model) { S.snap.model.pull = pull; }
+      renderModelCard();
+      if (!modelPullRunning(pull)) { stopModelPoll(); refreshSnapshot(true); }
+    }).catch(function () { stopModelPoll(); });
+  }, 2000);
+}
+function renderModelCard() {
+  var tag = el("model-mode-tag");
+  if (!tag) { return; }
+  var card = (S.snap && S.snap.model) || {}, mode = card.mode || {}, pull = card.pull || {};
+  var lite = mode.mode === "lightweight";
+  var health = String(mode.health || "warn");
+  tag.className = "tag " + (health === "ok" ? "tag--ok" : (health === "off" ? "tag--off" : "tag--warn"));
+  tag.textContent = t("modelMode") + " · " + (lite ? t("modelModeLite") : (mode.modelReady ? t("modelModeEnhanced") : t("modelModeNoModel")));
+  setText("model-mode-head", modelText(mode, "headline"));
+  var features = el("model-features");
+  if (features) {
+    clear(features);
+    (card.features || []).forEach(function (row) {
+      var enabled = row.enabled !== false;
+      var chip = h("span", { cls: "tag " + (enabled ? "tag--ok" : "tag--off"), text: (enabled ? "✓ " : "× ") + modelText(row, "title") });
+      chip.setAttribute("title", modelText(row, "detail"));
+      features.appendChild(chip);
+    });
+  }
+  var running = modelPullRunning(pull);
+  show("model-barwrap", running);
+  var bar = el("model-bar");
+  if (bar) { bar.style.width = String(Math.max(0, Math.min(100, Number(pull.percent) || 0))) + "%"; }
+  show("model-cancel-btn", running);
+  var pullBtn = el("model-pull-btn");
+  if (pullBtn) { pullBtn.classList.toggle("is-disabled", running); }
+  setText("model-pull-label", running ? t("modelPulling") : t("modelPullBtn"));
+  setText("model-lite-label", lite ? t("modelLiteOff") : t("modelLiteOn"));
+  var note;
+  if (running) {
+    note = t("modelProgress") + " · " + String(Math.round(Number(pull.percent) || 0)) + "%";
+    if (pull.totalBytes) {
+      note += " · " + bytes(Number(pull.completedBytes) || 0) + " / " + bytes(Number(pull.totalBytes));
+    }
+    if (pull.status) { note += " · " + String(pull.status); }
+  } else if (pull.state === "ready") {
+    note = t("modelReadyLabel") + " · " + String(pull.modelRef || "");
+    if (pull.totalBytes) { note += " · " + bytes(Number(pull.totalBytes)); }
+  } else if (pull.state === "failed" || pull.state === "refused" || pull.state === "cancelled") {
+    note = t("modelFailed") + " · " + String(pull.detail || pull.status || "");
+  } else {
+    note = modelText(card, "guidance");
+  }
+  setText("model-pull-note", note);
+  if (running) { startModelPoll(); } else { stopModelPoll(); }
 }
 var STATE_ICON = { pending: "todo", running: "run", done: "done", skipped: "todo", failed: "wait" };
 function renderChecklist() {
@@ -4688,6 +4845,35 @@ function renderAssistantInkling() {
   setText("as-inkling-pull",
     card.pullCommand && state !== "ready" && state !== "off" ? t("asInklingPull") + String(card.pullCommand) : "");
 }
+/* The provider templates fill host and port in one click. They only ever write
+   the four server fields; the username, the Keychain references and the
+   lookback stay the owner's. The note is the preset's own honest text — for
+   iCloud, Outlook and Proton Bridge it says their documentation uses STARTTLS
+   on a port this node does not dial, rather than pretending otherwise. */
+function mailPresetField(cfg, refs) {
+  var select = h("select", { id: "as-mail-preset" });
+  select.appendChild(h("option", { value: "", text: t("asMailPresetNone") }));
+  MAIL_PRESETS.forEach(function (preset) {
+    select.appendChild(h("option", { value: String(preset.id), text: String(preset.name) }));
+  });
+  var detail = note(t("asMailPresetHint"));
+  select.addEventListener("change", function () {
+    var preset = null;
+    MAIL_PRESETS.forEach(function (row) { if (String(row.id) === select.value) { preset = row; } });
+    if (!preset) { detail.textContent = t("asMailPresetHint"); return; }
+    cfg.mail.imapHost = String(preset.imapHost || "");
+    cfg.mail.imapPort = Number(preset.imapPort) || 993;
+    cfg.mail.smtpHost = String(preset.smtpHost || "");
+    cfg.mail.smtpPort = Number(preset.smtpPort) || 465;
+    [["imapHost", "imapHost"], ["imapPort", "imapPort"], ["smtpHost", "smtpHost"], ["smtpPort", "smtpPort"]].forEach(function (pair) {
+      var input = refs[pair[0]] ? refs[pair[0]].querySelector("input") : null;
+      if (input) { input.value = String(cfg.mail[pair[1]]); }
+    });
+    detail.textContent = t("asMailPresetApplied") + " · " + modelText(preset, "app") + " " + modelText(preset, "note");
+    markDirty();
+  });
+  return fieldWrap("asMailPreset", select, detail);
+}
 function buildAssistantControls() {
   var host = el("as-switches"), fields = el("as-fields"), cfg = asConfig();
   if (!cfg) { return; }
@@ -4724,14 +4910,21 @@ function buildAssistantControls() {
     function (value) { cfg.patrol.intervalMinutes = value; }, 5, 1440, t("asPatrolIntervalNote")));
   fields.appendChild(numField("asPatrolOffline", function () { return Number(cfg.patrol.offlineMinutes) || 15; },
     function (value) { cfg.patrol.offlineMinutes = value; }, 1, 240, t("asPatrolOfflineNote")));
-  fields.appendChild(textField("asImapHost", function () { return cfg.mail.imapHost; },
-    function (value) { cfg.mail.imapHost = value; }, null, "asImapHostNote"));
-  fields.appendChild(numField("asImapPort", function () { return Number(cfg.mail.imapPort) || 993; },
-    function (value) { cfg.mail.imapPort = value; }, 1, 65535, t("asPortNote")));
-  fields.appendChild(textField("asSmtpHost", function () { return cfg.mail.smtpHost; },
-    function (value) { cfg.mail.smtpHost = value; }, null, "asSmtpHostNote"));
-  fields.appendChild(numField("asSmtpPort", function () { return Number(cfg.mail.smtpPort) || 465; },
-    function (value) { cfg.mail.smtpPort = value; }, 1, 65535, t("asPortNote")));
+  var imapHostField = textField("asImapHost", function () { return cfg.mail.imapHost; },
+    function (value) { cfg.mail.imapHost = value; }, null, "asImapHostNote");
+  var imapPortField = numField("asImapPort", function () { return Number(cfg.mail.imapPort) || 993; },
+    function (value) { cfg.mail.imapPort = value; }, 1, 65535, t("asPortNote"));
+  var smtpHostField = textField("asSmtpHost", function () { return cfg.mail.smtpHost; },
+    function (value) { cfg.mail.smtpHost = value; }, null, "asSmtpHostNote");
+  var smtpPortField = numField("asSmtpPort", function () { return Number(cfg.mail.smtpPort) || 465; },
+    function (value) { cfg.mail.smtpPort = value; }, 1, 65535, t("asPortNote"));
+  fields.appendChild(mailPresetField(cfg, {
+    imapHost: imapHostField, imapPort: imapPortField, smtpHost: smtpHostField, smtpPort: smtpPortField
+  }));
+  fields.appendChild(imapHostField);
+  fields.appendChild(imapPortField);
+  fields.appendChild(smtpHostField);
+  fields.appendChild(smtpPortField);
   fields.appendChild(textField("asMailUser", function () { return cfg.mail.username; },
     function (value) { cfg.mail.username = value; }, null, "asMailUserNote"));
   fields.appendChild(textField("asMailFrom", function () { return cfg.mail.fromAddress; },
@@ -6360,6 +6553,41 @@ var PPX = {
     });
   },
   modelCopy: function () { copyText(S.modelPull); },
+  /* One click on the model card. The pull runs inside the node against the
+     loopback Ollama daemon; the page never sees a URL, a token or a registry.
+     With no explicit selection the node's own configured model is the target. */
+  modelPull: function () {
+    var card = (S.snap && S.snap.model) || {};
+    var select = el("model-select");
+    var chosen = modelById(select ? select.value : "");
+    var target = (chosen && chosen.id) || String(card.modelRef || "");
+    if (!target) {
+      var list = (MODELS && MODELS.models) || [];
+      target = list.length ? String(list[0].id) : "";
+    }
+    if (!target) { toast("warn", t("modelNone")); return; }
+    api(ROUTE.modelControl, { method: "POST", json: { verb: "pull", model: target } }).then(function (report) {
+      var pull = (report && report.pull) || {};
+      if (S.snap && S.snap.model) { S.snap.model.pull = pull; }
+      renderModelCard();
+      toast(report && report.ok ? "ok" : "warn",
+        t("modelPullStarted") + " · " + String(pull.modelRef || target) + (pull.detail ? " · " + String(pull.detail) : ""));
+      return refreshSnapshot(true);
+    }).catch(function (error) { fail("modelPullFailed", error); });
+  },
+  modelCancel: function () {
+    api(ROUTE.modelControl, { method: "POST", json: { verb: "cancel" } }).then(function () {
+      stopModelPoll();
+      return refreshSnapshot(true);
+    }).catch(function (error) { fail("modelPullFailed", error); });
+  },
+  modelLightweight: function () {
+    var mode = (S.snap && S.snap.model && S.snap.model.mode) || {};
+    var lite = mode.mode === "lightweight";
+    api(ROUTE.modelControl, { method: "POST", json: { verb: lite ? "lightweightOff" : "lightweightOn" } }).then(function () {
+      return refreshSnapshot(true);
+    }).catch(function (error) { fail("modelPullFailed", error); });
+  },
   logFilter: function () {
     S.logFilter = el("log-filter").value;
     rebuildLog();
@@ -7176,6 +7404,26 @@ public actor LocalWebConsoleServer {
             }
             return try json(await facade.watchdogControl(verb: verb))
 
+        case ConsoleRoute.modelControl:
+            // Console-only. The verb list is fixed here, so the page cannot invent
+            // an action; a pull may only name a reference the node will resolve, and
+            // the transport itself re-validates loopback before dialling.
+            let body: WEBModelControlRequest = try decode(WEBModelControlRequest.self, from: request)
+            let verb = body.verb.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard ["pull", "cancel", "status", "lightweighton", "lightweightoff", "wizarddone"].contains(verb) else {
+                throw WEBConsoleError.badEngine("未知模型指令 / unknown model verb: \(verb)")
+            }
+            let model = (body.model ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard model.count <= 120 else {
+                throw WEBConsoleError.badEngine("模型引用过长 / the model reference is too long")
+            }
+            if verb == "pull" {
+                guard !model.isEmpty else {
+                    throw WEBConsoleError.badEngine("没有指定模型 / no model was named")
+                }
+            }
+            return try json(await facade.modelControl(verb: verb, model: model))
+
         default:
             throw WEBConsoleError.notFound(path)
         }
@@ -7487,6 +7735,11 @@ public actor LocalWebConsoleServer {
     struct WEBAssistantMailCredentialRequest: Codable { let kind: String; let secret: String }
     struct WEBAssistantHistoryRequest: Codable { let query: String }
     struct WEBWatchdogControlRequest: Codable { let verb: String }
+    struct WEBModelControlRequest: Codable {
+        let verb: String
+        /// Optional on purpose: `cancel`/`status`/the lightweight switch carry no model.
+        let model: String?
+    }
 
     struct WEBGodsEyeControlRequest: Codable { let verb: String }
 

@@ -2127,6 +2127,12 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     public var paywall: PaywallConfig
     public var shadowWorkspaces: [String]
     public var llmModelOverride: String
+    /// The owner's explicit zero-model switch. Optional so a settings document
+    /// written by an earlier build still decodes; absent reads as off.
+    public var lightweight: Bool?
+    /// When the four-step wizard was last finished (or skipped into lightweight
+    /// mode). Absent means "never completed", which is what opens it on first run.
+    public var wizardCompletedAt: Date?
     public var privacyBridges: PrivacyBridgeConfig?
     public var hubBridges: HubConfig?
     public var updates: UpdateConfig?
@@ -2152,6 +2158,8 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         paywall: PaywallConfig = PaywallConfig(),
         shadowWorkspaces: [String] = [],
         llmModelOverride: String = "",
+        lightweight: Bool? = nil,
+        wizardCompletedAt: Date? = nil,
         privacyBridges: PrivacyBridgeConfig? = nil,
         hubBridges: HubConfig? = nil,
         updates: UpdateConfig? = nil,
@@ -2176,6 +2184,8 @@ public struct NodeSettings: Codable, Sendable, Equatable {
         self.paywall = paywall
         self.shadowWorkspaces = shadowWorkspaces
         self.llmModelOverride = llmModelOverride
+        self.lightweight = lightweight
+        self.wizardCompletedAt = wizardCompletedAt
         self.privacyBridges = privacyBridges
         self.hubBridges = hubBridges
         self.updates = updates
@@ -2261,6 +2271,26 @@ public struct NodeSettings: Codable, Sendable, Equatable {
     public func withAssistant(_ config: AssistantConfig) -> NodeSettings {
         var copy = self
         copy.assistant = config
+        return copy
+    }
+
+    /// The zero-model switch, read like the bridges: absent means "AI enhanced".
+    public var isLightweight: Bool { lightweight ?? false }
+
+    public func withLightweight(_ value: Bool, now: Date = Date()) -> NodeSettings {
+        var copy = self
+        copy.lightweight = value
+        copy.updatedAt = now
+        return copy
+    }
+
+    /// True once the wizard has been finished or deliberately skipped.
+    public var wizardCompleted: Bool { wizardCompletedAt != nil }
+
+    public func withWizardCompleted(_ date: Date = Date()) -> NodeSettings {
+        var copy = self
+        copy.wizardCompletedAt = date
+        copy.updatedAt = date
         return copy
     }
 }
@@ -2880,6 +2910,7 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
     public var godsEye: GodsEyeViewSnapshot
     public var assistant: AssistantSnapshot
     public var watchdog: SystemWatchdogCard
+    public var model: LocalModelCard
 
     public init(
         node: NodeIdentity,
@@ -2905,7 +2936,8 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         discover: DiscoverSnapshot = .disabled,
         godsEye: GodsEyeViewSnapshot = .disabled,
         assistant: AssistantSnapshot = .empty,
-        watchdog: SystemWatchdogCard = .disabled
+        watchdog: SystemWatchdogCard = .disabled,
+        model: LocalModelCard = .idle
     ) {
         self.node = node
         self.version = NodeVersion.current.semanticString
@@ -2933,6 +2965,7 @@ public struct ConsoleSnapshot: Codable, Sendable, Equatable {
         self.godsEye = godsEye
         self.assistant = assistant
         self.watchdog = watchdog
+        self.model = model
     }
 }
 
@@ -3896,6 +3929,13 @@ public protocol NodeConsoleFacade: Sendable {
     func watchdogStatus() async -> SystemWatchdogCard
     /// `install`, `uninstall`, `check` or `status` — console-only.
     func watchdogControl(verb: String) async -> WatchdogControlReport
+    /// One owner click on the model card: `pull` (with a catalog id or an Ollama
+    /// reference), `cancel`, `status`, `lightweightOn` or `lightweightOff`.
+    /// The pull itself runs inside the node against the loopback Ollama daemon.
+    func modelControl(verb: String, model: String) async -> ModelPullReport
+    /// The wizard's 「发送测试简报」: pushes one briefing card to the paired phone
+    /// and reports whether any device actually accepted it.
+    func pairingTestPush() async -> PairingTestReport
 }
 
 public extension NodeConsoleFacade {
@@ -4006,6 +4046,24 @@ public extension NodeConsoleFacade {
             watchdog: .disabled
         )
     }
+
+    func modelControl(verb: String, model: String) async -> ModelPullReport {
+        ModelPullReport(
+            ok: false,
+            outcome: "refused",
+            detail: "本节点没有模型拉取中心 / this facade has no model pull centre",
+            pull: .idle
+        )
+    }
+
+    func pairingTestPush() async -> PairingTestReport {
+        PairingTestReport(
+            ok: false,
+            delivered: false,
+            pairedCount: 0,
+            detail: "本节点没有配对通道 / this facade has no pairing channel"
+        )
+    }
 }
 
 // MARK: - Console API paths
@@ -4097,6 +4155,10 @@ public enum ConsoleRoute {
     public static let assistantDoctor = "/api/assistant/doctor"
     public static let assistantHistory = "/api/assistant/history"
     public static let watchdogControl = "/api/watchdog/control"
+    /// Console-only: the model card's one-click pull / cancel / lightness switch.
+    /// Loopback Ollama is the only downloader, so this route can never name a
+    /// remote registry; `lightweightOn/Off` persists to `settings.json`.
+    public static let modelControl = "/api/model/control"
 
     /// `/v1/tools/{domain}/proposals/{id}/{verb}` — the approval gate, addressed by
     /// proposal id.
@@ -4125,7 +4187,8 @@ public enum ConsoleRoute {
         updateCheck, updateDecision, discoverRefresh,
         godsEyeControl, godsEyeCredential,
         assistantControl, assistantDecision, assistantMailCredential,
-        assistantDoctor, assistantHistory, watchdogControl
+        assistantDoctor, assistantHistory, watchdogControl,
+        modelControl
     ]
 
     /// The tool endpoints, kept out of `all` because `all` is the SPA surface the

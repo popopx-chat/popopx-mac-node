@@ -189,6 +189,10 @@ public actor NodeConsole: NodeConsoleFacade {
     /// Built once at `start()`. The LaunchAgent switch and its last check rows live
     /// here even when the assistant is off, because these are node-level seams.
     private var watchdog: SystemWatchdog?
+    /// Owns the one model pull the node allows at a time. It lives here, not in a
+    /// browser tab: closing the console must not cancel a multi-gigabyte download,
+    /// and every poll and every menu-bar read sees the same progress card.
+    private let modelPull = ModelPullCenter()
     private let assistantSecrets: any HubSecretStoring = HubSecrets.makeStore()
     private let assistantProvider = AssistantLiveSentinelProvider()
 
@@ -241,6 +245,7 @@ public actor NodeConsole: NodeConsoleFacade {
         await configureDiscover(from: current)
         await configureGodsEye(from: current)
         await configureAssistant(from: current)
+        await assistant?.setLightweight(current.isLightweight)
         await configureWatchdog()
         if let bridge = signaling as? MacNodePopopxBridge {
             await bridge.setInboundFileHandler { [weak self] url in
@@ -272,6 +277,7 @@ public actor NodeConsole: NodeConsoleFacade {
         routerTask = nil
         clockTask?.cancel()
         clockTask = nil
+        await modelPull.cancel()
         await assistant?.stop()
         await godsEye?.shutdown()
         await signaling.stop()
@@ -1277,7 +1283,33 @@ public actor NodeConsole: NodeConsoleFacade {
             discover: await discoverSnapshotValue(),
             godsEye: await godsEyeSnapshotValue(),
             assistant: await assistantSnapshotValue(),
-            watchdog: await watchdog?.card() ?? .disabled
+            watchdog: await watchdog?.card() ?? .disabled,
+            model: await modelCardValue(saved: current)
+        )
+    }
+
+    /// The model card's data: the saved switch, the live pull, and whether the
+    /// assistant's configured model actually answers. `isReady` is the adapter's
+    /// TTL-cached probe (60 s), so an open console costs at most one loopback
+    /// round trip a minute — and none at all in lightweight mode.
+    private func modelCardValue(saved: NodeSettings) async -> LocalModelCard {
+        let lightweight = saved.isLightweight
+        let pull = await modelPull.current()
+        let ready: Bool
+        if lightweight {
+            ready = false
+        } else if let assistantInkling {
+            ready = await assistantInkling.isReady()
+        } else {
+            // No adapter means the assistant is off; the pull card's own verified
+            // `/api/tags` read is then the only honest readiness signal.
+            ready = pull.isReady
+        }
+        return LocalModelCard.resolve(
+            lightweight: lightweight,
+            modelRef: saved.assistantConfig.normalised.inkling.model,
+            modelReady: ready,
+            pull: pull
         )
     }
 
@@ -1378,6 +1410,7 @@ public actor NodeConsole: NodeConsoleFacade {
         // bridge must hold the MCP bridge that is actually serving requests.
         await configureGodsEye(from: stored)
         await configureAssistant(from: stored)
+        await assistant?.setLightweight(stored.isLightweight)
         await hub.publish(
             .settings,
             "配置已保存（修订 \(stored.revision)）/ settings saved",
@@ -1787,6 +1820,130 @@ public actor NodeConsole: NodeConsoleFacade {
         }
     }
 
+    // MARK: NodeConsoleFacade — model card and pairing test
+
+    public func modelControl(verb: String, model: String) async -> ModelPullReport {
+        let clean = verb.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch clean {
+        case "pull":
+            let card = await modelPull.start(ref: model)
+            await hub.publish(
+                .install,
+                "模型拉取 · \(card.state.rawValue)",
+                level: card.state.isRunning ? .notice : .warning,
+                payload: [
+                    "model": .string(card.modelRef),
+                    "percent": .int(card.percent),
+                    "state": .string(card.state.rawValue)
+                ]
+            )
+            return ModelPullReport.make(card)
+        case "cancel":
+            let card = await modelPull.cancel()
+            await hub.publish(.install, "模型拉取已取消 / pull cancelled", level: .warning)
+            return ModelPullReport.make(card)
+        case "status":
+            return ModelPullReport.make(await modelPull.current())
+        case "lightweighton", "lightweightoff":
+            let value = clean == "lightweighton"
+            let stored = await settings.mutate { document in
+                document = document.withLightweight(value)
+            }
+            await assistant?.setLightweight(value)
+            await hub.publish(
+                .system,
+                value
+                    ? "已切换纯轻量模式 · 零模型运行 / lightweight mode on"
+                    : "已切回 AI 增强模式 / AI-enhanced mode on",
+                level: .notice,
+                payload: ["lightweight": .bool(value), "revision": .int(stored.revision)]
+            )
+            let card = await modelPull.current()
+            return ModelPullReport(
+                ok: true,
+                outcome: value ? "lightweight" : "enhanced",
+                detail: value
+                    ? "零模型运行：确定性能力继续工作 / zero models run; deterministic features keep working"
+                    : "本机模型重新参与助手推理 / the local model rejoins the assistant",
+                pull: card
+            )
+        case "wizarddone":
+            _ = await settings.mutate { document in
+                document = document.withWizardCompleted()
+            }
+            await hub.publish(.system, "首次运行向导已完成 / setup wizard completed", level: .success)
+            return ModelPullReport(
+                ok: true,
+                outcome: "wizard",
+                detail: "向导已完成，可从控制台随时重开 / the wizard is done and can be reopened from the console",
+                pull: await modelPull.current()
+            )
+        default:
+            return ModelPullReport(
+                ok: false,
+                outcome: "refused",
+                detail: "未知模型指令 / unknown model verb: \(verb)",
+                pull: await modelPull.current()
+            )
+        }
+    }
+
+    /// The wizard's 「发送测试简报」. It goes over the same paired E2E session the
+    /// real briefing uses and reports the delivery answer, so a node with no paired
+    /// phone says so instead of claiming the card was received.
+    public func pairingTestPush() async -> PairingTestReport {
+        let paired = await signaling.pairedDevices()
+        guard !paired.isEmpty else {
+            return PairingTestReport(
+                ok: false,
+                delivered: false,
+                pairedCount: 0,
+                detail: "还没有已配对设备：先用手机扫描二维码 / no paired device yet — scan the QR with the phone first"
+            )
+        }
+        let current = await settings.current()
+        var modelReady = false
+        if !current.isLightweight, let assistantInkling {
+            modelReady = await assistantInkling.isReady()
+        }
+        let mode = NodeIntelligenceMode.resolve(
+            lightweight: current.isLightweight,
+            modelReady: modelReady
+        )
+        let result = CommandResult(
+            engine: .shadowCos,
+            ok: true,
+            deterministic: true,
+            headline: "测试简报 / test briefing",
+            body: [
+                "这是来自本机节点 \(current.nodeName) 的测试消息。",
+                "模式 / mode: \(mode.headlineZh)",
+                "时间 / time: \(Date().ppxClock)",
+                "收到即代表配对通道可用；不会触发任何写入。",
+                "This is a test card from the node; receiving it proves the pairing channel, and it triggers no write."
+            ].joined(separator: "\n"),
+            at: Date(),
+            metrics: ["kind": .string("pairing-test")],
+            cardLabel: "POPOPX 私人助手 / Private Assistant"
+        )
+        let delivered = await signaling.deliver(result, to: "assistant")
+        record(result)
+        await hub.publish(
+            .pairing,
+            delivered ? "测试简报已送达手机 / test briefing delivered" : "测试简报已入发件箱 / test briefing queued in outbox",
+            level: delivered ? .success : .warning,
+            payload: ["paired": .int(paired.count), "delivered": .bool(delivered)]
+        )
+        return PairingTestReport(
+            ok: delivered,
+            delivered: delivered,
+            pairedCount: paired.count,
+            detail: delivered
+                ? "手机已确认收到测试简报 / the phone accepted the test card"
+                : "已配对，但当前未建立会话，卡片在发件箱等待 / paired, but no live session; the card waits in the outbox"
+        )
+    }
+
     // MARK: NodeConsoleFacade — signed updates and Discover
 
     public func updateStatus() async -> UpdateSnapshot {
@@ -1974,15 +2131,26 @@ final class NodeModel: ObservableObject {
     @Published var isRunning = false
     @Published var lastError: String?
     @Published var loginItemEnabled = false
+    /// The wizard's step and the two answers that are not part of the snapshot:
+    /// the freshly rendered QR image and whether a test briefing reached a phone.
+    @Published var wizardStep = 1
+    @Published var pairingImage: NSImage?
+    @Published var wizardTestResult: String?
+    @Published var wizardTestSending = false
+    @Published var wizardTestDelivered: Bool
 
     let headless: Bool
     private var console: NodeConsole?
     private var server: LocalWebConsoleServer?
     private var refreshTask: Task<Void, Never>?
     private var signalsInstalled = false
+    private var wizardWindow: NSWindow?
+
+    static let wizardTestSentKey = "popopx.wizard.testSent"
 
     init(headless: Bool) {
         self.headless = headless
+        self.wizardTestDelivered = UserDefaults.standard.bool(forKey: NodeModel.wizardTestSentKey)
     }
 
     /// The one model per process. SwiftUI's `App` protocol requires a
@@ -2166,6 +2334,165 @@ final class NodeModel: ObservableObject {
         SMAppService.mainApp.status == .enabled
     }
 
+    // MARK: Model, wizard and approval actions
+
+    /// The zero-model switch. Persisted through the model route, which owns the
+    /// settings write, the assistant's refusal state and the event line.
+    func setLightweight(_ enabled: Bool) {
+        Task {
+            _ = await console?.modelControl(verb: enabled ? "lightweightOn" : "lightweightOff", model: "")
+            refreshNow()
+        }
+    }
+
+    /// One click on the model card. An empty reference falls back to the node's
+    /// configured model and then to the first catalog entry.
+    func pullModel(_ reference: String = "") {
+        var target = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        if target.isEmpty { target = snapshot?.model.modelRef ?? "" }
+        if target.isEmpty { target = ModelCatalog.options.first?.id ?? "" }
+        guard !target.isEmpty, let console else { return }
+        Task {
+            _ = await console.modelControl(verb: "pull", model: target)
+            refreshNow()
+        }
+    }
+
+    func cancelModelPull() {
+        Task {
+            _ = await console?.modelControl(verb: "cancel", model: "")
+            refreshNow()
+        }
+    }
+
+    func decideAssistant(_ id: String, verb: String) {
+        Task {
+            _ = await console?.assistantDecision(id: id, verb: verb)
+            refreshNow()
+        }
+    }
+
+    func startInstall() {
+        Task {
+            await console?.startInstall()
+            refreshNow()
+        }
+    }
+
+    // MARK: Setup wizard
+
+    func maybeShowWizardOnFirstRun() async {
+        guard !headless else { return }
+        let current = await SettingsStore.shared.current()
+        guard !current.wizardCompleted else { return }
+        showWizard()
+    }
+
+    /// Reopenable at any time from the menu bar; the window is created once and
+    /// kept, so a second open shows the same step instead of a fresh wizard.
+    func showWizard() {
+        refreshPairingImage()
+        if let window = wizardWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let host = NSHostingController(rootView: FirstRunWizardView().environmentObject(self))
+        let window = NSWindow(contentViewController: host)
+        window.title = "POPOPX · 首次运行向导 / Setup"
+        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        wizardWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func hideWizard() {
+        wizardWindow?.orderOut(nil)
+    }
+
+    /// Marks the wizard done in `settings.json`, which is what stops it from
+    /// auto-opening on the next launch.
+    func completeWizard() {
+        Task {
+            _ = await console?.modelControl(verb: "wizarddone", model: "")
+            hideWizard()
+            refreshNow()
+        }
+    }
+
+    /// The prominent skip: zero models run from now on, and the wizard advances
+    /// instead of vanishing so the remaining three steps still happen.
+    func skipModelToLightweight() {
+        Task {
+            _ = await console?.modelControl(verb: "lightweightOn", model: "")
+            wizardStep = 2
+            refreshNow()
+        }
+    }
+
+    func refreshPairingImage() {
+        guard let console else { return }
+        Task {
+            let asset = await console.pairingQR(pixelSize: 1024)
+            pairingImage = asset.flatMap { NSImage(data: $0.png) }
+        }
+    }
+
+    func rotatePairingAndRefresh() {
+        guard let console else { return }
+        Task {
+            _ = await console.rotatePairing()
+            let asset = await console.pairingQR(pixelSize: 1024)
+            pairingImage = asset.flatMap { NSImage(data: $0.png) }
+            refreshNow()
+        }
+    }
+
+    /// Step 3's 「发送测试简报」. The report says whether a phone actually took
+    /// the card, so the step only ticks on a real delivery.
+    func sendTestBriefing() {
+        guard let console else { return }
+        wizardTestSending = true
+        Task {
+            let report = await console.pairingTestPush()
+            wizardTestSending = false
+            wizardTestResult = report.detail
+            if report.delivered {
+                wizardTestDelivered = true
+                UserDefaults.standard.set(true, forKey: Self.wizardTestSentKey)
+            }
+            refreshNow()
+        }
+    }
+
+    /// The native folder picker behind step 2. It writes the same
+    /// `privacyBridges` document the console edits, so the two cannot disagree.
+    func chooseWorkspaceFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "授权此文件夹 / Authorize"
+        panel.message = "选择助手与索引可读的工作区文件夹 / Choose a workspace folder the assistant may read"
+        guard panel.runModal() == .OK, let url = panel.url, let console else { return }
+        Task {
+            var document = await SettingsStore.shared.current()
+            var bridges = document.bridges
+            var directories = bridges.workspaceDirectories
+            if !directories.contains(url.path), directories.count < PrivacyBridgeConfig.maximumDirectories {
+                directories.append(url.path)
+            }
+            bridges.workspaceDirectories = directories
+            bridges.allowWorkspaceRead = true
+            document = document.withBridges(bridges)
+            _ = await console.updateSettings(document)
+            refreshNow()
+        }
+    }
+
     /// The only place in the product that names the concrete subsystem types.
     ///
     /// Everything downstream depends on the four frozen protocols, so if a module
@@ -2223,7 +2550,7 @@ struct PopopxMacNodeApp: App {
         } label: {
             Image(nsImage: BrandIcon.menuBarImage)
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
     }
 }
 
@@ -2235,7 +2562,10 @@ final class NodeAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         guard let model else { return }
-        Task { await model.bootstrap() }
+        Task {
+            await model.bootstrap()
+            await model.maybeShowWizardOnFirstRun()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -2245,6 +2575,543 @@ final class NodeAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         let model = self.model
         Task { await model?.shutdown() }
+    }
+}
+
+// MARK: - First-run setup wizard
+
+/// The four-step, reopenable setup wizard. Every gate it paints comes from
+/// `SetupWizardState`, which is resolved from snapshot values the node already
+/// measures — so "step 1 is done" means a ready model or the explicit zero-model
+/// choice, not "the owner clicked a button".
+struct FirstRunWizardView: View {
+    @EnvironmentObject private var model: NodeModel
+
+    private var language: ConsoleLanguage { model.snapshot?.settings.language ?? .system }
+
+    private func label(_ zh: String, _ en: String) -> String {
+        language.text(zh: zh, en: en)
+    }
+
+    private var snapshot: ConsoleSnapshot? { model.snapshot }
+
+    private var step: Int { min(max(model.wizardStep, 1), 4) }
+
+    private var state: SetupWizardState? {
+        guard let snapshot else { return nil }
+        return SetupWizardState.resolve(
+            installPhase: snapshot.install.phase,
+            lightweight: snapshot.settings.isLightweight,
+            modelReady: snapshot.model.mode.modelReady,
+            workspaceCount: snapshot.settings.bridges.workspaceDirectories.count,
+            pairedCount: snapshot.pairedDevices.count,
+            testSent: model.wizardTestDelivered
+        )
+    }
+
+    private func done(_ index: Int) -> Bool {
+        guard let state else { return false }
+        switch index {
+        case 1: return state.hardwareDone
+        case 2: return state.workspaceDone
+        case 3: return state.pairingDone
+        default: return state.testDone
+        }
+    }
+
+    private var isLightweight: Bool { snapshot?.settings.isLightweight ?? false }
+
+    private var recommendedRef: String {
+        if let ref = snapshot?.plan.llmRef, !ref.isEmpty { return ref }
+        return ModelCatalog.options.first?.ollamaRef ?? ""
+    }
+
+    private var recommendedName: String {
+        ModelCatalog.option(matching: recommendedRef)?.displayName ?? recommendedRef
+    }
+
+    private var admissionLine: String {
+        guard let snapshot, let option = ModelCatalog.option(matching: snapshot.plan.llmRef) else { return "—" }
+        let verdict = option.admission(memoryGB: snapshot.hardware.memoryGB)
+        return language.text(zh: verdict.titleZh, en: verdict.titleEn)
+    }
+
+    private var pull: ModelPullCard { snapshot?.model.pull ?? .idle }
+
+    private var pullStateLine: String {
+        switch pull.state {
+        case .idle: return label("尚未拉取", "not pulled yet")
+        case .pulling: return label("正在拉取", "pulling")
+        case .verifying: return label("正在校验本机清单", "verifying the local list")
+        case .ready: return label("已就绪", "ready")
+        case .failed: return label("拉取失败", "failed")
+        case .cancelled: return label("已取消", "cancelled")
+        case .refused: return label("已拒绝", "refused")
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+            stepIndicator
+            Divider()
+            ScrollView {
+                stepContent
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Divider()
+            footer
+        }
+        .padding(20)
+        .frame(width: 640, height: 660)
+        .onAppear { model.refreshPairingImage() }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(nsImage: BrandIcon.menuBarImage)
+                .resizable()
+                .frame(width: 32, height: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label("POPOPX · 首次运行向导", "POPOPX · First-Run Setup"))
+                    .font(.headline)
+                Text(label(
+                    "四步完成本机节点的体验配置；任何一步都可以稍后从菜单栏再来。",
+                    "Four steps configure this node; every step can be revisited later from the menu bar."
+                ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(label("稍后再说", "Later")) { model.hideWizard() }
+                .buttonStyle(.link)
+        }
+    }
+
+    private var stepIndicator: some View {
+        HStack(spacing: 14) {
+            chip(1, "算力与模型", "Hardware & model")
+            chip(2, "工作区授权", "Workspace")
+            chip(3, "手机配对", "Phone pairing")
+            chip(4, "测试简报", "Test briefing")
+            Spacer()
+        }
+    }
+
+    private func chip(_ index: Int, _ zh: String, _ en: String) -> some View {
+        HStack(spacing: 6) {
+            ZStack {
+                Circle()
+                    .fill(index == step
+                          ? Color.accentColor
+                          : (done(index) ? Color.green.opacity(0.18) : Color.secondary.opacity(0.14)))
+                    .frame(width: 20, height: 20)
+                if done(index) && index != step {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.green)
+                } else {
+                    Text("\(index)")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(index == step ? Color.white : Color.secondary)
+                }
+            }
+            Text(label(zh, en))
+                .font(.caption)
+                .foregroundStyle(index == step ? Color.primary : Color.secondary)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { model.wizardStep = index }
+    }
+
+    @ViewBuilder
+    private var stepContent: some View {
+        switch step {
+        case 1: hardwareStep
+        case 2: workspaceStep
+        case 3: pairingStep
+        default: testStep
+        }
+    }
+
+    // MARK: Step 1 — hardware, install, one-click pull, explicit skip
+
+    private var hardwareStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            GroupBox(label: Text(label("算力检测", "Hardware check"))) {
+                VStack(alignment: .leading, spacing: 6) {
+                    LabeledContent(label("本机芯片与内存", "Chip & memory"), value: snapshot?.hardware.shortLabel ?? "—")
+                    LabeledContent(label("推荐本机模型", "Recommended local model"), value: recommendedName)
+                    LabeledContent(label("内存准入", "Memory admission"), value: admissionLine)
+                }
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if let steps = snapshot?.install.steps, !steps.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(label("部署清单", "Install checklist"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ForEach(steps.prefix(8)) { row in
+                        HStack(spacing: 6) {
+                            Image(systemName: installGlyph(row.state))
+                                .font(.system(size: 10))
+                                .foregroundStyle(installColor(row.state))
+                            Text(language.text(zh: row.titleZh, en: row.titleEn))
+                                .font(.caption)
+                            Spacer()
+                            if row.state == .running {
+                                ProgressView(value: row.progress)
+                                    .frame(width: 80)
+                            }
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button(label("开始部署", "Start install")) { model.startInstall() }
+                    .disabled(snapshot?.install.running == true)
+                if pull.state.isRunning {
+                    Button(label("取消拉取", "Cancel pull")) { model.cancelModelPull() }
+                } else {
+                    Button(label("一键拉取 \(recommendedName)", "Pull \(recommendedName)")) {
+                        model.pullModel(recommendedRef)
+                    }
+                    .disabled(recommendedRef.isEmpty)
+                }
+                Spacer()
+            }
+
+            if pull.state != .idle {
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: Double(pull.percent) / 100)
+                    HStack(spacing: 8) {
+                        Text("\(pullStateLine) · \(pull.percent)%")
+                            .font(.caption2.monospacedDigit())
+                        Spacer()
+                        if !pull.sizeLine.isEmpty {
+                            Text(pull.sizeLine)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if !pull.detail.isEmpty {
+                        Text(pull.detail)
+                            .font(.caption2)
+                            .foregroundStyle(pull.state == .failed || pull.state == .refused ? Color.orange : Color.secondary)
+                    }
+                }
+            }
+
+            lightweightSkipBlock
+        }
+    }
+
+    /// The explicit zero-model fork. It is a real button, not a link in small
+    /// print, and the deterministic rows are listed under it so "skip" never
+    /// reads as "lose everything".
+    private var lightweightSkipBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if isLightweight {
+                Label(label(
+                    "已处于纯轻量模式：零模型运行，确定性能力全部继续工作。",
+                    "Lightweight mode is on: zero models run and every deterministic feature keeps working."
+                ), systemImage: "bolt.slash.fill")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button(label("切回 AI 增强模式", "Switch back to AI-enhanced mode")) {
+                    model.setLightweight(false)
+                }
+                .controlSize(.small)
+            } else {
+                Button {
+                    model.skipModelToLightweight()
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "hare.fill")
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(label("跳过模型，以纯轻量模式继续", "Skip the model and continue in lightweight mode"))
+                                .font(.system(size: 13, weight: .semibold))
+                            Text(label("零模型运行 · 不下载任何权重 · 随时可切换", "Zero models · no weights to download · reversible anytime"))
+                                .font(.caption2)
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(label("纯轻量模式下继续工作的能力", "What keeps working with zero models"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(LightweightModePlan.resolve(lightweight: true)) { feature in
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: feature.enabled ? "checkmark.circle.fill" : "minus.circle")
+                            .font(.system(size: 10))
+                            .foregroundStyle(feature.enabled ? Color.green : Color.secondary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(language.text(zh: feature.titleZh, en: feature.titleEn))
+                                .font(.caption)
+                            if !feature.enabled {
+                                Text(language.text(zh: feature.detailZh, en: feature.detailEn))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.accentColor.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.accentColor.opacity(0.18)))
+    }
+
+    private func installGlyph(_ value: StepState) -> String {
+        switch value {
+        case .pending: return "circle"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .done: return "checkmark.circle.fill"
+        case .skipped: return "minus.circle"
+        case .failed: return "xmark.octagon.fill"
+        }
+    }
+
+    private func installColor(_ value: StepState) -> Color {
+        switch value {
+        case .pending: return .secondary
+        case .running: return .accentColor
+        case .done: return .green
+        case .skipped: return .secondary
+        case .failed: return .red
+        }
+    }
+
+    // MARK: Step 2 — native folder picker
+
+    private var workspaceStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(label(
+                "授权一个工作区文件夹，助手与本地情景记忆才能读取你明确放进来的文件。授权是只读的，任何写入仍然逐次生成人工审批回执。",
+                "Authorize a workspace folder so the assistant and local episodic memory can read files you deliberately place there. The grant is read-only; every write still becomes a human approval receipt."
+            ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button {
+                model.chooseWorkspaceFolder()
+            } label: {
+                Label(label("选择文件夹…", "Choose folder…"), systemImage: "folder.badge.plus")
+            }
+            .controlSize(.large)
+
+            GroupBox(label: Text(label("已授权目录", "Authorized folders"))) {
+                VStack(alignment: .leading, spacing: 4) {
+                    let directories = snapshot?.privacy.directories ?? []
+                    if directories.isEmpty {
+                        Text(label("尚未授权任何目录", "No folder authorized yet"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(directories, id: \.self) { path in
+                            Label(path, systemImage: "folder")
+                                .font(.system(size: 11, design: .monospaced))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                }
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Text(label(
+                "最多保留 \(snapshot?.privacy.directoryCeiling ?? 8) 个目录；路径以 ~ 显示。",
+                "Up to \(snapshot?.privacy.directoryCeiling ?? 8) folders are kept; paths are shown with ~."
+            ))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if isLightweight {
+                Text(label(
+                    "纯轻量模式下可以暂时跳过这一步，之后随时在控制台补上。",
+                    "You may skip this step in lightweight mode and add folders from the console later."
+                ))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: Step 3 — large sealed QR and live phone detection
+
+    private var pairingStep: some View {
+        HStack(alignment: .top, spacing: 18) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12).fill(Color.white)
+                if let image = model.pairingImage {
+                    Image(nsImage: image)
+                        .interpolation(.none)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(10)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+            .frame(width: 272, height: 272)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.25)))
+            .shadow(color: Color.black.opacity(0.08), radius: 6, y: 2)
+
+            VStack(alignment: .leading, spacing: 10) {
+                pairingStatusPill
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(label("1 · 在手机上打开 POPOPX", "1 · Open POPOPX on the phone"))
+                    Text(label("2 · 扫描左侧二维码（密封的 /i/v1/ 配对码）", "2 · Scan the QR on the left (the sealed /i/v1/ pairing code)"))
+                    Text(label("3 · 保持手机与这台 Mac 都已解锁", "3 · Keep both the phone and this Mac unlocked"))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    Button(label("生成新二维码", "New QR code")) { model.rotatePairingAndRefresh() }
+                    Button(label("刷新", "Refresh")) {
+                        model.refreshPairingImage()
+                        model.refreshNow()
+                    }
+                }
+                .controlSize(.small)
+
+                Text(label(
+                    "二维码只含密封配对信封；扫到后再由节点签名确认，未配对设备拿不到任何能力。",
+                    "The QR carries only the sealed pairing envelope; the node signs it afterwards, and an unpaired device receives no capability."
+                ))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var pairingStatusPill: some View {
+        let paired = snapshot?.pairedDevices.count ?? 0
+        let daemon = snapshot?.bridge.daemon
+        let text: String
+        let icon: String
+        let color: Color
+        if paired > 0 {
+            text = label("已检测到 \(paired) 台手机连接", "\(paired) phone(s) connected")
+            icon = "iphone.badge.checkmark"
+            color = .green
+        } else if daemon == .running {
+            text = label("二维码就绪，等待手机扫描…", "QR ready, waiting for the phone…")
+            icon = "iphone"
+            color = .secondary
+        } else if daemon == .missingBinary {
+            text = label("未安装 popopx-chat，无法接受配对", "popopx-chat is not installed, so pairing cannot complete")
+            icon = "exclamationmark.triangle"
+            color = .orange
+        } else {
+            text = label("配对服务尚未在线", "the pairing service is not online yet")
+            icon = "exclamationmark.triangle"
+            color = .orange
+        }
+        return Label(text, systemImage: icon)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(color.opacity(0.12)))
+    }
+
+    // MARK: Step 4 — one-click test briefing
+
+    private var testStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            GroupBox(label: Text(label("发送目标", "Delivery target"))) {
+                VStack(alignment: .leading, spacing: 6) {
+                    LabeledContent(label("节点名称", "Node name"), value: snapshot?.node.displayName ?? "—")
+                    LabeledContent(label("当前模式", "Current mode"), value: modeLine)
+                    LabeledContent(label("已配对设备", "Paired devices"), value: "\(snapshot?.pairedDevices.count ?? 0)")
+                }
+                .padding(6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Button {
+                model.sendTestBriefing()
+            } label: {
+                HStack(spacing: 8) {
+                    if model.wizardTestSending {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "paperplane.fill")
+                    }
+                    Text(label("发送测试简报", "Send test briefing"))
+                }
+            }
+            .controlSize(.large)
+            .disabled(model.wizardTestSending || (snapshot?.pairedDevices.count ?? 0) == 0)
+
+            if let result = model.wizardTestResult {
+                Label(result, systemImage: model.wizardTestDelivered ? "checkmark.seal.fill" : "clock.badge.exclamationmark")
+                    .font(.caption)
+                    .foregroundStyle(model.wizardTestDelivered ? Color.green : Color.orange)
+            } else if (snapshot?.pairedDevices.count ?? 0) == 0 {
+                Text(label("还没有已配对设备，先回到第 3 步扫码。", "No paired device yet; go back to step 3 and scan the QR."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if model.wizardTestDelivered {
+                Label(label("手机已确认收到测试简报", "The phone confirmed the test card"), systemImage: "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            }
+
+            Text(label(
+                "测试简报走与正式简报相同的加密配对通道，不触发任何写入，也不会携带任何凭据。",
+                "The test card uses the same encrypted pairing channel as a real briefing; it triggers no write and carries no credential."
+            ))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var modeLine: String {
+        guard let mode = snapshot?.model.mode else { return "—" }
+        return language.text(zh: mode.headlineZh, en: mode.headlineEn)
+    }
+
+    // MARK: Footer
+
+    private var footer: some View {
+        HStack(spacing: 10) {
+            Button(label("稍后再说", "Later")) { model.hideWizard() }
+            Spacer()
+            if let state {
+                Text(label(
+                    "已完成 \(state.completedSteps)/4 步",
+                    "\(state.completedSteps)/4 steps done"
+                ))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if step > 1 {
+                Button(label("上一步", "Back")) { model.wizardStep = step - 1 }
+            }
+            if step < 4 {
+                Button(label("下一步", "Next")) { model.wizardStep = step + 1 }
+                    .buttonStyle(.borderedProminent)
+            } else {
+                Button(label("完成", "Finish")) { model.completeWizard() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
     }
 }
 
@@ -2285,34 +3152,210 @@ struct MenuBarContent: View {
         }
     }
 
-    var body: some View {
-        Section {
-            Text(label("Connect Everything. 连接一切，让智能自由协作。", "Connect Everything."))
-                .font(.system(size: 12, weight: .semibold))
-                .disabled(true)
-            Text(label(
-                "POPOPX 隐私优先智能连接平台的本机边缘算力与隐私执行节点",
-                "The on-device edge compute and privacy execution node of POPOPX, the Privacy-First Intelligent Connection Platform"
-            ))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .disabled(true)
-            LabeledContent(hardwareLine, value: label("\(activeTasks) 个任务", "\(activeTasks) task(s)"))
-            LabeledContent(daemonLabel, value: model.snapshot?.mesh.acceptingNow == true
-                ? label("接单中", "Accepting")
-                : label("不接单", "Paused"))
+    private var pendingCards: [AssistantProposalCard] {
+        model.snapshot?.assistant.pending.filter { $0.state.isPending } ?? []
+    }
+
+    /// The health light: green when the enhanced mode's model answers, amber when
+    /// it does not, grey when the owner chose zero models. It is derived from
+    /// `LocalModelCard.mode`, the same value the console paints, so the two
+    /// surfaces cannot disagree about which mode the node is in.
+    private var healthColor: Color {
+        switch model.snapshot?.model.mode.health ?? "" {
+        case "ok": return .green
+        case "warn": return .orange
+        default: return .gray
         }
+    }
 
-        Divider()
+    private var modeHeadline: String {
+        guard let mode = model.snapshot?.model.mode else {
+            return label("正在连接本机节点…", "Connecting to the local node…")
+        }
+        return language.text(zh: mode.headlineZh, en: mode.headlineEn)
+    }
 
-        Button(label("打开网页控制台", "Open Web Console")) { model.openConsole() }
+    private var lightweightBinding: Binding<Bool> {
+        Binding(
+            get: { model.snapshot?.settings.isLightweight ?? false },
+            set: { model.setLightweight($0) }
+        )
+    }
+
+    /// The quick-approval strip. The receipt is minted inside the node by
+    /// `assistantDecision`; this view only sends the id and a verb, exactly like
+    /// the console's own click.
+    private var pendingApprovals: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(pendingCards.prefix(3)) { card in
+                HStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(card.title)
+                            .font(.caption)
+                            .lineLimit(1)
+                        Text(language.text(zh: card.kind.labelZh, en: card.kind.labelEn)
+                             + " · "
+                             + label("剩余 \(card.secondsLeft) 秒", "\(card.secondsLeft) s left"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 4)
+                    Button {
+                        model.decideAssistant(card.id, verb: "approve")
+                    } label: {
+                        Image(systemName: "checkmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(card.canApprove ? Color.green : Color.secondary)
+                    .disabled(!card.canApprove)
+                    .help(label("批准并执行 · 回执在节点内生成", "Approve and run · the receipt is minted inside the node"))
+                    Button {
+                        model.decideAssistant(card.id, verb: "reject")
+                    } label: {
+                        Image(systemName: "xmark.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help(label("拒绝", "Reject"))
+                }
+            }
+            if pendingCards.count > 3 {
+                Text(label("还有 \(pendingCards.count - 3) 项，见网页控制台", "\(pendingCards.count - 3) more in the web console"))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.25)))
+    }
+
+    /// Mode, model, pull progress and the lightweight switch. The switch writes
+    /// through the model route, which also tells the assistant to stop using the
+    /// local model, so flipping it here is the same operation as the console's.
+    @ViewBuilder
+    private func modelCenterRow(_ card: LocalModelCard) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                Image(systemName: card.mode.mode == .lightweight ? "bolt.slash" : "bolt.fill")
+                    .foregroundStyle(card.mode.mode == .lightweight ? Color.secondary : Color.accentColor)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(language.text(zh: card.mode.headlineZh, en: card.mode.headlineEn))
+                        .font(.caption)
+                    Text(card.modelRef.isEmpty ? label("未指定本机模型", "no local model pinned") : card.modelRef)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 4)
+                Toggle("", isOn: lightweightBinding)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .help(label("纯轻量模式：零模型运行", "Lightweight mode: zero models run"))
+            }
+            if card.pull.state.isRunning {
+                ProgressView(value: Double(card.pull.percent) / 100)
+                HStack(spacing: 6) {
+                    Text("\(card.pull.percent)% · \(card.pull.status)")
+                        .font(.caption2.monospacedDigit())
+                    Spacer(minLength: 4)
+                    if !card.pull.sizeLine.isEmpty {
+                        Text(card.pull.sizeLine)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Button(label("取消", "Cancel")) { model.cancelModelPull() }
+                        .buttonStyle(.link)
+                        .font(.caption2)
+                }
+            } else if !card.mode.modelReady {
+                Button(label("一键拉取本机模型", "Pull the local model")) { model.pullModel() }
+                    .controlSize(.small)
+            }
+            if card.pull.state == .failed || card.pull.state == .refused {
+                Text(card.pull.detail)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 9) {
+                Circle()
+                    .fill(healthColor)
+                    .frame(width: 10, height: 10)
+                    .shadow(color: healthColor.opacity(0.55), radius: 3)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(modeHeadline)
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(label("Connect Everything. 连接一切，让智能自由协作。", "Connect Everything."))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    Text(label(
+                        "POPOPX 隐私优先智能连接平台的本机边缘算力与隐私执行节点",
+                        "The on-device edge compute and privacy execution node of POPOPX, the Privacy-First Intelligent Connection Platform"
+                    ))
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Text(NodeVersion.current.semanticString)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Label(daemonLabel, systemImage: "antenna.radiowaves.left.and.right")
+                    .font(.caption)
+                Label(label("手机配对 · \(model.snapshot?.pairedDevices.count ?? 0) 台设备",
+                            "Phone pairing · \(model.snapshot?.pairedDevices.count ?? 0) device(s)"),
+                      systemImage: "iphone")
+                    .font(.caption)
+                    .foregroundStyle((model.snapshot?.pairedDevices.count ?? 0) > 0 ? Color.green : Color.secondary)
+                Label(label("待审批 · \(pendingCards.count) 项", "Pending approvals · \(pendingCards.count)"),
+                      systemImage: "checkmark.shield")
+                    .font(.caption)
+                    .foregroundStyle(pendingCards.isEmpty ? Color.secondary : Color.orange)
+                Label(hardwareLine + " · " + label("\(activeTasks) 个任务", "\(activeTasks) task(s)"),
+                      systemImage: "cpu")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !pendingCards.isEmpty {
+                pendingApprovals
+            }
+
+            if let card = model.snapshot?.model {
+                modelCenterRow(card)
+            }
+
+            Divider()
+
+        Button(action: { model.openConsole() }) {
+                Label(label("打开网页控制台", "Open Web Console"), systemImage: "safari")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
             .keyboardShortcut(",", modifiers: [.command, .shift])
-        Button(label("复制配对地址", "Copy Console URL")) { model.copyConsoleURL() }
-            .disabled(model.consoleURL.isEmpty)
-        Button(label("立即重新扫描", "Rescan Now")) { model.refreshNow() }
-        Button(label("生成新的配对二维码", "New Pairing QR")) { model.rotatePairingNow() }
 
-        Divider()
+            HStack(spacing: 6) {
+                Button(label("复制配对地址", "Copy Console URL")) { model.copyConsoleURL() }
+                    .disabled(model.consoleURL.isEmpty)
+                Button(label("立即重新扫描", "Rescan Now")) { model.refreshNow() }
+                Button(label("生成新的配对二维码", "New Pairing QR")) { model.rotatePairingNow() }
+                Button(label("打开首次运行向导", "Open Setup Wizard")) { model.showWizard() }
+            }
+            .controlSize(.small)
+
+            Divider()
 
         Button(model.snapshot?.mesh.sharingEnabled == true
                ? label("暂停空闲算力接单", "Pause Mesh Sharing")
@@ -2394,6 +3437,16 @@ struct MenuBarContent: View {
             }
         }
 
+        if let watchdog = model.snapshot?.watchdog {
+            Label(watchdog.installed
+                  ? label("看门狗已安装 · 已重启 \(watchdog.restartCount) 次",
+                          "Watchdog installed · \(watchdog.restartCount) restart(s)")
+                  : label("看门狗未安装", "Watchdog not installed"),
+                  systemImage: "heart.text.square")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+
         Toggle(label("开机自启", "Launch at Login"), isOn: Binding(
             get: { model.loginItemEnabled },
             set: { model.setLaunchAtLogin($0) }
@@ -2409,16 +3462,15 @@ struct MenuBarContent: View {
         Divider()
 
         Button(label("退出 POPOPX Mac Node", "Quit POPOPX Mac Node")) {
-            Task {
-                await model.shutdown()
-                NSApp.terminate(nil)
+                Task {
+                    await model.shutdown()
+                    NSApp.terminate(nil)
+                }
             }
+            .keyboardShortcut("q")
         }
-        .keyboardShortcut("q")
-
-        Text(NodeVersion.current.semanticString)
-            .font(.caption2)
-            .foregroundStyle(.secondary)
+        .padding(14)
+        .frame(width: 360)
     }
 }
 

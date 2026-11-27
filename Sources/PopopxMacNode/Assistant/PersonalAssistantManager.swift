@@ -39,6 +39,10 @@ public actor PersonalAssistantManager {
     private var handlersInstalled = false
     private var pushed: Set<String> = []
     private var lastReport = ""
+    /// The owner's zero-model switch. Node-level, so it is set from the console
+    /// facade rather than from `AssistantConfig`: the assistant keeps running its
+    /// deterministic half while every model call is refused before it is made.
+    private var lightweight = false
 
     public init(
         config: AssistantConfig,
@@ -139,6 +143,22 @@ public actor PersonalAssistantManager {
         await ensureHandlers()
         await syncInkling()
         await scheduler.tick(now: now)
+    }
+
+    /// Flips the zero-model mode. The switch is idempotent, and the classifier is
+    /// re-bound here so a running triage loop stops handing snippets to the model
+    /// the moment the owner flips it.
+    public func setLightweight(_ value: Bool, now: Date? = nil) async {
+        let moment = now ?? clock.now
+        guard value != lightweight else { return }
+        lightweight = value
+        await store.record(
+            channel: "assistant",
+            event: value ? "lightweight_on" : "lightweight_off",
+            detail: value ? "zero-model mode" : "local model use re-enabled",
+            at: moment
+        )
+        await syncInkling()
     }
 
     public func schedulerStatus(now: Date? = nil) async -> AssistantSchedulerCard {
@@ -479,6 +499,9 @@ public actor PersonalAssistantManager {
             let detail = await refreshMail(now: moment)
             return AssistantControlReport(ok: true, outcome: "mail", detail: detail, assistant: await snapshot(now: moment))
         case "inklingProbe":
+            guard !lightweight else {
+                return .refused("纯轻量模式不运行本机模型 / lightweight mode runs no local model", snapshot: await snapshot(now: moment))
+            }
             guard let inkling else {
                 return .refused("本机未装配本地模型适配器 / no local model adapter", snapshot: await snapshot(now: moment))
             }
@@ -650,6 +673,13 @@ public actor PersonalAssistantManager {
 
     public func snapshot(now: Date? = nil) async -> AssistantSnapshot {
         let moment = now ?? clock.now
+        var inklingCard = await inkling?.card(now: moment) ?? AssistantInklingCard.saved(config.inkling)
+        if lightweight {
+            // The cached probe may still say "ready" from before the switch; the
+            // card must not claim a model the node has been told not to use.
+            inklingCard.state = .off
+            inklingCard.lastDetail = "纯轻量模式 · 本机模型不参与 / lightweight mode · the local model is not used"
+        }
         return AssistantSnapshot(
             enabled: config.enabled,
             scheduler: await scheduler.status(now: moment),
@@ -661,7 +691,7 @@ public actor PersonalAssistantManager {
             boundary: "执行层 HMAC 审批回执 · 127.0.0.1 控制台 · 邮件为唯一命名外部出口 / executor HMAC receipts · loopback console · mail is the one named egress exception",
             lastReport: lastReport,
             updatedAt: moment,
-            inkling: await inkling?.card(now: moment) ?? AssistantInklingCard.saved(config.inkling),
+            inkling: inklingCard,
             rag: await rag?.status() ?? .empty,
             voice: await voice?.card() ?? .empty
         )
@@ -711,6 +741,10 @@ public actor PersonalAssistantManager {
 
     private func syncInkling() async {
         guard let inkling else { return }
+        guard !lightweight else {
+            await mail.setClassifier(nil)
+            return
+        }
         await inkling.update(
             config: config.inkling,
             scopeRoots: privacy.allowWorkspaceRead ? privacy.workspaceDirectories : []
@@ -722,7 +756,7 @@ public actor PersonalAssistantManager {
     /// inside an authorized workspace root; every extraction is a suggestion for
     /// the briefing, never a write.
     private func ticketLines(now: Date) async -> [String] {
-        guard let inkling, config.inkling.allowMultimodal, !config.inkling.ticketPaths.isEmpty else { return [] }
+        guard !lightweight, let inkling, config.inkling.allowMultimodal, !config.inkling.ticketPaths.isEmpty else { return [] }
         guard await inkling.isReady(now: now) else {
             return ["票据：本机 Inkling 2 Mini 未就绪，已跳过 / tickets skipped: the local model is not ready"]
         }
@@ -756,7 +790,7 @@ public actor PersonalAssistantManager {
     /// Asks the local model to turn the deterministic facts into one dense briefing,
     /// and falls back to those facts verbatim when it is absent, slow or malformed.
     private func synthesizeBriefing(facts: String, now: Date) async -> (text: String, runtime: String)? {
-        guard let inkling, config.inkling.structuredJSON else { return nil }
+        guard !lightweight, let inkling, config.inkling.structuredJSON else { return nil }
         let generation = await inkling.generateStructuredJSON(
             prompt: """
             Turn these owner-only facts into one concise briefing. Return JSON with keys: headline (a short line), \

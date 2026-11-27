@@ -670,7 +670,7 @@ final class GodsEyeViewTests: XCTestCase {
         XCTAssertTrue(page.contains("godsEyeCredential: \"/api/godseye/credential\""))
         XCTAssertTrue(ConsoleRoute.all.contains(ConsoleRoute.godsEyeControl))
         XCTAssertTrue(ConsoleRoute.all.contains(ConsoleRoute.godsEyeCredential))
-        XCTAssertEqual(ConsoleRoute.all.count, 29)
+        XCTAssertEqual(ConsoleRoute.all.count, 30)
         XCTAssertFalse(GodsEyeViewSnapshot.disabled.enabled)
         XCTAssertFalse(GodsEyeViewSnapshot.disabled.running)
         XCTAssertEqual(GodsEyeViewSnapshot.disabled.bindHost, "127.0.0.1")

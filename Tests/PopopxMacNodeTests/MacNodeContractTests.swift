@@ -227,10 +227,11 @@ final class MacNodeContractTests: XCTestCase {
         // (`/api/assistant/control`, `/api/assistant/decision`,
         // `/api/assistant/mail/credential`, all POST-only and console-only), and the
         // three operations routes (`/api/assistant/doctor`, `/api/assistant/history`,
-        // `/api/watchdog/control`, also POST-only and console-only). The tool
+        // `/api/watchdog/control`, also POST-only and console-only), and the model
+        // card's one route (`/api/model/control`, POST-only and console-only). The tool
         // surface under `/v1/tools/` and the discovery prefix are matched by prefix, not
         // literal, so only their literal endpoints are counted here.
-        XCTAssertEqual(routes.count, 29)
+        XCTAssertEqual(routes.count, 30)
         for route in routes {
             XCTAssertTrue(route.hasPrefix("/"), route)
             XCTAssertFalse(route.contains(".."), route)
