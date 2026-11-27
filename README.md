@@ -40,21 +40,16 @@ Commands for the 10 Discover businesses arrive from the iOS client over **your o
 
 ## Install in one minute
 
-1. Grab **`POPOPX-Mac-Node-Universal.dmg`** and **`POPOPX-Mac-Node-Universal.dmg.sha256`** from [Releases](https://github.com/popopx-chat/popopx-mac-node/releases) — both files, same folder.
-2. Verify what you downloaded, with both files side by side:
+1. Grab **`POPOPX-Mac-Node-Universal.dmg`** (or the `.zip`) and **`SHA256SUMS.txt`** from the **latest** [Releases](https://github.com/popopx-chat/popopx-mac-node/releases) entry (v1.0.2 or newer) — same folder.
+2. Verify what you downloaded:
 
    ```sh
-   shasum -a 256 -c POPOPX-Mac-Node-Universal.dmg.sha256
-   # expected: POPOPX-Mac-Node-Universal.dmg: OK
+   shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+   # expected: OK for every file you downloaded
    ```
 
 3. Mount it and drag **POPOPX Mac Node** into `Applications`.
-4. Builds published here are ad-hoc signed (no Apple notarization). If Gatekeeper objects on first launch:
-
-   ```sh
-   xattr -dr com.apple.quarantine "/Applications/POPOPX Mac Node.app"
-   ```
-
+4. Builds from **v1.0.2 onward** are **Developer ID signed, notarized and stapled**, so Gatekeeper should accept the first launch. (The older v1.0.0/v1.0.1 releases were ad-hoc signed.) If Gatekeeper objects, re-download from the official Release and re-check `SHA256SUMS.txt`; do not disable Gatekeeper or strip quarantine.
 5. Launch. The app **quietly lives in the menu bar** (`LSUIElement`, no Dock tile) and opens the local wizard at **http://127.0.0.1:18920** in your default browser.
 6. Wizard step 1: hit **“Deploy local AI engines automatically”** — the node profiles your chip / unified memory / SSD, pulls the Qwen3.8 quantisation that fits your memory tier, initialises the `ltx2` workspace, and streams the terminal log to the page live.
 7. Wizard step 2: an **`https://popopx.chat/i/v1/…`** encrypted pairing QR appears — the sealed form of this node's `PPXNODE1-…` credential, so a screenshot or a forwarded link never names a relay.
@@ -95,16 +90,24 @@ swift build -c release      # optional: a standalone release binary first
                             # single arch only:
                             #   swift build -c release --arch arm64
 
-bash Scripts/build_dmg.sh   # one command -> distributable Universal DMG + sha256
+bash Scripts/build_dmg.sh   # local ad-hoc Universal DMG + sha256
                             # (it runs the release build itself)
 # outputs ->  dist/POPOPX-Mac-Node-Universal.dmg
 #            dist/POPOPX-Mac-Node-Universal.dmg.sha256
 
 # repackage without recompiling:
 bash Scripts/build_dmg.sh --skip-build --output dist --version 1.0.2 --build 4
+
+# distributable build: Developer ID + Apple notarization + stapling
+bash Scripts/build-release.sh --output dist --version 1.0.2 --build 4
+# outputs ->  dist/POPOPX-Mac-Node-Universal.dmg
+#            dist/POPOPX-Mac-Node-Universal.zip
+#            dist/SHA256SUMS.txt
 ```
 
 `Scripts/build_dmg.sh` needs no Xcode project: it assembles the `.app` bundle, generates `Info.plist`, renders the brand icon with the binary it just built, ad-hoc signs, packs with `hdiutil`, and finally **audits the artifacts for leaked developer machine paths** — a leak fails the release. Flags: `--output <dir>`, `--version <x.y.z>`, `--build <n>` (CFBundleVersion on its own counter), `--single-arch <arm64|x86_64>`, `--skip-build`, `--no-sign`, `--no-strip`.
+
+`Scripts/build-release.sh` is the distributable path: it reuses the packer's `--emit-app` seam, signs with a Developer ID Application certificate under the hardened runtime, notarizes and staples both the app and the DMG, and writes `SHA256SUMS.txt`. It needs a Developer ID identity in the keychain and a `notarytool` credential profile; CI uses it for every tagged release.
 
 ---
 
@@ -331,6 +334,7 @@ Expect: under those PIDs you should only see `127.0.0.1` listeners and loopback 
 ```sh
 codesign -dv --verbose=4 "/Applications/POPOPX Mac Node.app"
 codesign --verify --deep --strict --verbose=2 "/Applications/POPOPX Mac Node.app"
+xcrun stapler validate "/Applications/POPOPX Mac Node.app"
 spctl -a -vv "/Applications/POPOPX Mac Node.app"
 ```
 
@@ -339,10 +343,10 @@ In `codesign -dv --verbose=4` you should see:
 ```
 Identifier=chat.popopx.node
 Format=app bundle with Mach-O thin (arm64)      # or fat, for the universal build
-flags=0x2(adhoc)                                 # published here ad-hoc signed, not notarized
+flags=0x10000(runtime)                           # Developer ID + hardened runtime
 ```
 
-`spctl -a -vv` **will return `rejected` for an ad-hoc signature**. That is the expected result, not a vulnerability — it means "this package is not backed by an Apple-issued developer certificate", not "this package was tampered with". The second command is the one that checks tampering, and it must **pass silently**.
+For **v1.0.2 and later**, `spctl -a -vv` must return `accepted` with `source=Notarized Developer ID`; `stapler validate` must say the validate action worked. (The older v1.0.0/v1.0.1 ad-hoc builds are rejected by `spctl`; that is expected for those releases.) If either check fails on a current build, do not install it: re-download from the official Release and re-run check 6. The second command checks tampering and must **pass silently**.
 
 ### 4 · where your data lands, and where keys do not
 
@@ -372,10 +376,10 @@ Expect: **empty output.** Swift `#filePath` / `#file` / `#function` debug string
 ### 6 · verify what you downloaded
 
 ```sh
-shasum -a 256 -c POPOPX-Mac-Node-Universal.dmg.sha256
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 ```
 
-The sidecar contains only `<64 hex>  <relative filename>` (two spaces, no directory), so it has to be run next to the `.dmg` — and note that it can never encode somebody else's absolute path.
+`SHA256SUMS.txt` contains only `<64 hex>  <relative filename>` lines (two spaces, no directory), so it has to be run next to the artifacts; `--ignore-missing` verifies whichever of the DMG/ZIP you downloaded. It can never encode somebody else's absolute path.
 
 ### 7 · revoking a paired device
 
@@ -385,11 +389,7 @@ The sidecar contains only `<64 hex>  <relative filename>` (two spaces, no direct
 
 ### 8 · when Gatekeeper blocks first launch
 
-```sh
-xattr -dr com.apple.quarantine "/Applications/POPOPX Mac Node.app"
-```
-
-Run this only **after** check 6 passed. Verify first, unquarantine second — in the other order you are only comforting yourself.
+Current releases (**v1.0.2 and later**) are Developer ID signed, notarized and stapled, so a normal download should launch without an override. The older v1.0.0/v1.0.1 ad-hoc builds require a manual override; prefer upgrading to the latest release. If a current build is still blocked, treat it as a security signal: re-download from the official Release, re-run check 6, and compare the digests. Do not disable Gatekeeper, strip quarantine, or right-click-open an unverified copy. If the checksum and the notarization ticket both fail, open an issue with the `spctl` output instead of bypassing the check.
 
 ---
 
@@ -423,11 +423,11 @@ In one line: **every byte of code on this chain is AGPL-3.0 and self-hostable; t
 
 ## Roadmap
 
-- **v1.0 (now)** — menu-bar host, `NWListener` three-step wizard, SMP pairing with a public-key whitelist, hardware probe + one-click engine deployment, all 10 engines executing locally, Universal DMG + sha256 + fully automated GitHub Actions releases.
+- **v1.0 (now)** — menu-bar host, `NWListener` three-step wizard, SMP pairing with a public-key whitelist, hardware probe + one-click engine deployment, all 10 engines executing locally, Universal DMG + ZIP + SHA256SUMS, Developer ID signed and notarized, fully automated GitHub Actions releases.
 - **v1.1** — per-engine usage dashboard on the local console only (real token/s and watts per tier, so the estimates on this page can be replaced with your own measurements), task timelines with failure causes surfaced back in iOS, human proof-read catalogs for the remaining 15 regions (`zh-Hant` already ships in v1.0, derived from Simplified).
 - **v1.2** — hardened `edge_compute_mesh` isolation (dedicated throwaway containers, per-task keys, automatic post-run sandbox shredding), a local compute-points earnings ledger with exportable statements.
 - **v1.3** — multi-heir sharded custody and a wider time-lock primitive matrix for `chrono_ark`; more supported lab-report layouts for `health_sentinel` (still completely offline).
-- **v1.4** — Developer ID signing and Apple notarization pipelines, Mac App Store evaluation, additional `LTX-2.5` resolution/duration tiers.
+- **v1.4** — Mac App Store evaluation, additional `LTX-2.5` resolution/duration tiers.
 - **What we will never do** — telemetry, cloud accounts, uploading any local material to our servers, or letting an LLM decide what `phantom_sentinel` does.
 
 ---
@@ -451,8 +451,10 @@ The non-negotiables:
 
 Releasing:
 
+Releasing through CI requires five repository secrets: `APPLE_DEVELOPER_ID_P12_BASE64`, `APPLE_DEVELOPER_ID_P12_PASSWORD`, `APPLE_TEAM_ID`, `NOTARY_APPLE_ID` and `NOTARY_APP_SPECIFIC_PASSWORD`. The workflow fails closed before packaging if any is missing, never publishes an ad-hoc build, and asserts the tag against both `DEFAULT_VERSION` and `NodeVersion.current`. Bump `DEFAULT_VERSION`, `DEFAULT_BUILD` and `NodeVersion.current` in one commit before tagging.
+
 ```sh
-git tag v1.0.2 && git push origin v1.0.2   # triggers .github/workflows/release.yml
+git tag v1.0.3 && git push origin v1.0.3   # triggers .github/workflows/release.yml
 ```
 
 ---

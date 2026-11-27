@@ -1,11 +1,24 @@
 name: Release · POPOPX Mac Node
 
-# POPOPX Mac Node — 自动编译、单元测试、打包 Universal DMG 并发布 GitHub Release。
-# Build, test, package the universal drag-install DMG and publish a GitHub Release.
+# POPOPX Mac Node — 编译、单元测试、Developer ID 签名、Apple 公证、打包并发布。
+# Build, test, Developer ID sign, notarize, package and publish a GitHub Release.
 #
 # 触发方式 / Triggers:
-#   1) 推送 v* 标签:  git tag v1.0.0 && git push origin v1.0.0
-#   2) Actions 页面手动运行 (workflow_dispatch)，可临时指定版本号
+#   1) 推送 v* 标签:  git tag v1.0.3 && git push origin v1.0.3
+#   2) Actions 页面手动运行 (workflow_dispatch)，可指定版本号（必须与源码中的版本一致）；手动运行只构建，不发布
+#
+# 必需的仓库 Secrets / Required repository secrets
+# (Settings → Secrets and variables → Actions):
+#   APPLE_DEVELOPER_ID_P12_BASE64       Developer ID Application 证书 + 私钥的 .p12 的 base64
+#   APPLE_DEVELOPER_ID_P12_PASSWORD     该 .p12 的导出密码
+#   APPLE_TEAM_ID                       Apple Developer Team ID (例如 PDBA6XRBQT)
+#   NOTARY_APPLE_ID                     notarytool 使用的 Apple ID
+#   NOTARY_APP_SPECIFIC_PASSWORD        该 Apple ID 的 app-specific password（不是登录密码）
+#
+# 五个 secret 缺任意一个，工作流在编译前就失败，绝不会发布 ad-hoc 资产。
+# If any secret is missing the workflow fails before packaging; it never publishes
+# an ad-hoc build. The .p12 must contain exactly one Developer ID Application
+# identity for APPLE_TEAM_ID (certificate, private key and its intermediate chain).
 #
 # Copyright (C) 2026 POPOPX Chat
 # SPDX-License-Identifier: AGPL-3.0-only
@@ -17,13 +30,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '版本号 / Version to stamp into Info.plist (e.g. 1.0.0 or v1.0.0). 留空则使用 0.0.0-dev+commit。'
+        description: '版本号 / Version to stamp into Info.plist (e.g. 1.0.2 or v1.0.2). 留空则使用 Scripts/build_dmg.sh 的 DEFAULT_VERSION。'
         required: false
         type: string
         default: ''
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -31,15 +44,24 @@ concurrency:
 
 env:
   DMG_NAME: POPOPX-Mac-Node-Universal.dmg
-  SHA_NAME: POPOPX-Mac-Node-Universal.dmg.sha256
-  ARTIFACT_NAME: popopx-mac-node-universal-dmg
+  ZIP_NAME: POPOPX-Mac-Node-Universal.zip
+  SUMS_NAME: SHA256SUMS.txt
+  ARTIFACT_NAME: popopx-mac-node-notarized
   APP_NAME: POPOPX Mac Node
+  NOTARY_PROFILE: popopx-notary
 
 jobs:
   build-macos:
-    name: Build & package (macOS 15 / Apple Silicon)
+    name: Build, test, sign & notarize (macOS 15 / Apple Silicon)
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 75
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      dmg_sha: ${{ steps.meta.outputs.dmg_sha }}
+      zip_sha: ${{ steps.meta.outputs.zip_sha }}
+      dmg_size: ${{ steps.meta.outputs.dmg_size }}
+      zip_size: ${{ steps.meta.outputs.zip_size }}
 
     steps:
       - name: Checkout · 检出代码（含标签）
@@ -47,6 +69,35 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Validate release secrets · 校验发布凭据
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_APP_SPECIFIC_PASSWORD: ${{ secrets.NOTARY_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=""
+          set +u
+          for name in \
+            APPLE_DEVELOPER_ID_P12_BASE64 \
+            APPLE_DEVELOPER_ID_P12_PASSWORD \
+            APPLE_TEAM_ID \
+            NOTARY_APPLE_ID \
+            NOTARY_APP_SPECIFIC_PASSWORD
+          do
+            value="${!name}"
+            if [ -z "${value}" ]; then missing="${missing} ${name}"; fi
+          done
+          set -u
+          if [ -n "${missing}" ]; then
+            echo "::error::Missing required release secrets:${missing}"
+            echo "Configure them in Settings > Secrets and variables > Actions; see the header of this workflow."
+            exit 1
+          fi
+          echo "All five release secrets are present."
 
       - name: Select Xcode · 选择稳定版工具链
         uses: maxim-lobanov/setup-xcode@v1
@@ -71,33 +122,30 @@ jobs:
             ${{ runner.os }}-spm-${{ runner.arch }}-
             ${{ runner.os }}-spm-
 
-      - name: Build (debug) · 全量编译校验
-        run: swift build
-
-      - name: Test · 单元测试
-        run: swift test
-
       - name: Resolve version · 解析发布版本号
         id: version
         env:
           EVENT_NAME: ${{ github.event_name }}
           DISPATCH_VERSION: ${{ inputs.version }}
           REF_NAME: ${{ github.ref_name }}
-          SHORT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           RAW=""
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             RAW="${DISPATCH_VERSION}"
             if [ -z "${RAW}" ]; then
-              RAW="0.0.0-dev-${SHORT_SHA:0:7}"
+              RAW=$(sed -n 's/^DEFAULT_VERSION="\([^"]*\)".*$/\1/p' Scripts/build_dmg.sh | head -n 1)
+              if [ -z "${RAW}" ]; then
+                echo "::error::Scripts/build_dmg.sh 中找不到 DEFAULT_VERSION"
+                exit 1
+              fi
             fi
           else
             RAW="${REF_NAME}"
           fi
           RAW="${RAW#refs/tags/}"            # 容错：万一带完整 ref 前缀也照样解析
           TAG="${RAW}"                       # 保留 v 前缀，用作 release tag 名
-          VERSION="${TAG#v}"                 # 去掉 v 前缀，交给 build_dmg.sh 写入 Info.plist
+          VERSION="${TAG#v}"                 # 去掉 v 前缀，交给发布脚本写入 Info.plist
           # 字符类里的 '-' 必须置于类首/类尾：写成 [.-+] 会被 ERE 当成非法区间而静默失配
           if ! printf '%s' "${VERSION}" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}([.+-][0-9A-Za-z.+-]*)?$'; then
             echo "::error::非法版本号 (invalid version): ${VERSION}"
@@ -107,34 +155,115 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "发布版本 / release version: ${VERSION} (tag ${TAG})"
 
-      - name: Package universal DMG · 打包拖拽安装镜像
+      - name: Assert release version identity · 校验版本三处一致
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          bash Scripts/build_dmg.sh --output dist --version "${TAG}"
+          CORE="${RELEASE_VERSION%%-*}"
+          CORE="${CORE%%+*}"
+          DEFAULT_VERSION=$(sed -n 's/^DEFAULT_VERSION="\([^"]*\)".*$/\1/p' Scripts/build_dmg.sh | head -n 1)
+          SOURCE_VERSION=$(sed -n 's/.*NodeVersion(major: \([0-9][0-9]*\), minor: \([0-9][0-9]*\), patch: \([0-9][0-9]*\)).*/\1.\2.\3/p' Sources/PopopxMacNode/Models/MacNodeModels.swift | head -n 1)
+          echo "tag version:      ${RELEASE_VERSION} (core ${CORE})"
+          echo "DEFAULT_VERSION:  ${DEFAULT_VERSION:-missing}"
+          echo "NodeVersion:      ${SOURCE_VERSION:-missing}"
+          if [ "${CORE}" != "${DEFAULT_VERSION}" ] || [ "${CORE}" != "${SOURCE_VERSION}" ]; then
+            echo "::error::Release version ${RELEASE_VERSION} does not match Scripts/build_dmg.sh (${DEFAULT_VERSION:-missing}) and NodeVersion.current (${SOURCE_VERSION:-missing}). Bump all three sites in one commit before tagging."
+            exit 1
+          fi
 
-      - name: Collect checksum · 采集 sha256
+      - name: Build (debug) · 全量编译校验
+        run: swift build
+
+      - name: Test · 单元测试
+        run: swift test
+
+      - name: Import Developer ID certificate · 导入签名证书
+        env:
+          P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="${RUNNER_TEMP}/popopx-signing.keychain"
+          CERT_PATH="${RUNNER_TEMP}/popopx-developer-id.p12"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          printf '%s' "${P12_BASE64}" | base64 --decode > "${CERT_PATH}"
+          chmod 600 "${CERT_PATH}"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${CERT_PATH}" -k "${KEYCHAIN_PATH}" \
+            -P "${P12_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}" >/dev/null
+          # create-keychain already added it to the search list; make it the default
+          # so notarytool stores and reads the profile there without a --keychain flag.
+          security default-keychain -d user -s "${KEYCHAIN_PATH}"
+          rm -f "${CERT_PATH}"
+          security find-identity -v -p codesigning | tee "${RUNNER_TEMP}/identities.txt"
+          if ! grep -F '"Developer ID Application' "${RUNNER_TEMP}/identities.txt" >/dev/null; then
+            echo "::error::No Developer ID Application identity was imported from the p12."
+            exit 1
+          fi
+
+      - name: Configure notarytool credentials · 配置公证凭据
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_APP_SPECIFIC_PASSWORD: ${{ secrets.NOTARY_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # The previous step made the temporary keychain the user default, so
+          # store-credentials keeps the profile beside the imported identity.
+          xcrun notarytool store-credentials "${NOTARY_PROFILE}" \
+            --apple-id "${NOTARY_APPLE_ID}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --password "${NOTARY_APP_SPECIFIC_PASSWORD}"
+          xcrun notarytool history --keychain-profile "${NOTARY_PROFILE}" >/dev/null
+
+      - name: Package, sign and notarize · 打包、签名并公证
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          bash Scripts/build-release.sh \
+            --output dist \
+            --version "${RELEASE_VERSION}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --notary-profile "${NOTARY_PROFILE}"
+
+      - name: Collect checksums · 采集并校验 SHA256SUMS
         id: meta
         run: |
           set -euo pipefail
-          test -f "dist/${DMG_NAME}"
-          test -f "dist/${SHA_NAME}"
-          # 校验文件里只允许出现 '<64hex>  <相对文件名>'，绝不能有绝对路径
-          if ! grep -Eq "^[0-9a-f]{64}  ${DMG_NAME//./\\.}\$" "dist/${SHA_NAME}"; then
-            echo "::error::sha256 文件格式异常 (unexpected checksum format)"
+          cd dist
+          test -f "${DMG_NAME}"
+          test -f "${ZIP_NAME}"
+          test -f "${SUMS_NAME}"
+          # build-release.sh 写的是相对文件名；必须在产物目录内执行 -c
+          shasum -a 256 -c "${SUMS_NAME}"
+          test "$(grep -c . "${SUMS_NAME}")" -eq 2
+          if LC_ALL=C grep -a -q -F -- "/" "${SUMS_NAME}"; then
+            echo "::error::SHA256SUMS.txt contains a path separator"
             exit 1
           fi
-          if grep -a -q -- "${HOME}" "dist/${SHA_NAME}"; then
-            echo "::error::校验文件包含 runner 主目录绝对路径"
+          if grep -a -q -F -- "${HOME}" "${SUMS_NAME}"; then
+            echo "::error::SHA256SUMS.txt leaks the runner home directory"
             exit 1
           fi
-          SHA256="$(awk '{print $1}' "dist/${SHA_NAME}")"
-          SIZE="$(wc -c < "dist/${DMG_NAME}" | tr -d ' ')"
-          echo "sha256=${SHA256}" >> "${GITHUB_OUTPUT}"
-          echo "size_bytes=${SIZE}" >> "${GITHUB_OUTPUT}"
-          echo "SHA-256: ${SHA256}"
-          echo "Size: ${SIZE} bytes"
+          DMG_SHA=$(awk -v n="${DMG_NAME}" '$2 == n { print $1 }' "${SUMS_NAME}")
+          ZIP_SHA=$(awk -v n="${ZIP_NAME}" '$2 == n { print $1 }' "${SUMS_NAME}")
+          test -n "${DMG_SHA}"
+          test -n "${ZIP_SHA}"
+          DMG_SIZE=$(wc -c < "${DMG_NAME}" | tr -d ' ')
+          ZIP_SIZE=$(wc -c < "${ZIP_NAME}" | tr -d ' ')
+          echo "dmg_sha=${DMG_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "zip_sha=${ZIP_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "dmg_size=${DMG_SIZE}" >> "${GITHUB_OUTPUT}"
+          echo "zip_size=${ZIP_SIZE}" >> "${GITHUB_OUTPUT}"
+          echo "DMG ${DMG_SHA} ${DMG_SIZE} bytes"
+          echo "ZIP ${ZIP_SHA} ${ZIP_SIZE} bytes"
 
       - name: Upload artifact · 上传 Actions 构建产物
         uses: actions/upload-artifact@v4
@@ -142,62 +271,201 @@ jobs:
           name: ${{ env.ARTIFACT_NAME }}
           path: |
             dist/${{ env.DMG_NAME }}
-            dist/${{ env.SHA_NAME }}
+            dist/${{ env.ZIP_NAME }}
+            dist/${{ env.SUMS_NAME }}
           if-no-files-found: error
           retention-days: 30
 
+      - name: Clean up signing material · 清理临时钥匙串
+        if: always()
+        run: |
+          security delete-keychain "${RUNNER_TEMP}/popopx-signing.keychain" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/popopx-developer-id.p12" "${RUNNER_TEMP}/identities.txt"
+
+  verify-checksum:
+    name: Verify notarized artifacts · 校验公证产物
+    needs: build-macos
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout · 检出代码（读取 DEFAULT_BUILD）
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download artifact · 下载待校验产物
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: verify
+
+      - name: Verify · 校验、装订与 Gatekeeper
+        env:
+          EXPECTED_VERSION: ${{ needs.build-macos.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd verify
+          test -f "${DMG_NAME}"
+          test -f "${ZIP_NAME}"
+          test -f "${SUMS_NAME}"
+          shasum -a 256 -c "${SUMS_NAME}"
+          xcrun stapler validate "${DMG_NAME}"
+
+          MOUNT=""
+          cleanup() {
+            if [ -n "${MOUNT}" ] && [ -d "${MOUNT}" ]; then
+              hdiutil detach "${MOUNT}" -quiet >/dev/null 2>&1 || true
+              rmdir "${MOUNT}" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          MOUNT=$(mktemp -d "${RUNNER_TEMP}/popopx-verify.XXXXXX")
+          hdiutil attach -nobrowse -readonly -mountpoint "${MOUNT}" "${DMG_NAME}" >/dev/null
+
+          APP="${MOUNT}/${APP_NAME}.app"
+          test -d "${APP}"
+          PLIST="${APP}/Contents/Info.plist"
+          SHORT=$(plutil -extract CFBundleShortVersionString raw -o - "${PLIST}")
+          BUILD=$(plutil -extract CFBundleVersion raw -o - "${PLIST}")
+          CORE="${EXPECTED_VERSION%%-*}"
+          CORE="${CORE%%+*}"
+          echo "expected version: ${EXPECTED_VERSION} (core ${CORE})"
+          echo "plist:            ${SHORT} (build ${BUILD})"
+          if [ "${SHORT}" != "${CORE}" ]; then
+            echo "::error::Info.plist reports ${SHORT}, but the release requested ${CORE}"
+            exit 1
+          fi
+
+          DEFAULT_BUILD=$(sed -n 's/^DEFAULT_BUILD="\([^"]*\)".*$/\1/p' "${GITHUB_WORKSPACE}/Scripts/build_dmg.sh" | head -n 1)
+          if [ -z "${DEFAULT_BUILD}" ]; then
+            echo "::error::Could not read DEFAULT_BUILD from Scripts/build_dmg.sh"
+            exit 1
+          fi
+          EXPECTED_RAW="${EXPECTED_VERSION#v}"
+          if [[ ! "${EXPECTED_RAW}" =~ ^([0-9]+(\.[0-9]+){1,2})([.+-][0-9A-Za-z.+-]*)?$ ]]; then
+            echo "::error::Unexpected release version: ${EXPECTED_VERSION}"
+            exit 1
+          fi
+          # build_dmg.sh：纯正式版本写 DEFAULT_BUILD，带后缀的版本默认写完整版本串。
+          if [ -n "${BASH_REMATCH[3]}" ]; then
+            EXPECTED_BUILD="${EXPECTED_RAW}"
+          else
+            EXPECTED_BUILD="${DEFAULT_BUILD}"
+          fi
+          if [ "${BUILD}" != "${EXPECTED_BUILD}" ]; then
+            echo "::error::DMG CFBundleVersion is ${BUILD}, expected ${EXPECTED_BUILD} (DEFAULT_BUILD=${DEFAULT_BUILD})"
+            exit 1
+          fi
+          echo "build identity:   ${BUILD} (DEFAULT_BUILD ${DEFAULT_BUILD})"
+
+          VERSION_OUTPUT=$("${APP}/Contents/MacOS/PopopxMacNodeApp" --version)
+          printf '%s\n' "${VERSION_OUTPUT}"
+          case "${VERSION_OUTPUT}" in
+            *"POPOPX Mac Node ${CORE}"*) : ;;
+            *)
+              echo "::error::The packaged binary does not report version ${CORE}"
+              exit 1
+              ;;
+          esac
+
+          ARCHS=$(lipo -archs "${APP}/Contents/MacOS/PopopxMacNodeApp")
+          echo "architectures:    ${ARCHS}"
+          case "${ARCHS}" in
+            *arm64*x86_64*|*x86_64*arm64*) : ;;
+            *)
+              echo "::error::The packaged binary is not universal: ${ARCHS}"
+              exit 1
+              ;;
+          esac
+
+          codesign -dvv "${APP}" 2>&1 | grep -E '^(Identifier|TeamIdentifier|Signature|Timestamp)='
+          spctl --assess --type execute --verbose=4 "${APP}"
+          echo "Notarization, stapling, version identity and Gatekeeper all verified."
+
+  publish-release:
+    name: Publish GitHub Release · 发布正式 Release
+    needs:
+      - build-macos
+      - verify-checksum
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifact · 下载已校验产物
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: dist
+
+      - name: Verify checksums again · 发布前复验摘要
+        run: |
+          set -euo pipefail
+          cd dist
+          test -f "${DMG_NAME}"
+          test -f "${ZIP_NAME}"
+          test -f "${SUMS_NAME}"
+          # ubuntu-latest 自带 coreutils；不依赖仅随 Perl 提供的 shasum。
+          sha256sum -c "${SUMS_NAME}"
+
       - name: Publish GitHub Release · 发布正式 Release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: POPOPX Mac Node ${{ steps.version.outputs.version }}
+          tag_name: ${{ needs.build-macos.outputs.tag }}
+          name: POPOPX Mac Node ${{ needs.build-macos.outputs.version }}
           draft: false
-          prerelease: ${{ contains(steps.version.outputs.version, '-dev') }}
+          prerelease: ${{ contains(needs.build-macos.outputs.version, '-') }}
           fail_on_unmatched_files: true
           generate_release_notes: true
           files: |
             dist/${{ env.DMG_NAME }}
-            dist/${{ env.SHA_NAME }}
+            dist/${{ env.ZIP_NAME }}
+            dist/${{ env.SUMS_NAME }}
           # 这就是本工作流的双语 release 正文模板。action-gh-release@v2 的正式输入名是
           # `body`（仓库源码里并无 `body_template` 输入；写错名字会被 Actions 忽略并产生
           # "Unexpected input(s)" 警告，release 正文会静默丢失）。
           # 按官方文档，当同时提供 body 与 generate_release_notes 时，此处的正文会被
           # 预置(prepended)在 GitHub 自动生成的 changelog 之前。
           body: |
-            ## POPOPX Mac Node ${{ steps.version.outputs.version }}
+            ## POPOPX Mac Node ${{ needs.build-macos.outputs.version }}
 
             **零云端 · 无账号 · 无遥测** — 你 Mac 本机就是 POPOPX iOS 客户端「发现」10 大业务的算力与确定性物理执行中枢。
             **Zero cloud, no account, no telemetry** — your own Mac becomes the local compute and deterministic execution host for the 10 Discover businesses of the POPOPX iOS client.
 
             ### 一分钟安装 / Install in one minute
 
-            1. 下载 `POPOPX-Mac-Node-Universal.dmg` 与 `POPOPX-Mac-Node-Universal.dmg.sha256`。
+            1. 下载 `POPOPX-Mac-Node-Universal.dmg`（或 `.zip`）与 `SHA256SUMS.txt`，放在同一目录。
+               Download the `.dmg` (or `.zip`) and `SHA256SUMS.txt`; keep them in one folder.
             2. 校验完整性 / verify the download:
                ```sh
-               shasum -a 256 -c POPOPX-Mac-Node-Universal.dmg.sha256
+               shasum -a 256 -c SHA256SUMS.txt --ignore-missing
                ```
-            3. 双击挂载，把 **POPOPX Mac Node** 拖进 `Applications`。
-            4. 首次启动若被 Gatekeeper 拦下（本版本为 Ad-hoc 签名，未做 Apple 公证）：
-               ```sh
-               xattr -dr com.apple.quarantine "/Applications/POPOPX Mac Node.app"
-               ```
+            3. 双击挂载，把 **POPOPX Mac Node** 拖进 `Applications`。Drag **POPOPX Mac Node** into `Applications`.
+            4. 本版本由 Developer ID 签名、经 Apple 公证并装订（notarized & stapled），Gatekeeper 应直接放行。
+               This build is Developer ID signed, notarized and stapled, so Gatekeeper should accept it.
+               若被拦截，请重新下载并用 `SHA256SUMS.txt` 核对；**不要**用 `xattr` 绕过 Gatekeeper。
+               If it is blocked, re-download and verify against `SHA256SUMS.txt`; do **not** strip quarantine to bypass Gatekeeper.
             5. 启动后应用静默驻留菜单栏（不占 Dock），浏览器自动打开本地控制台 http://127.0.0.1:18920
-            6. 控制台向导第 1 步点「一键自动部署本地 AI 引擎」，第 2 步出示 `PPXNODE1-…` 二维码。
+            6. 控制台向导第 1 步点「一键自动部署本地 AI 引擎」，第 2 步出示 `https://popopx.chat/i/v1/…` 加密配对二维码（本机 `PPXNODE1-…` 凭据的封装箱）。
             7. iOS 端 → 「发现」→「Mac Node 配对」→ 扫一扫，即刻建立端到端加密隧道。
 
             ### 校验和 / Checksum
 
             ```
-            ${{ steps.meta.outputs.sha256 }}  POPOPX-Mac-Node-Universal.dmg
+            ${{ needs.build-macos.outputs.dmg_sha }}  POPOPX-Mac-Node-Universal.dmg
+            ${{ needs.build-macos.outputs.zip_sha }}  POPOPX-Mac-Node-Universal.zip
             ```
 
             ### 下载 / Downloads
 
             | 文件 File | 说明 Description | 大小 Size |
             | --- | --- | --- |
-            | `POPOPX-Mac-Node-Universal.dmg` | Universal 二进制（Apple Silicon + Intel），macOS 14+ | ${{ steps.meta.outputs.size_bytes }} bytes |
-            | `POPOPX-Mac-Node-Universal.dmg.sha256` | `shasum -a 256` 校验文件（纯相对文件名，可直接 `-c`） | plain text |
+            | `POPOPX-Mac-Node-Universal.dmg` | Universal 二进制（Apple Silicon + Intel），macOS 14+，Developer ID 签名并公证 | ${{ needs.build-macos.outputs.dmg_size }} bytes |
+            | `POPOPX-Mac-Node-Universal.zip` | 同一 app 的 ZIP 分发件，适合脚本或离线安装 | ${{ needs.build-macos.outputs.zip_size }} bytes |
+            | `SHA256SUMS.txt` | `shasum -a 256 -c` 校验文件（纯相对文件名，可直接 `-c`） | plain text |
 
             ### 本版本包含 / What is in this build
 
@@ -209,33 +477,10 @@ jobs:
 
             ### 已知限制 / Known limitations
 
-            - 发布包为 Ad-hoc 签名，未经 Developer ID 公证，首次启动需手动移除 quarantine 属性。
+            - 首次启动要求 macOS 14+；不支持更早系统。
             - `< 48GB` 统一内存的机器进入轻量推理模式，重型视频任务建议路由到边缘算力共享节点。
 
             ---
 
             本仓库全部源码以 **GNU AGPL-3.0-only** 开源（FSF 原文未改动），覆盖整个栈：节点本体、SMP/XFTP 中继服务端、盲签算力点结算与抗合谋隐形指纹的算法源码全部在许可证内，可自行部署，无需商业授权。
             商业条款只保留三项：官方托管中继网络与带宽、POPOPX 品牌与商标资产、官方发行通道与企业 SLA 支持；详见仓库根目录的 `LICENSE` 与 [LICENSE-COMMERCIAL.md](https://github.com/popopx-chat/popopx-mac-node/blob/main/LICENSE-COMMERCIAL.md)。
-
-  verify-checksum:
-    name: Verify checksum · 校验产物完整性
-    needs: build-macos
-    runs-on: macos-15
-    timeout-minutes: 15
-
-    steps:
-      - name: Download artifact · 下载待校验产物
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: verify
-
-      - name: Verify · 校验
-        run: |
-          set -euo pipefail
-          test -f "verify/${DMG_NAME}"
-          test -f "verify/${SHA_NAME}"
-          # sha256 sidecar 里记录的是相对文件名，因此必须在该目录内执行 -c
-          ( cd verify && shasum -a 256 -c "${SHA_NAME}" )
-          echo "SHA-256 校验通过 / checksum verified for ${DMG_NAME}"
-          ls -l verify

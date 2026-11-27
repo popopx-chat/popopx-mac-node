@@ -40,21 +40,16 @@ iOS 客户端「发现」里 10 个业务的指令，通过 **你自己的 popop
 
 ## 一分钟极速安装
 
-1. 到 [Releases](https://github.com/popopx-chat/popopx-mac-node/releases) 下载 **`POPOPX-Mac-Node-Universal.dmg`** 和 **`POPOPX-Mac-Node-Universal.dmg.sha256`** —— 两个文件都要下，放在同一个目录。
+1. 到 [Releases](https://github.com/popopx-chat/popopx-mac-node/releases) 的**最新**发布（v1.0.2 或更新）下载 **`POPOPX-Mac-Node-Universal.dmg`**（或 `.zip`）和 **`SHA256SUMS.txt`** —— 放在同一个目录。
 2. 先校验完整性，再谈安装：
 
    ```sh
-   shasum -a 256 -c POPOPX-Mac-Node-Universal.dmg.sha256
-   # 期望输出：POPOPX-Mac-Node-Universal.dmg: OK
+   shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+   # 期望输出：你下载的每个文件都 OK
    ```
 
 3. 双击挂载，把 **POPOPX Mac Node** 拖进 `Applications`。
-4. 本仓库发布的构建是 Ad-hoc 签名（未做 Apple 公证），首次启动被 Gatekeeper 拦下时执行一次：
-
-   ```sh
-   xattr -dr com.apple.quarantine "/Applications/POPOPX Mac Node.app"
-   ```
-
+4. **v1.0.2 起**的构建由 **Developer ID 签名、经 Apple 公证并装订**，Gatekeeper 应当直接放行（更早的 v1.0.0/v1.0.1 为 Ad-hoc 签名）。若仍被拦截，请重新从官方 Release 下载并复核 `SHA256SUMS.txt`；不要关闭 Gatekeeper，也不要去掉隔离属性。
 5. 启动。应用**静默驻留菜单栏**（`LSUIElement`，不占 Dock），并自动在你的默认浏览器打开本地向导 **http://127.0.0.1:18920**。
 6. 向导第 1 步：点 **“一键自动部署本地 AI 引擎”** —— 节点自动体检芯片 / 统一内存 / SSD，按内存档位拉取适配的 Qwen3.8 量化权重，初始化 `ltx2` 工作区，安装日志实时流回网页。
 7. 向导第 2 步：屏幕出现 **`https://popopx.chat/i/v1/…`** 加密配对二维码 —— 它是本机 `PPXNODE1-…` 凭据的加密封装，截图或转发的链接都不会暴露信令节点域名。
@@ -88,16 +83,24 @@ swift build -c release      # 可选：先单独出 release 二进制
                             # 想只要单架构：
                             #   swift build -c release --arch arm64
 
-bash Scripts/build_dmg.sh   # 一键产出可分发的 Universal DMG + sha256
+bash Scripts/build_dmg.sh   # 本机 Ad-hoc Universal DMG + sha256
                             #   （内部会自己跑 release 编译）
 # 产物 ->  dist/POPOPX-Mac-Node-Universal.dmg
 #          dist/POPOPX-Mac-Node-Universal.dmg.sha256
 
 # 只重打包、不重编译：
 bash Scripts/build_dmg.sh --skip-build --output dist --version 1.0.2 --build 4
+
+# 可分发构建：Developer ID 签名 + Apple 公证 + 装订
+bash Scripts/build-release.sh --output dist --version 1.0.2 --build 4
+# 产物 ->  dist/POPOPX-Mac-Node-Universal.dmg
+#          dist/POPOPX-Mac-Node-Universal.zip
+#          dist/SHA256SUMS.txt
 ```
 
 `Scripts/build_dmg.sh` 不依赖任何 Xcode 工程文件：它自己组装 `.app` Bundle、生成 `Info.plist`、用刚编译出来的二进制渲染品牌图标、Ad-hoc 签名、`hdiutil` 打包，最后**审计产物里有没有泄漏开发机绝对路径** —— 泄漏就直接让发布失败。常用参数：`--output <dir>`、`--version <x.y.z>`、`--build <n>`（让 CFBundleVersion 走独立构建号）、`--single-arch <arm64|x86_64>`、`--skip-build`、`--no-sign`、`--no-strip`。
+
+`Scripts/build-release.sh` 是可分发路径：它复用打包器的 `--emit-app` 接缝，在 hardened runtime 下用 Developer ID Application 证书签名，对 app 与 DMG 都做公证与装订，并写出 `SHA256SUMS.txt`。它需要钥匙串里的 Developer ID 身份和 `notarytool` 凭据配置；CI 的每次 tag 发布都走它。
 
 ---
 
@@ -309,6 +312,7 @@ lsof -nP -p "$(pgrep -x popopx-chat)" -i
 ```sh
 codesign -dv --verbose=4 "/Applications/POPOPX Mac Node.app"
 codesign --verify --deep --strict --verbose=2 "/Applications/POPOPX Mac Node.app"
+xcrun stapler validate "/Applications/POPOPX Mac Node.app"
 spctl -a -vv "/Applications/POPOPX Mac Node.app"
 ```
 
@@ -317,10 +321,10 @@ spctl -a -vv "/Applications/POPOPX Mac Node.app"
 ```
 Identifier=chat.popopx.node
 Format=app bundle with Mach-O thin (arm64)      # 通用二进制的包则是 fat
-flags=0x2(adhoc)                                 # 本仓库发布为 Ad-hoc，未公证
+flags=0x10000(runtime)                           # Developer ID + hardened runtime
 ```
 
-`spctl -a -vv` 对 Ad-hoc 签名**会返回 `rejected`**，这是预期结果，不是漏洞 —— 它意味着“这个包不是 Apple 背书的开发者”，而不是“这个包被篡改”。第二行的 `--verify --deep --strict` 才负责后者，它必须**静默通过**。
+从 **v1.0.2 起**，`spctl -a -vv` 必须返回 `accepted` 且 `source=Notarized Developer ID`；`stapler validate` 必须报告装订票据有效（更早的 v1.0.0/v1.0.1 Ad-hoc 构建会被 `spctl` 拒绝，这是那些旧版本的预期结果）。当前版本任一项失败都不要安装：重新从官方 Release 下载并重跑第 6 条。第二行的 `--verify --deep --strict` 才负责检查篡改，它必须**静默通过**。
 
 ### 4 · 数据落点与密钥
 
@@ -350,10 +354,10 @@ LC_ALL=C grep -a -o '/Users/[A-Za-z0-9._-]*' \
 ### 6 · 校验下载物
 
 ```sh
-shasum -a 256 -c POPOPX-Mac-Node-Universal.dmg.sha256
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 ```
 
-`.sha256` 文件里只写 `<64 位十六进制>␣␣<相对文件名>`（两个空格、不带任何目录），所以它必须在与 `.dmg` 同一目录下执行，也永远不会指向别人的路径。
+`SHA256SUMS.txt` 里只写 `<64 位十六进制>␣␣<相对文件名>`（两个空格、不带任何目录），所以它必须在产物同一目录下执行；`--ignore-missing` 会校验你实际下载的 DMG/ZIP。它也永远不会指向别人的路径。
 
 ### 7 · 撤销一台已配对设备
 
@@ -363,11 +367,7 @@ shasum -a 256 -c POPOPX-Mac-Node-Universal.dmg.sha256
 
 ### 8 · 被 Gatekeeper 拦住时
 
-```sh
-xattr -dr com.apple.quarantine "/Applications/POPOPX Mac Node.app"
-```
-
-只在你**已经跑过第 6 条的 sha256 校验**之后再执行这一步。先验签，后放行 —— 顺序反了就是自我安慰。
+当前发布（**v1.0.2 及更新**）已由 Developer ID 签名、经 Apple 公证并装订，正常下载不应要求你绕过 Gatekeeper。更早的 v1.0.0/v1.0.1 为 Ad-hoc 构建，需要手动放行；请优先升级到最新版本。若当前版本仍被拦截，请把它当成安全信号：重新从官方 Release 下载，重跑第 6 条校验并比对摘要；**不要**关闭 Gatekeeper、不要用 `xattr` 去掉隔离属性，也不要右键强行打开未经验证的副本。如果校验和与公证票据都对不上，请附上 `spctl` 输出开 issue，而不是绕过去。
 
 ---
 
@@ -401,11 +401,11 @@ shasum -a 256 LICENSE ../popopxmq/LICENSE ../popopx-chat/LICENSE
 
 ## 路线图
 
-- **v1.0（当前）** —— 菜单栏宿主、`NWListener` 本地控制台三步向导、SMP 配对与公钥白名单、硬件体检 + 一键引擎部署、10 大引擎本地执行、Universal DMG + sha256 + GitHub Actions 全自动发布。
+- **v1.0（当前）** —— 菜单栏宿主、`NWListener` 本地控制台三步向导、SMP 配对与公钥白名单、硬件体检 + 一键引擎部署、10 大引擎本地执行、Universal DMG + ZIP + SHA256SUMS、Developer ID 签名与 Apple 公证、GitHub Actions 全自动发布。
 - **v1.1** —— 引擎级用量仪表盘（只在本机控制台呈现，每档内存的实际 token/s 与瓦特，把本页的估算值换成你的实测值）、任务时间线与失败原因回传 iOS、其余 15 个区域的人工校对文案（`zh-Hant` 已在 v1.0 由简转繁派生）。
 - **v1.2** —— `edge_compute_mesh` 沙箱隔离强化（独立临时容器、逐任务密钥、执行后自动粉碎）、算力点收益明细本地账本与可导出报表。
 - **v1.3** —— `chrono_ark` 多继承人分片托管与更长的时间锁原语矩阵；`health_sentinel` 支持的体检报告版式扩展（仍然完全离线）。
-- **v1.4** —— Developer ID 签名与 Apple 公证流水线、Mac App Store 评估、更多 `LTX-2.5` 分辨率 / 时长档位适配。
+- **v1.4** —— Mac App Store 评估、更多 `LTX-2.5` 分辨率 / 时长档位适配。
 - **不做的事** —— 遥测、云账号、把任何本地素材上传到我们的服务器、把 `phantom_sentinel` 交给大模型决策。
 
 ---
@@ -429,8 +429,10 @@ bash Scripts/build_dmg.sh --output dist --version 0.0.0-dev
 
 发布：
 
+通过 CI 发布需要五个仓库 secret：`APPLE_DEVELOPER_ID_P12_BASE64`、`APPLE_DEVELOPER_ID_P12_PASSWORD`、`APPLE_TEAM_ID`、`NOTARY_APPLE_ID` 与 `NOTARY_APP_SPECIFIC_PASSWORD`。缺任意一个，工作流会在打包前失败；它绝不会发布 ad-hoc 构建，并会把 tag 与 `DEFAULT_VERSION`、`NodeVersion.current` 三方对齐校验。打 tag 前请在同一个提交里同时递增 `DEFAULT_VERSION`、`DEFAULT_BUILD` 和 `NodeVersion.current`。
+
 ```sh
-git tag v1.0.2 && git push origin v1.0.2   # 触发 .github/workflows/release.yml
+git tag v1.0.3 && git push origin v1.0.3   # 触发 .github/workflows/release.yml
 ```
 
 ---

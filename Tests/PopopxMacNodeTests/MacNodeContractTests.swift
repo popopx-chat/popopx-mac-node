@@ -1941,6 +1941,40 @@ final class MacNodeContractTests: XCTestCase {
         }
     }
 
+    /// A tagged release must never fall back to the ad-hoc packer: that path published bytes
+    /// Gatekeeper rejects and could replace a notarized asset with a quarantine-requiring one.
+    /// The workflow has to reach `build-release.sh`, provision the Developer ID/notary secrets,
+    /// and re-check stapling plus Gatekeeper before publishing.
+    func testReleaseWorkflowPublishesOnlyNotarizedAssets() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let workflow = try String(
+            contentsOf: root.appendingPathComponent(".github/workflows/release.yml"), encoding: .utf8
+        )
+
+        XCTAssertTrue(workflow.contains("Scripts/build-release.sh"), "the release no longer uses the notarization pipeline")
+        XCTAssertTrue(workflow.contains("--notary-profile"), "the release no longer asks notarytool for a profile")
+        XCTAssertTrue(workflow.contains("APPLE_DEVELOPER_ID_P12_BASE64"), "the workflow does not import a Developer ID certificate")
+        XCTAssertTrue(workflow.contains("name: Validate release secrets"), "the workflow no longer fails closed on missing secrets")
+        XCTAssertTrue(workflow.contains("name: Assert release version identity"), "the workflow no longer ties the tag to the source version")
+        XCTAssertTrue(workflow.contains("xcrun stapler validate"), "the release does not verify the stapled ticket")
+        XCTAssertTrue(workflow.contains("spctl --assess"), "the release does not verify Gatekeeper acceptance")
+        XCTAssertTrue(
+            workflow.contains("needs:\n      - build-macos\n      - verify-checksum"),
+            "publishing no longer depends on the artifact verification job"
+        )
+        XCTAssertTrue(
+            workflow.contains("if: github.event_name == 'push'"),
+            "a manual dispatch on a v tag can publish again"
+        )
+        XCTAssertFalse(
+            workflow.contains("bash Scripts/build_dmg.sh --output dist --version"),
+            "the ad-hoc packer is back on the publishing path"
+        )
+        XCTAssertFalse(workflow.contains("xattr -dr com.apple.quarantine"), "the release tells readers to bypass Gatekeeper")
+        XCTAssertFalse(workflow.contains("本版本为 Ad-hoc 签名"), "the release still advertises an ad-hoc build")
+    }
+
     func testContainmentRejectsTraversalAndSiblings() {
         let root = AppPaths.root
         XCTAssertTrue(AppPaths.isContained(root))
