@@ -208,7 +208,6 @@ public actor MailAssistantBridge {
             return AssistantMailTriage(summaryLines: ["邮件读取失败 / mail fetch failed"], fetchedAt: moment)
         }
 
-        let draftsBuilt = buildDrafts(from: fetched, now: moment)
         var hints: [String: MailClassificationHint] = [:]
         if let classifier {
             let inputs = fetched.prefix(config.maxMessages).map {
@@ -221,6 +220,12 @@ public actor MailAssistantBridge {
             }
             hints = await classifier.classify(Array(inputs))
         }
+
+        // Drafts follow the final category, not just the rules: a local model that
+        // recognises a reply request the rules called a notification still gets a
+        // reply draft. The body remains the deterministic template, and sending it
+        // is still gated by the approval receipt.
+        let draftsBuilt = buildDrafts(from: fetched, hints: hints, now: moment)
 
         var cards: [AssistantMailMessageCard] = []
         for message in fetched.prefix(config.maxMessages) {
@@ -469,10 +474,15 @@ public actor MailAssistantBridge {
 
     // MARK: - Rules
 
-    private func buildDrafts(from messages: [MailFetchedMessage], now: Date) -> [MailOutgoingDraft] {
+    private func buildDrafts(
+        from messages: [MailFetchedMessage],
+        hints: [String: MailClassificationHint],
+        now: Date
+    ) -> [MailOutgoingDraft] {
         messages.compactMap { message in
             let snippetText = snippet(message.body)
-            let category = classify(subject: message.subject, from: message.from, snippet: snippetText).category
+            let category = hints[message.id]?.category
+                ?? classify(subject: message.subject, from: message.from, snippet: snippetText).category
             guard category == .needsReply else { return nil }
             guard let recipient = senderMailbox(message.from) else { return nil }
             let cleanSubject = message.subject.trimmingCharacters(in: .whitespacesAndNewlines)

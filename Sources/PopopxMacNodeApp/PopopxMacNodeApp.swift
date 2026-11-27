@@ -609,6 +609,17 @@ public actor NodeConsole: NodeConsoleFacade {
             gate: gate,
             store: store
         )
+        // The adapter is assembled only with the assistant: a node whose assistant
+        // is off owns no model client and probes nothing. Scope roots come from the
+        // same workspace authorization the privacy bridge already requires.
+        let inkling = Inkling2MiniAdapter(
+            config: config.inkling,
+            scopeRoots: settings.bridges.normalised.allowWorkspaceRead
+                ? settings.bridges.normalised.workspaceDirectories
+                : [],
+            transport: InklingURLSessionTransport(),
+            store: store
+        )
         let manager = PersonalAssistantManager(
             config: config,
             privacy: settings.bridges.normalised,
@@ -619,7 +630,8 @@ public actor NodeConsole: NodeConsoleFacade {
             store: store,
             scheduler: scheduler,
             mail: mail,
-            sentinel: sentinel
+            sentinel: sentinel,
+            inkling: inkling
         ) { [weak self] result in
             guard let self else { return false }
             return await self.deliverAssistantCard(result)
@@ -686,6 +698,7 @@ public actor NodeConsole: NodeConsoleFacade {
             boundary: "IMAPS/SMTPS 993/465 · 只读 EXAMINE · 发送须审批 / read-only fetch, approved send"
         )
         snapshot.boundary = Self.assistantBoundary
+        snapshot.inkling = AssistantInklingCard.saved(config.inkling)
         snapshot.updatedAt = Date()
         return snapshot
     }

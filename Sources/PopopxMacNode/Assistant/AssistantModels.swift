@@ -437,6 +437,10 @@ public struct AssistantConfig: Codable, Sendable, Equatable {
     public var briefing: AssistantBriefingConfig
     public var patrol: AssistantPatrolConfig
     public var mail: MailAssistantConfig
+    /// A preference, not a loop: it says "use the local model when this Mac has
+    /// one". It stays on when the master switch is off so turning the assistant
+    /// back on does not silently forget the owner's choice.
+    public var inkling: InklingConfig
     public var repairs: [SentinelRepairRule]
 
     public init(
@@ -444,16 +448,18 @@ public struct AssistantConfig: Codable, Sendable, Equatable {
         briefing: AssistantBriefingConfig = AssistantBriefingConfig(),
         patrol: AssistantPatrolConfig = AssistantPatrolConfig(),
         mail: MailAssistantConfig = MailAssistantConfig(),
+        inkling: InklingConfig = InklingConfig(),
         repairs: [SentinelRepairRule] = []
     ) {
         self.enabled = enabled
         self.briefing = briefing
         self.patrol = patrol
         self.mail = mail
+        self.inkling = inkling
         self.repairs = repairs
     }
 
-    private enum CodingKeys: String, CodingKey { case enabled, briefing, patrol, mail, repairs }
+    private enum CodingKeys: String, CodingKey { case enabled, briefing, patrol, mail, inkling, repairs }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -461,6 +467,7 @@ public struct AssistantConfig: Codable, Sendable, Equatable {
         briefing = try c.decodeIfPresent(AssistantBriefingConfig.self, forKey: .briefing) ?? AssistantBriefingConfig()
         patrol = try c.decodeIfPresent(AssistantPatrolConfig.self, forKey: .patrol) ?? AssistantPatrolConfig()
         mail = try c.decodeIfPresent(MailAssistantConfig.self, forKey: .mail) ?? MailAssistantConfig()
+        inkling = try c.decodeIfPresent(InklingConfig.self, forKey: .inkling) ?? InklingConfig()
         repairs = try c.decodeIfPresent([SentinelRepairRule].self, forKey: .repairs) ?? []
     }
 
@@ -471,6 +478,7 @@ public struct AssistantConfig: Codable, Sendable, Equatable {
         copy.briefing = briefing.normalised
         copy.patrol = patrol.normalised
         copy.mail = mail.normalised
+        copy.inkling = inkling.normalised
         copy.repairs = Array(repairs.map { $0.normalised }.filter { !$0.watchEntity.isEmpty }.prefix(32))
         if !enabled {
             copy.briefing.enabled = false
@@ -914,6 +922,7 @@ public struct AssistantSnapshot: Codable, Sendable, Equatable {
     public var boundary: String
     public var lastReport: String
     public var updatedAt: Date
+    public var inkling: AssistantInklingCard
 
     public init(
         enabled: Bool = false,
@@ -925,7 +934,8 @@ public struct AssistantSnapshot: Codable, Sendable, Equatable {
         audit: [AssistantAuditRow] = [],
         boundary: String = "",
         lastReport: String = "",
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        inkling: AssistantInklingCard = AssistantInklingCard()
     ) {
         self.enabled = enabled
         self.scheduler = scheduler
@@ -937,6 +947,7 @@ public struct AssistantSnapshot: Codable, Sendable, Equatable {
         self.boundary = boundary
         self.lastReport = lastReport
         self.updatedAt = updatedAt
+        self.inkling = inkling
     }
 
     public static let empty = AssistantSnapshot()

@@ -1271,6 +1271,20 @@ footer.app__foot{margin-top:var(--s5);padding-top:var(--s3);border-top:1px solid
     </div>
     <p class="panel__sub" data-i18n="asDesc"></p>
     <div class="grid grid--stats" id="as-stats"></div>
+    <hr class="hair">
+    <div class="panel__head">
+      <h3 data-i18n="asInklingTitle"></h3>
+      <span class="tag" id="as-inkling-state">—</span>
+    </div>
+    <p class="panel__sub" data-i18n="asInklingDesc"></p>
+    <div class="list" id="as-inkling"></div>
+    <div class="list" id="as-inkling-switches" style="margin-top:8px"></div>
+    <p class="field__note" id="as-inkling-detail"></p>
+    <p class="field__note mono" id="as-inkling-pull"></p>
+    <div class="btn-row" style="margin-top:8px">
+      <button class="btn btn--tiny" onclick="PPX.asRun('inklingProbe')" data-i18n="asInklingProbe"></button>
+    </div>
+    <p class="field__note" data-i18n="asInklingNote"></p>
     <div class="grid grid--split" style="margin-top:12px">
       <div class="stack">
         <span class="field__label" data-i18n="asSwitchesTitle"></span>
@@ -2197,7 +2211,33 @@ var I18N = {
   asRepairsEmpty: { zh: "尚未登记关键设备", en: "No critical device registered" },
   asRepairsFull: { zh: "已达上限", en: "The limit is reached" },
   asRepairAdd: { zh: "添加规则", en: "Add rule" },
-  asRepairsNote: { zh: "巡检只读；修复动作仅在批准后执行一次。", en: "The patrol is read-only; a repair runs once, only after approval." }
+  asRepairsNote: { zh: "巡检只读；修复动作仅在批准后执行一次。", en: "The patrol is read-only; a repair runs once, only after approval." },
+  /* ---- Inkling 2 Mini (local multimodal) ---- */
+  asInklingTitle: { zh: "Inkling 2 Mini 本地模型", en: "Inkling 2 Mini (local)" },
+  asInklingDesc: { zh: "本机多模态与结构化 JSON 推理，只走 127.0.0.1；权重不随安装包分发，图片与票据不出本机。", en: "On-device multimodal and structured JSON inference over 127.0.0.1 only. Weights are never bundled with the installer, and images stay on this Mac." },
+  asInklingOff: { zh: "已关闭", en: "off" },
+  asInklingUnknown: { zh: "尚未探测", en: "not probed" },
+  asInklingReady: { zh: "已就绪", en: "ready" },
+  asInklingModelMissing: { zh: "未拉取模型", en: "model not pulled" },
+  asInklingRuntimeMissing: { zh: "未检测到运行时", en: "no local runtime" },
+  asInklingRefused: { zh: "端点被拒绝", en: "endpoint refused" },
+  asInklingProbe: { zh: "重新探测本机运行时", en: "Probe local runtimes" },
+  asInklingEnable: { zh: "启用本地 Inkling 2 Mini", en: "Enable local Inkling 2 Mini" },
+  asInklingMultimodal: { zh: "多模态票据识别", en: "Multimodal ticket reading" },
+  asInklingJSON: { zh: "结构化 JSON 推理", en: "Structured JSON inference" },
+  asInklingOllama: { zh: "Ollama 地址", en: "Ollama endpoint" },
+  asInklingMlx: { zh: "MLX 地址", en: "MLX endpoint" },
+  asInklingEndpointNote: { zh: "只接受 127.0.0.1、localhost 或 [::1]；其他地址零请求拒绝", en: "127.0.0.1, localhost or [::1] only; anything else is refused with zero requests" },
+  asInklingModel: { zh: "模型引用", en: "Model reference" },
+  asInklingModelNote: { zh: "Ollama 里的模型名，如 inkling-2-mini", en: "the model name inside Ollama, e.g. inkling-2-mini" },
+  asInklingTickets: { zh: "票据路径（逗号分隔）", en: "Ticket paths (comma separated)" },
+  asInklingTicketsNote: { zh: "最多 4 个，且必须位于已授权工作区目录内", en: "up to 4, each inside an authorized workspace directory" },
+  asInklingRuntime: { zh: "运行时", en: "runtime" },
+  asInklingStats: { zh: "JSON / 多模态 / 降级", en: "JSON / media / degraded" },
+  asInklingLastUsed: { zh: "最近使用", en: "last used" },
+  asInklingNever: { zh: "尚未", en: "never" },
+  asInklingPull: { zh: "本地拉取：", en: "Pull locally: " },
+  asInklingNote: { zh: "模型只负责只读分析与提案；发信、写日程或控制家居仍须人工审批回执。", en: "The model only reads and proposes; sending, calendar writes or home control still need a human-approved receipt." }
 };
 
 /* ------------------------------------------------------- locale registry */
@@ -4435,6 +4475,7 @@ function asConfig() {
       briefing: clone(saved.briefing || { enabled: false, hour: 8, minute: 0 }),
       patrol: clone(saved.patrol || { enabled: false, intervalMinutes: 30, offlineMinutes: 15 }),
       mail: clone(saved.mail || {}),
+      inkling: clone(saved.inkling || {}),
       repairs: clone(saved.repairs || [])
     };
   }
@@ -4448,6 +4489,14 @@ function asConfig() {
   if (!cfg.mail.smtpPasswordRef) { cfg.mail.smtpPasswordRef = "assistant/mail/smtp-password"; }
   if (!cfg.mail.lookbackDays) { cfg.mail.lookbackDays = 3; }
   if (!cfg.mail.maxMessages) { cfg.mail.maxMessages = 12; }
+  cfg.inkling = cfg.inkling || {};
+  if (cfg.inkling.enabled === undefined) { cfg.inkling.enabled = true; }
+  if (cfg.inkling.allowMultimodal === undefined) { cfg.inkling.allowMultimodal = true; }
+  if (cfg.inkling.structuredJSON === undefined) { cfg.inkling.structuredJSON = true; }
+  if (!cfg.inkling.ollamaEndpoint) { cfg.inkling.ollamaEndpoint = "http://127.0.0.1:11434"; }
+  if (!cfg.inkling.mlxEndpoint) { cfg.inkling.mlxEndpoint = "http://127.0.0.1:8080"; }
+  if (!cfg.inkling.model) { cfg.inkling.model = "inkling-2-mini"; }
+  if (!Array.isArray(cfg.inkling.ticketPaths)) { cfg.inkling.ticketPaths = []; }
   cfg.repairs = cfg.repairs || [];
   return cfg;
 }
@@ -4503,6 +4552,52 @@ function renderAssistant() {
   var auditTag = el("as-audit-tag");
   if (auditTag) { auditTag.textContent = String((snap.audit || []).length); }
 }
+function asInklingStateLabel(state) {
+  if (state === "ready") { return t("asInklingReady"); }
+  if (state === "model_missing") { return t("asInklingModelMissing"); }
+  if (state === "runtime_missing") { return t("asInklingRuntimeMissing"); }
+  if (state === "refused") { return t("asInklingRefused"); }
+  if (state === "off") { return t("asInklingOff"); }
+  return t("asInklingUnknown");
+}
+function renderAssistantInkling() {
+  var host = el("as-inkling"), badge = el("as-inkling-state");
+  if (!host) { return; }
+  var snap = asSnap(), card = snap.inkling || {}, cfg = asConfig() || {};
+  var inkling = cfg.inkling || {}, state = String(card.state || "unknown");
+  if (badge) {
+    badge.textContent = asInklingStateLabel(state);
+    badge.className = "tag" + (state === "ready" ? " tag--ok"
+      : state === "refused" ? " tag--bad"
+      : state === "off" ? " tag--off" : " tag--warn");
+  }
+  clear(host);
+  var dot = state === "ready" ? "ok" : state === "refused" ? "bad" : state === "off" ? "off" : "warn";
+  host.appendChild(h("div", { cls: "list__row" }, [
+    h("span", { cls: "dot dot--" + dot }),
+    h("span", { cls: "pv-line", text: String(card.displayName || "Inkling 2 Mini") }),
+    pvTag(String(card.license || ""), "accent"),
+    h("span", { cls: "pv-meta mono", text: String(card.model || inkling.model || "") })
+  ]));
+  host.appendChild(h("div", { cls: "list__row" }, [
+    h("span", { cls: "pv-meta", text: t("asInklingRuntime") }),
+    pvTag(String(card.runtime || "—"), state === "ready" ? "ok" : "off"),
+    h("span", { cls: "pv-meta mono", text: "ollama " + String(card.ollamaEndpoint || inkling.ollamaEndpoint || "") }),
+    h("span", { cls: "pv-meta mono", text: "mlx " + String(card.mlxEndpoint || inkling.mlxEndpoint || "") })
+  ]));
+  var multimodalOn = inkling.allowMultimodal !== false;
+  var jsonOn = inkling.structuredJSON !== false;
+  host.appendChild(h("div", { cls: "list__row" }, [
+    pvTag(t("asInklingMultimodal") + (multimodalOn ? " · on" : " · off"), multimodalOn ? "ok" : "off"),
+    pvTag(t("asInklingJSON") + (jsonOn ? " · on" : " · off"), jsonOn ? "ok" : "off"),
+    h("span", { cls: "pv-meta", text: t("asInklingStats") + " " + String(card.jsonRuns || 0)
+      + " / " + String(card.mediaRuns || 0) + " / " + String(card.degradedRuns || 0) }),
+    h("span", { cls: "pv-meta", text: t("asInklingLastUsed") + " " + (card.lastUsedAt ? pvWhen(card.lastUsedAt) : t("asInklingNever")) })
+  ]));
+  setText("as-inkling-detail", String(card.lastDetail || ""));
+  setText("as-inkling-pull",
+    card.pullCommand && state !== "ready" && state !== "off" ? t("asInklingPull") + String(card.pullCommand) : "");
+}
 function buildAssistantControls() {
   var host = el("as-switches"), fields = el("as-fields"), cfg = asConfig();
   if (!cfg) { return; }
@@ -4518,6 +4613,16 @@ function buildAssistantControls() {
     box.appendChild(checkField("asMailSwitch", function () { return cfg.mail.enabled; },
       function (value) { cfg.mail.enabled = value; }));
     host.appendChild(box);
+  }
+  var modelSwitches = el("as-inkling-switches");
+  if (modelSwitches) {
+    clear(modelSwitches);
+    modelSwitches.appendChild(checkField("asInklingEnable", function () { return cfg.inkling.enabled !== false; },
+      function (value) { cfg.inkling.enabled = value; renderAssistantInkling(); }));
+    modelSwitches.appendChild(checkField("asInklingMultimodal", function () { return cfg.inkling.allowMultimodal !== false; },
+      function (value) { cfg.inkling.allowMultimodal = value; renderAssistantInkling(); }));
+    modelSwitches.appendChild(checkField("asInklingJSON", function () { return cfg.inkling.structuredJSON !== false; },
+      function (value) { cfg.inkling.structuredJSON = value; renderAssistantInkling(); }));
   }
   if (!fields) { return; }
   clear(fields);
@@ -4545,6 +4650,19 @@ function buildAssistantControls() {
     function (value) { cfg.mail.lookbackDays = value; }, 1, 14, t("asLookbackNote")));
   fields.appendChild(numField("asMaxMessages", function () { return Number(cfg.mail.maxMessages) || 12; },
     function (value) { cfg.mail.maxMessages = value; }, 1, 30, t("asMaxMessagesNote")));
+  fields.appendChild(urlField("asInklingOllama", function () { return cfg.inkling.ollamaEndpoint; },
+    function (value) { cfg.inkling.ollamaEndpoint = value; renderAssistantInkling(); }, null, "asInklingEndpointNote"));
+  fields.appendChild(urlField("asInklingMlx", function () { return cfg.inkling.mlxEndpoint; },
+    function (value) { cfg.inkling.mlxEndpoint = value; renderAssistantInkling(); }, null, "asInklingEndpointNote"));
+  fields.appendChild(textField("asInklingModel", function () { return cfg.inkling.model; },
+    function (value) { cfg.inkling.model = value; renderAssistantInkling(); }, null, "asInklingModelNote"));
+  fields.appendChild(textField("asInklingTickets", function () { return cfg.inkling.ticketPaths.join(", "); },
+    function (value) {
+      cfg.inkling.ticketPaths = value.split(",").map(function (part) {
+        return String(part || "").trim();
+      }).filter(function (part) { return part.length > 0; }).slice(0, 4);
+      renderAssistantInkling();
+    }, null, "asInklingTicketsNote"));
 }
 function renderAssistantConnectors() {
   var host = el("as-connectors"), rows = asSnap().connectors || [];
@@ -4681,6 +4799,7 @@ function asRun(verb) {
   api(ROUTE.assistantControl, { method: "POST", json: { verb: verb } }).then(function (report) {
     if (report && report.assistant) { S.snap.assistant = report.assistant; }
     renderAssistant();
+    renderAssistantInkling();
     renderAssistantConnectors();
     renderAssistantPending();
     renderAssistantAudit();
@@ -4738,6 +4857,7 @@ function renderStep5() {
   buildGodsEyeControls();
   renderGodsEyeCredentials();
   renderAssistant();
+  renderAssistantInkling();
   buildAssistantControls();
   renderAssistantConnectors();
   renderAssistantRepairs();
@@ -6737,7 +6857,7 @@ public actor LocalWebConsoleServer {
             // The verb list is fixed here so the page cannot invent an action.
             let body: WEBAssistantControlRequest = try decode(WEBAssistantControlRequest.self, from: request)
             let verb = body.verb.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard ["briefingNow", "patrolNow", "refreshMail", "proposeDrafts", "cancelPending"].contains(verb) else {
+            guard ["briefingNow", "patrolNow", "refreshMail", "proposeDrafts", "cancelPending", "inklingProbe"].contains(verb) else {
                 throw WEBConsoleError.badEngine("未知私人助手指令 / unknown assistant verb: \(verb)")
             }
             return try json(await facade.assistantControl(verb: verb))

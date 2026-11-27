@@ -30,6 +30,7 @@ public actor PersonalAssistantManager {
     private let scheduler: LocalTaskScheduler
     private let mail: MailAssistantBridge
     private let sentinel: HomeSentinelLoop
+    private let inkling: Inkling2MiniAdapter?
     private let clock: AssistantClock
     private let deliver: Delivery
 
@@ -48,6 +49,7 @@ public actor PersonalAssistantManager {
         scheduler: LocalTaskScheduler,
         mail: MailAssistantBridge,
         sentinel: HomeSentinelLoop,
+        inkling: Inkling2MiniAdapter? = nil,
         clock: AssistantClock = SystemAssistantClock(),
         deliver: @escaping Delivery
     ) {
@@ -61,6 +63,7 @@ public actor PersonalAssistantManager {
         self.scheduler = scheduler
         self.mail = mail
         self.sentinel = sentinel
+        self.inkling = inkling
         self.clock = clock
         self.deliver = deliver
     }
@@ -111,6 +114,7 @@ public actor PersonalAssistantManager {
         await scheduler.update(config: normalised, now: moment)
         await mail.update(config: normalised.mail)
         await sentinel.update(config: normalised)
+        await syncInkling()
         if !normalised.mail.enabled { await mail.reset() }
         if !normalised.enabled {
             await scheduler.stop()
@@ -127,6 +131,7 @@ public actor PersonalAssistantManager {
     /// background loop, then asks the scheduler which jobs are due at `now`.
     public func tickNow(now: Date? = nil) async {
         await ensureHandlers()
+        await syncInkling()
         await scheduler.tick(now: now)
     }
 
@@ -142,6 +147,7 @@ public actor PersonalAssistantManager {
     public func runBriefing(now: Date? = nil) async -> String {
         let moment = now ?? clock.now
         guard config.enabled else { return "私人助手未开启 / the assistant is off" }
+        await syncInkling()
         var lines: [String] = []
         var draftCount = 0
 
@@ -174,15 +180,27 @@ public actor PersonalAssistantManager {
             lines.append("设备巡检：未启用")
         }
 
+        lines.append(contentsOf: await ticketLines(now: moment))
+
         await pushPending(now: moment, limit: 2)
-        let body = lines.joined(separator: "\n")
+        let facts = lines.joined(separator: "\n")
+        var body = facts
+        var inklingUsed = false
+        var inklingRuntime = ""
+        if let synthesized = await synthesizeBriefing(facts: facts, now: moment) {
+            body = synthesized.text
+            inklingUsed = true
+            inklingRuntime = synthesized.runtime
+        }
         let delivered = await push(
             headline: "私人助手简报 · \(stamp(moment))",
             body: body,
             metrics: [
                 "briefing": .bool(true),
                 "drafts": .int(draftCount),
-                "connectors": .int(connectors(now: moment).filter(\.enabled).count)
+                "connectors": .int(connectors(now: moment).filter(\.enabled).count),
+                "inkling": .bool(inklingUsed),
+                "inkling_runtime": .string(inklingRuntime)
             ],
             now: moment
         )
@@ -241,6 +259,7 @@ public actor PersonalAssistantManager {
     public func refreshMail(now: Date? = nil) async -> String {
         let moment = now ?? clock.now
         guard config.enabled, config.mail.enabled else { return "邮件助手未启用 / mail is off" }
+        await syncInkling()
         let triage = await mail.triage(now: moment)
         let proposed = await propose(drafts: Array(triage.drafts.prefix(3)), now: moment)
         await pushPending(now: moment, limit: 3)
@@ -423,6 +442,18 @@ public actor PersonalAssistantManager {
             }
             let detail = await refreshMail(now: moment)
             return AssistantControlReport(ok: true, outcome: "mail", detail: detail, assistant: await snapshot(now: moment))
+        case "inklingProbe":
+            guard let inkling else {
+                return .refused("本机未装配本地模型适配器 / no local model adapter", snapshot: await snapshot(now: moment))
+            }
+            let card = await inkling.probe(now: moment)
+            let ok = card.state == .ready
+            return AssistantControlReport(
+                ok: ok,
+                outcome: "inkling",
+                detail: card.lastDetail,
+                assistant: await snapshot(now: moment)
+            )
         case "cancelPending":
             let cancelled = await gate.cancelPending(reason: "owner cancelled from the console", now: moment)
             pushed.removeAll()
@@ -452,7 +483,8 @@ public actor PersonalAssistantManager {
             audit: await store.recent(limit: AssistantAuditStore.snapshotEntries),
             boundary: "执行层 HMAC 审批回执 · 127.0.0.1 控制台 · 邮件为唯一命名外部出口 / executor HMAC receipts · loopback console · mail is the one named egress exception",
             lastReport: lastReport,
-            updatedAt: moment
+            updatedAt: moment,
+            inkling: await inkling?.card(now: moment) ?? AssistantInklingCard.saved(config.inkling)
         )
     }
 
@@ -461,6 +493,85 @@ public actor PersonalAssistantManager {
     }
 
     // MARK: - Internals
+
+    /// Pushes the saved switchboard and the workspace roots into the adapter, then
+    /// binds the model to mail triage. Called on every entry point rather than only
+    /// in `apply`, so a manager built directly by a test or the console's one-shot
+    /// path still gets the owner's current settings.
+    private func syncInkling() async {
+        guard let inkling else { return }
+        await inkling.update(
+            config: config.inkling,
+            scopeRoots: privacy.allowWorkspaceRead ? privacy.workspaceDirectories : []
+        )
+        await mail.setClassifier(InklingMailClassifier(adapter: inkling))
+    }
+
+    /// The multimodal slice of the briefing. A ticket is read only when its path is
+    /// inside an authorized workspace root; every extraction is a suggestion for
+    /// the briefing, never a write.
+    private func ticketLines(now: Date) async -> [String] {
+        guard let inkling, config.inkling.allowMultimodal, !config.inkling.ticketPaths.isEmpty else { return [] }
+        guard await inkling.isReady(now: now) else {
+            return ["票据：本机 Inkling 2 Mini 未就绪，已跳过 / tickets skipped: the local model is not ready"]
+        }
+        var lines = ["票据：已指定 \(config.inkling.ticketPaths.count) 份 / \(config.inkling.ticketPaths.count) named"]
+        var recognized = 0
+        for path in config.inkling.ticketPaths.prefix(3) {
+            let analysis = await inkling.analyzeLocalMedia(path: path, now: now)
+            guard analysis.ok, let extraction = analysis.extraction else {
+                lines.append("· \(analysis.file)：\(String(analysis.degradedReason.prefix(80)))")
+                continue
+            }
+            recognized += 1
+            var row = "· 票据：\(extraction.merchant.isEmpty ? analysis.file : String(extraction.merchant.prefix(40)))"
+            if !extraction.amount.isEmpty { row += " · \(String(extraction.amount.prefix(24)))" }
+            if !extraction.dueDate.isEmpty { row += " · 到期 \(String(extraction.dueDate.prefix(20)))" }
+            if !extraction.summary.isEmpty { row += " · \(String(extraction.summary.prefix(60)))" }
+            lines.append(row)
+        }
+        lines[0] = "票据：已识别 \(recognized) 份 / \(recognized) recognized"
+        return lines
+    }
+
+    /// Asks the local model to turn the deterministic facts into one dense briefing,
+    /// and falls back to those facts verbatim when it is absent, slow or malformed.
+    private func synthesizeBriefing(facts: String, now: Date) async -> (text: String, runtime: String)? {
+        guard let inkling, config.inkling.structuredJSON else { return nil }
+        let generation = await inkling.generateStructuredJSON(
+            prompt: """
+            Turn these owner-only facts into one concise briefing. Return JSON with keys: headline (a short line), \
+            summary (two sentences at most), priorities (up to five short strings), anomaly_notes (how each home \
+            anomaly likely arose; empty when there are none). Restate only facts present in the input; never invent \
+            an event, amount, date or device state.
+
+            FACTS:
+            \(facts)
+            """,
+            schema: Inkling2MiniAdapter.briefingSchema,
+            system: Inkling2MiniAdapter.briefingSystem,
+            now: now
+        )
+        guard let value = generation.value?.objectValue else { return nil }
+        var pieces: [String] = []
+        if let headline = value["headline"]?.stringValue, !headline.isEmpty {
+            pieces.append("【\(String(headline.prefix(60)))】")
+        }
+        if let summary = value["summary"]?.stringValue, !summary.isEmpty {
+            pieces.append(String(summary.prefix(240)))
+        }
+        if let notes = value["anomaly_notes"]?.stringValue, !notes.isEmpty {
+            pieces.append("归因：\(String(notes.prefix(200)))")
+        }
+        for row in (value["priorities"]?.arrayValue ?? []).prefix(5) {
+            guard let text = row.stringValue, !text.isEmpty else { continue }
+            pieces.append("· \(String(text.prefix(80)))")
+        }
+        guard !pieces.isEmpty else { return nil }
+        pieces.append("————")
+        pieces.append(facts)
+        return (String(pieces.joined(separator: "\n").prefix(1_750)), generation.runtime)
+    }
 
     private func ensureHandlers() async {
         guard !handlersInstalled else { return }
