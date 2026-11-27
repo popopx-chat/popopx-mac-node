@@ -35,7 +35,7 @@ VOL_NAME="POPOPX Mac Node"
 UNIVERSAL_DMG_BASENAME="POPOPX-Mac-Node-Universal"
 MIN_MACOS="14.0"
 DEFAULT_VERSION="1.0.2"
-DEFAULT_BUILD="3"                            # CFBundleVersion 的仓库默认值；发新版本时与 DEFAULT_VERSION 一起递增
+DEFAULT_BUILD="4"                            # CFBundleVersion 的仓库默认值；发新版本时与 DEFAULT_VERSION 一起递增
 CONSOLE_URL="http://127.0.0.1:18920"
 
 # ---------------------------------------------------------------------------
